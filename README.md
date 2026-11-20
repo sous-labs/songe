@@ -8,19 +8,24 @@ Use your model as usual through opencode, pi or any OpenAI-compatible tool. When
 
 ## Install
 
-macOS with Homebrew:
+With [uv](https://docs.astral.sh/uv/) or [pipx](https://pipx.pypa.io/) (Python 3.11 or later):
 
 ```sh
-brew install sous-labs/tap/songe
+uv tool install songe      # or: pipx install songe
 songe init
 ```
 
-Or with pip (Python 3.11 or later; with Homebrew's Python use `pipx install songe`):
+macOS with Homebrew (newer Homebrew asks you to trust a tap once):
 
 ```sh
-pip install songe
+brew tap sous-labs/tap
+brew trust sous-labs/tap
+brew install songe
 songe init
 ```
+
+Plain `pip install songe` works inside a virtual environment; outside one,
+Homebrew's and most Linux distributions' Python refuse it.
 
 `songe init` finds your model server and your agents, shows what it will change, and asks once. Then pick a `songe/…` model in your agent. In opencode, a local default model switches over automatically.
 
