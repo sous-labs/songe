@@ -969,8 +969,10 @@ def test_foreground_traffic_cancels_a_running_review(monkeypatch):
         last_traffic = 0.0
         traffic_revision = 0
         installation_store = None
-        installation_config = SimpleNamespace(upstream_url="http://x")
+        installation_config = SimpleNamespace(upstream_url="http://x", server_source_url="")
+        upstream = None
         platform = SimpleNamespace(memory=lambda: SimpleNamespace(pressure="normal"))
+        serving_endpoint = ModelScheduler.serving_endpoint
 
         async def review_model(self):
             return "m"
@@ -999,3 +1001,46 @@ def test_models_resolve_by_the_name_songe_models_shows(config, store):
     assert row["id"] == "lmstudio-community/Qwen3.5-0.8B-MLX-4bit"
     registry.register(config, store, "other/Qwen3.5-0.8B-Q4_K_M.gguf")
     assert registry.find(store, "Qwen3.5-0.8B") is None  # ambiguous
+
+
+def test_dream_calls_go_where_the_proxy_sends_the_version(config, store):
+    # #27: reading, review and Quick Dream examples used upstream_url, the
+    # Songe-owned server, which runs only while Songe needs it.
+    config.upstream = "llamacpp"
+    config.upstream_url = "http://127.0.0.1:41001/v1"  # owned
+    config.server_source_url = "http://127.0.0.1:8080/v1"  # the user's
+    routed = {"id": "night-2", "identifier": "songe/x/night-2"}
+    upstream = SimpleNamespace(
+        routes={"songe/x/night-2": {"url": "http://127.0.0.1:41001/v1", "model": "lora-2"}},
+        request_url=lambda v: "http://127.0.0.1:41001/v1",
+        request_model=lambda v: "lora-2",
+    )
+    scheduler = ModelScheduler(config, store, upstream)
+    base = {"id": "base", "identifier": "/models/x.gguf"}
+    assert scheduler.serving_endpoint(base, "/models/x.gguf") == (
+        "http://127.0.0.1:8080/v1",
+        "/models/x.gguf",
+    )
+    assert scheduler.serving_endpoint(None, "x") == ("http://127.0.0.1:8080/v1", "x")
+    assert scheduler.serving_endpoint(routed, "songe/x/night-2") == (
+        "http://127.0.0.1:41001/v1",
+        "lora-2",
+    )
+    # A learned version not routed yet (after a restart) is on the owned server.
+    learned = {"id": "night-3", "identifier": "songe/x/night-3"}
+    assert scheduler.serving_endpoint(learned, "songe/x/night-3")[0] == (
+        "http://127.0.0.1:41001/v1"
+    )
+
+
+async def test_reader_reads_the_base_from_the_users_server(learners):
+    config, store = learners
+    config.upstream = "llamacpp"
+    config.upstream_url = "http://127.0.0.1:41001/v1"
+    config.server_source_url = "http://127.0.0.1:8080/v1"
+    scheduler = ModelScheduler(config, store, SimpleNamespace())
+    reader = await scheduler.reader_for("first")
+    try:
+        assert reader.url == "http://127.0.0.1:8080/v1"
+    finally:
+        await reader.close()

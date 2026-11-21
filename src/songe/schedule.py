@@ -2195,6 +2195,24 @@ class ModelScheduler(Scheduler):
                 config.save(self.root)
                 registry.ensure_base(self.installation_store, row["id"], ref)
 
+    def serving_endpoint(self, version, identifier):
+        """URL and model name for Songe's own calls to a learner's model, the
+        way the proxy sends an agent's request (#27). A routed version goes
+        where its route says. The base is served by the user's own server,
+        which is always up; the owned server runs only while Songe needs it.
+        A learned version without a route yet is on the owned server."""
+        upstream = self.upstream
+        if (
+            version
+            and version.get("identifier") in (getattr(upstream, "routes", None) or {})
+            and hasattr(upstream, "request_url")
+        ):
+            return upstream.request_url(version), upstream.request_model(version)
+        config = self.installation_config
+        if version and not (version["id"] == "base" or version["id"].startswith("base-")):
+            return config.upstream_url, identifier
+        return config.server_source_url or config.upstream_url, identifier
+
     async def review_model(self):
         """A model already loaded on the server; reviewing never loads one."""
         from .models import registry
@@ -2239,10 +2257,11 @@ class ModelScheduler(Scheduler):
             from .review import review
 
             traffic = self.last_traffic
+            url, model = self.serving_endpoint(None, model)
             self.review_task = asyncio.create_task(
                 review(
                     self.installation_store,
-                    self.installation_config.upstream_url,
+                    url,
                     model,
                     still_idle=lambda: (
                         self.last_traffic == traffic
@@ -2347,10 +2366,11 @@ class ModelScheduler(Scheduler):
                         await self.quick_dream(row["id"])
                     continue
                 traffic = self.last_traffic
+                url, served = self.serving_endpoint(version, identifier)
                 reader = Reader(
                     learner,
-                    self.installation_config.upstream_url,
-                    identifier,
+                    url,
+                    served,
                     server=self.installation_config.upstream,
                     still_idle=lambda traffic=traffic: (
                         self.last_traffic == traffic
@@ -2498,10 +2518,11 @@ class ModelScheduler(Scheduler):
         if loaded is not None and identifier not in loaded:
             return None
         traffic = self.last_traffic
+        url, served = self.serving_endpoint(version, identifier)
         return Reader(
             learner,
-            self.installation_config.upstream_url,
-            identifier,
+            url,
+            served,
             server=self.installation_config.upstream,
             still_idle=lambda: (
                 self.last_traffic == traffic
@@ -2614,11 +2635,11 @@ class ModelScheduler(Scheduler):
                 if not found:
                     logger.info("quick_example_no_moment %s: %s", model, text[:80])
                     continue
-                url, server = self.installation_config.upstream_url, self.installation_config.upstream
+                (url, served), server = self.serving_endpoint(version, identifier), self.installation_config.upstream
                 before, after, differs = await quick.compare(
-                    client, url, identifier, found["request"], before_block, after_block, server=server,
+                    client, url, served, found["request"], before_block, after_block, server=server,
                 )
-                verdict = await quick.judge(client, url, identifier, text, before, after, server=server) if differs else None
+                verdict = await quick.judge(client, url, served, text, before, after, server=server) if differs else None
                 changed = differs and verdict == "after"
                 shown += changed
                 logger.info("quick_example %s: differs=%s verdict=%s %s", model, differs, verdict, text[:60])
