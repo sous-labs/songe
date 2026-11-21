@@ -276,3 +276,17 @@ def test_legacy_timestamps_and_invalid_tool_calls_remain_readable(tmp_path):
     assert summary["conversations"] == 1
     assert summary["sources"][0]["first_line"] == "Check pytest"
     assert path.read_bytes() == before
+
+
+def test_summary_follows_a_write_in_the_same_file_time_tick(store):
+    # Linux file times tick every few milliseconds, so a write right after a
+    # refresh can leave them unchanged (#11). Pin them to show it.
+    import os
+
+    files = [store.path, store.path.with_name(store.path.name + "-wal")]
+    assert summaries(store, [model()], [], [])["first"]["conversations"] == 0
+    times = [os.stat(f) for f in files]
+    experience(store)
+    for file, stat in zip(files, times, strict=True):
+        os.utime(file, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    assert summaries(store, [model()], [], [])["first"]["conversations"] > 0

@@ -8,6 +8,7 @@ from collections import Counter
 from datetime import datetime
 from itertools import chain
 
+from .log import change_mark
 from .steps import digest, tool_outcome, user_signal
 
 COMMANDS = frozenset(
@@ -162,10 +163,12 @@ def summaries(store, models, nights, scoreboard):
     changes when the database does, so it is reused until a write."""
     if not models:
         return {}
-    files = [store.path, store.path.with_name(store.path.name + "-wal")]
+    mark = change_mark(store.path)
+    if mark is None:  # No database yet; nothing to reuse.
+        return _summaries(store, models, nights, scoreboard)
     key = (
         str(store.path),
-        tuple(f.stat().st_mtime_ns if f.exists() else 0 for f in files),
+        mark,
         json.dumps([models, nights, scoreboard], sort_keys=True, default=str),
     )
     if key in _MEMO:
