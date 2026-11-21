@@ -663,6 +663,7 @@ def api_routes(config, store, scheduler=None, *, release=None):
                 "model",
                 "auto_dream",
                 "remove_lesson",
+                "undo_quick",
                 "cancel",
                 "seen",
             }:
@@ -735,7 +736,17 @@ def api_routes(config, store, scheduler=None, *, release=None):
                     await asyncio.to_thread(
                         quick.remove, model_scope(store, model), payload.get("id")
                     )
-                    return JSONResponse({"ok": True, "message": "Lesson removed"})
+                    return JSONResponse({"ok": True, "message": "Preference removed · new sessions no longer get it"})
+                elif action == "undo_quick":
+                    # Undo a Quick Dream: what it added leaves the prompt.
+                    from . import quick
+                    from .models.registry import resolve
+
+                    model = resolve(store, payload.get("model"))
+                    gone = await asyncio.to_thread(
+                        quick.undo, model_scope(store, model), payload.get("id")
+                    )
+                    return JSONResponse({"ok": True, "message": f"Quick Dream undone · {gone} preference{'s' if gone != 1 else ''} removed from new sessions"})
                 elif action == "auto_dream":
                     # A Dream already under way finishes either way.
                     from .models.library import materialize

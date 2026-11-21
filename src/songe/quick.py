@@ -467,6 +467,29 @@ def remove(store, lesson_id):
     )
 
 
+def undo(store, entry_id):
+    """Undo a Quick Dream: the preferences it added that are still in the
+    prompt leave it (as removed: they do not come back), and its history
+    entry says so. Returns how many left."""
+    history = store.get(HISTORY) or []
+    entry = next((e for e in history if e["id"] == entry_id), None)
+    if entry is None:
+        raise ValueError("Unknown Quick Dream")
+    added = {normal(t) for t in entry.get("added") or []}
+    current = state(store)
+    gone = [lesson for lesson in current["lessons"] if normal(lesson["text"]) in added]
+    if gone:
+        store.set(KEY, current | {
+            "lessons": [lesson for lesson in current["lessons"] if lesson not in gone],
+            "removed": current["removed"] + [lesson["text"] for lesson in gone],
+            "version": current["version"] + 1,
+            "updated_at": time.time(),
+        })
+    entry["undone"] = time.time()
+    store.set(HISTORY, history)
+    return len(gone)
+
+
 def absorb(store, trained_signals):
     """An adopted Deep Dream trained these signals: their lessons leave the
     prompt (they are in the weights now). They are not 'removed': a later

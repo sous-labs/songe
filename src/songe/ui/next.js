@@ -326,13 +326,16 @@ function deepReport(c, current, done) {
 // card in place with everything in the prompt now (no side panel).
 const expanded = new Set();   // 'quick:<dream id>' and 'now:<model id>' shown open
 function toggle(key) { expanded.has(key) ? expanded.delete(key) : expanded.add(key); render(); }
-function preferenceList(lessons) {
+// The preferences in the prompt; each can be removed (it does not come back).
+function preferenceList(lessons, model) {
   return lessons.length
     ? el('ul', {class: 'lesson-list'}, lessons.map(l => el('li', {}, el('span', {class: 'text'}, l.text),
-      l.count > 1 ? el('span', {class: 'muted count'}, `×${l.count}`) : null)))
+      l.count > 1 ? el('span', {class: 'muted count'}, `×${l.count}`) : null,
+      model ? el('button', {type: 'button', class: 'text-action remove-lesson', title: W.remove_lesson_title,
+        onclick: () => { if (window.confirm(W.remove_lesson_confirm)) control('remove_lesson', {model, id: l.id}); }}, W.remove_lesson) : null)))
     : el('p', {class: 'empty'}, W.preferences_empty);
 }
-function quickReport(entry, {card = false, done = null, lessons = []} = {}) {
+function quickReport(entry, {card = false, done = null, lessons = [], model = null} = {}) {
   const added = entry.changes?.added || [];
   const key = `quick:${entry.id}`, open = expanded.has(key);
   return el('div', {class: `report quick${card ? ' card' : ''}`},
@@ -345,8 +348,12 @@ function quickReport(entry, {card = false, done = null, lessons = []} = {}) {
     added.length ? el('ul', {class: 'changes'}, added.map(t => el('li', {class: 'added'},
       el('span', {class: 'sign'}, '+'), el('span', {class: 'text'}, t,
         quickExample(entry, t))))) : null,
-    open ? el('div', {class: 'all-preferences'}, el('h4', {class: 'section-title'}, W.preferences_title), preferenceList(lessons)) : null,
+    open ? el('div', {class: 'all-preferences'}, el('h4', {class: 'section-title'}, W.preferences_title), preferenceList(lessons, model)) : null,
+    entry.undone ? el('p', {class: 'muted'}, fill(W.quick_undone, {when: when(entry.undone)})) : null,
     el('p', {class: 'report-actions'},
+      // Undo what this Quick Dream added (the preferences leave new sessions).
+      model && added.length && !entry.undone ? el('button', {type: 'button', class: 'text-action undo-quick',
+        onclick: () => { if (window.confirm(W.undo_quick_confirm)) control('undo_quick', {model, id: entry.id}); }}, W.undo_quick) : null,
       el('button', {type: 'button', class: 'text-action', 'aria-expanded': String(open), onclick: () => toggle(key)},
         open ? W.view_less : W.view_all),
       done ? el('button', {type: 'button', class: 'done', onclick: done}, W.done) : null));
@@ -383,7 +390,7 @@ function dreamRow(id, dreams, chosen) {
 // The report of a Dream from the row: Deep reports load once in full.
 function rowReport(id, ml, d) {
   const current = ml.versions?.find(v => v.current);
-  if (d.kind === 'quick') return quickReport(d, {lessons: ml.lessons || []});
+  if (d.kind === 'quick') return quickReport(d, {lessons: ml.lessons || [], model: id});
   const c = d.id === ml.last?.id ? ml.last : dreamRecords.get(d.id);
   if (!c) { loadDream(d.id); return el('p', {class: 'empty'}, W.loading_report); }
   // An older Dream's version: "Adopted v1", not "Now using v1", once v2 runs.
@@ -426,7 +433,7 @@ function nowLine(id, ml) {
   waitingList.addEventListener('toggle', () => { waitingOpen = waitingList.open; });
   return el('div', {class: 'learned'}, line,
     el('section', {}, el('h4', {class: 'section-title'}, `${W.preferences_title} (${(ml?.lessons || []).length})`),
-      el('p', {class: 'muted'}, W.preferences_about), preferenceList(ml?.lessons || [])),
+      el('p', {class: 'muted'}, W.preferences_about), preferenceList(ml?.lessons || [], id)),
     el('section', {}, waitingList));
 }
 let waitingOpen = false;      // the waiting list is expanded
@@ -650,7 +657,7 @@ function modelView(id, ml, inv, paused = false) {
     // Dream's report, what it knows now.
     const card = latest && !latest.seen && latest.kind === 'quick';
     if (card) {
-      node.append(quickReport(latest, {card: true, done: seen(latest), lessons: ml.lessons || []}));
+      node.append(quickReport(latest, {card: true, done: seen(latest), lessons: ml.lessons || [], model: id}));
     }
     // While the new Quick Dream is the card on top, the row opens on the
     // Dream before it, so its report is not shown twice.
@@ -660,9 +667,7 @@ function modelView(id, ml, inv, paused = false) {
       el('section', {class: 'chosen-report'}, rowReport(id, ml, chosen)),
       nowLine(id, ml));
   }
-  if (ml?.versions?.length > 1) node.append(el('p', {class: 'versions'}, 'Versions · ', ml.versions.map((v, i) => [i ? ' · ' : '',
-    v.current ? el('b', {}, `${v.label} in use`)
-      : el('button', {type: 'button', class: 'restore', onclick: () => control('undo', {model: id, version: v.id})}, fill(W.restore, {version: v.label}))])));
+  if (!unsupported && ml?.versions?.length) node.append(versionsView(id, ml.versions));
   return node;
 }
 
@@ -737,6 +742,23 @@ function quickRunning(q) {
     q.found?.length ? el('ul', {class: 'quick-found'}, q.found.slice().reverse().map(f => el('li', {},
       el('span', {class: 'found-kind'}, W.found_kind[f.type] || f.type),
       el('span', {class: 'found-text'}, f.text)))) : null);
+}
+
+// Versions: the one in use and the ones to go back to (rollback). Before any
+// Deep Dream is used there is only the original; say where versions come from.
+function versionsView(id, versions) {
+  const list = versions.slice().reverse();  // newest first
+  return el('section', {class: 'versions'},
+    el('h3', {class: 'section-title'}, W.versions_title),
+    list.length < 2 ? el('p', {class: 'muted'}, W.versions_only_original) : null,
+    el('ul', {class: 'version-list'}, list.map(v => el('li', {},
+      el('span', {class: 'version-label'}, v.label),
+      v.created_at && v.kind !== 'base' ? el('span', {class: 'muted'}, ` · ${when(v.created_at)}`) : null,
+      v.current ? el('span', {class: 'good'}, ` · ${W.version_in_use}`)
+        : ' · ',
+      v.current ? null : el('button', {type: 'button', class: 'text-action restore',
+            onclick: () => { if (window.confirm(fill(W.restore_confirm, {version: v.label}))) control('undo', {model: id, version: v.id}); }},
+          fill(W.restore, {version: v.label}))))));
 }
 
 // ---- the model list in the rail ----

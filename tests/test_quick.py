@@ -149,7 +149,7 @@ async def test_controls_remove_a_lesson_and_check_the_dream_kind(config, store):
     app = create_app(config, store, scheduler=SimpleNamespace(dream=dream, active_model=None))
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost") as client:
         removed = await client.post("/api/control", json={"action": "remove_lesson", "id": lesson["id"]})
-        assert removed.json() == {"ok": True, "message": "Lesson removed"}
+        assert removed.json() == {"ok": True, "message": "Preference removed · new sessions no longer get it"}
         assert (await client.post("/api/control", json={"action": "dream", "kind": "quick"})).json()["kind"] == "quick"
         assert (await client.post("/api/control", json={"action": "dream", "kind": "nap"})).status_code == 400
         state = (await client.get("/api/state")).json()
@@ -736,3 +736,36 @@ def test_a_deep_dream_example_shows_only_if_the_action_differs():
     cut["after"]["tool_calls"] = [{"name": "read", "arguments": {"path": "README.md"}}]
     # Prose only, or one side's call cut off mid-way: not shown.
     assert [e["id"] for e in shown_examples([same, prose, real, cut])] == ["3"]
+
+
+def test_undoing_a_quick_dream_removes_what_it_added_for_good(config, store):
+    """Users can undo a Quick Dream: the preferences it added leave new
+    sessions and are not added again."""
+    add_signal(store, "c1", "Always use Conventional Commits for commit messages.", revision=1)
+    entry = quick.record(store, quick.quick_dream(store, config), at=10.0)
+    assert [lesson["text"] for lesson in quick.active(store)] == ["Always use Conventional Commits for commit messages."]
+    assert quick.undo(store, entry["id"]) == 1
+    assert quick.active(store) == []
+    assert store.get(quick.HISTORY)[0]["undone"]
+    # The next Quick Dream does not bring it back.
+    quick.quick_dream(store, config)
+    assert quick.active(store) == []
+    import pytest
+    with pytest.raises(ValueError):
+        quick.undo(store, "q-9999")
+
+
+async def test_the_undo_quick_control(config, store):
+    from types import SimpleNamespace
+
+    import httpx
+
+    from songe.proxy import create_app
+
+    add_signal(store, "c1", "Always use Conventional Commits for commit messages.")
+    entry = quick.record(store, quick.quick_dream(store, config), at=10.0)
+    app = create_app(config, store, scheduler=SimpleNamespace(active_model=None))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost") as client:
+        reply = (await client.post("/api/control", json={"action": "undo_quick", "id": entry["id"]})).json()
+    assert reply["ok"] and reply["message"].startswith("Quick Dream undone · 1 preference removed")
+    assert quick.active(store) == []

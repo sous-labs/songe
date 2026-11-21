@@ -647,7 +647,7 @@ def dreams(store, limit=DREAMS):
             "lessons": entry["lessons"],
             "changes": {k: entry.get(k) or [] for k in ("added", "reworded", "dropped")},
             "examples": entry.get("examples") or [],
-            **{k: entry[k] for k in ("read", "found", "error") if k in entry},
+            **{k: entry[k] for k in ("read", "found", "error", "undone") if k in entry},
         })
     out.sort(key=lambda d: d["at"] or 0, reverse=True)
     # Back-to-back Quick Dreams that changed nothing are one chip, the
