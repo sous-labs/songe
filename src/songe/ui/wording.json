@@ -318,6 +318,8 @@
   "measure_fits": "Fits: {sizes} tokens",
   "measure_longer": "now testing longer readings (the teacher sees more of the conversation) · {done} of {total} tokens",
   "measure_limit": "limit found at {limit} tokens",
+  "gpu_line": "{busy}% busy · {memory} in use",
+  "gpu_busy": "{busy}% busy",
   "quick_checked": "Quick Dream checked {when}: nothing new",
   "quick_example_where": "On the conversation it came from",
   "quick_example_asked": "When you asked “{asked}”",

@@ -281,6 +281,8 @@ def snapshot(config, store, scheduler=None, *, live=False, release=None, lean=Fa
         "paused": paused,
         "reason": terse(reason),
         "activity": status,
+        # While a Dream trains or measures: how busy the GPU is (one line).
+        "gpu": gpu_line(scheduler) if live else None,
         "restoring": restoring(store),
         "slice": active_slice,
         "data_progress": training["data_progress"]
@@ -312,6 +314,14 @@ def dream_activity(store, scheduler):
             "calibration": store.scoped(measuring).get("calibration_progress"),
         }
     return activity
+
+
+def gpu_line(scheduler):
+    if not (scheduler and getattr(scheduler, "process", None)):
+        return None
+    from .platform.common import gpu_usage
+
+    return gpu_usage()
 
 
 def cycle_section(config, store, models, scheduler=None):

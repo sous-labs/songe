@@ -814,6 +814,11 @@ function render() {
   $('now').textContent = now;
   $('next').textContent = next;
   $('paused').textContent = status?.paused ? 'Yes' : 'No';
+  // One line while a Dream trains or measures: how busy the GPU is.
+  const gpu = status?.gpu;
+  $('gpu-line').hidden = !gpu;
+  if (gpu) $('gpu').textContent = fill(gpu.memory != null ? W.gpu_line : W.gpu_busy,
+    {busy: gpu.busy, memory: `${(gpu.memory / 2 ** 30).toFixed(1)} GB`});
   $('nav').replaceChildren(all.length ? railNav(shown, models, inventory, active, rest) : '');
   $('models').replaceChildren(active ? modelView(active, models[active], inventory[active], Boolean(status?.paused)) : el('p', {class: 'empty'}, 'No models yet'));
 }

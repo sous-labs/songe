@@ -123,3 +123,42 @@ def discrete_accelerators():
         except (OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
             raise OSError("AMD memory telemetry unavailable") from exc
     return devices
+
+
+_GPU = {"at": 0.0, "value": None}
+
+
+def gpu_usage(max_age=3.0):
+    """How busy the GPU is and how much memory it holds, for the dashboard:
+    {"busy": percent, "memory": bytes} or None when unknown. macOS reads the
+    IOAccelerator's own figures (no admin rights); NVIDIA asks nvidia-smi.
+    Cached for a few seconds: the page asks every second or two."""
+    import re
+    import sys
+    import time
+
+    now = time.monotonic()
+    if now - _GPU["at"] < max_age:
+        return _GPU["value"]
+    value = None
+    try:
+        if sys.platform == "darwin":
+            text = subprocess.check_output(
+                ["ioreg", "-r", "-d", "1", "-w", "0", "-c", "IOAccelerator"],
+                timeout=2, stderr=subprocess.DEVNULL,
+            ).decode(errors="replace")
+            busy = re.search(r'"Device Utilization %"=(\d+)', text)
+            used = re.search(r'"In use system memory"=(\d+)', text)
+            if busy:
+                value = {"busy": int(busy.group(1)), "memory": int(used.group(1)) if used else None}
+        elif shutil.which("nvidia-smi"):
+            row = subprocess.check_output(
+                ["nvidia-smi", "--query-gpu=utilization.gpu,memory.used", "--format=csv,noheader,nounits"],
+                timeout=3, stderr=subprocess.DEVNULL,
+            ).decode().splitlines()[0]
+            busy, used = (int(x.strip()) for x in row.split(",")[:2])
+            value = {"busy": busy, "memory": used * 1024**2}
+    except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+        value = None
+    _GPU.update(at=now, value=value)
+    return value

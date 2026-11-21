@@ -376,3 +376,23 @@ def test_a_model_the_server_lists_but_songe_never_registered_has_no_record(confi
     assert "chat" in out and out["chat"] is not None
     assert "text-embedding-nomic-embed-text-v1.5" not in out
     assert "cycle_record_failed" not in caplog.text
+
+
+def test_gpu_line_reads_mac_and_nvidia_and_only_while_a_dream_runs(monkeypatch):
+    import subprocess
+    import sys
+    from types import SimpleNamespace
+
+    from songe.api import gpu_line
+    from songe.platform import common
+
+    common._GPU.update(at=0.0, value=None)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(subprocess, "check_output", lambda *a, **k: b'"Device Utilization %"=72 "In use system memory"=10522669875')
+    assert common.gpu_usage(max_age=0) == {"busy": 72, "memory": 10522669875}
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(common.shutil, "which", lambda name: "/usr/bin/nvidia-smi")
+    monkeypatch.setattr(subprocess, "check_output", lambda *a, **k: b"45, 9800\n")
+    assert common.gpu_usage(max_age=0) == {"busy": 45, "memory": 9800 * 1024**2}
+    # Nothing running: no line.
+    assert gpu_line(SimpleNamespace(process=None)) is None
