@@ -38,6 +38,24 @@ class LlamaCPP:
         source = getattr(self.config, "server_source_url", "")
         return discovery.llamacpp(source or self.url, self.transport)
 
+    async def served_contexts(self):
+        """Context the user's llama-server runs each model with (its -c), from
+        /v1/models "meta". Older builds without it leave the fallback."""
+        url = (getattr(self.config, "server_source_url", "") or self.url).rstrip("/")
+        if not url.endswith("/v1"):
+            url += "/v1"
+        async with httpx.AsyncClient(
+            transport=self.transport, timeout=self.timeout, trust_env=False
+        ) as client:
+            response = await client.get(url + "/models")
+            response.raise_for_status()
+            models = response.json().get("data", [])
+        return {
+            m["id"]: int(m["meta"]["n_ctx"])
+            for m in models
+            if isinstance(m.get("meta"), dict) and m["meta"].get("n_ctx")
+        }
+
     async def _request(self, method, path, **kwargs):
         async with httpx.AsyncClient(
             transport=self.transport, timeout=self.timeout, trust_env=False

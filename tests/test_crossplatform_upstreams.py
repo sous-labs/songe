@@ -293,6 +293,34 @@ async def test_llamacpp_scale_switch_base_restart_and_real_parking(tmp_path):
     await upstream.close()
 
 
+async def test_llamacpp_reports_the_context_the_users_server_runs_with():
+    # Agents are told this limit; the 8192 fallback made opencode compact on
+    # every turn against a llama-server started with -c 16384.
+    def handler(request):
+        if request.url.host != "user":
+            raise httpx.ConnectError("owned server is down", request=request)
+        assert request.url.path == "/v1/models"
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {"id": "/models/qwen.gguf", "meta": {"n_ctx": 16384}},
+                    {"id": "older-build"},
+                ]
+            },
+        )
+
+    upstream = LlamaCPP(
+        SimpleNamespace(
+            upstream="llamacpp",
+            upstream_url="http://owned/v1",
+            server_source_url="http://user/v1",
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+    assert await upstream.served_contexts() == {"/models/qwen.gguf": 16384}
+
+
 async def test_llamacpp_unregistered_adapter_and_missing_supervisor_fail_closed(
     tmp_path,
 ):
