@@ -141,5 +141,5 @@ Production bar:
 - Tests (pytest): proxy against a fake upstream (streaming, tools, errors, disconnects); conversation linking and hindsight extraction on realistic opencode and pi traffic shapes; config writers on a temp HOME (never touch the real user's files in tests); scheduler conditions with mocked probes; gate logic; UI data contract. One **end-to-end test on this machine** with the smallest local MLX model (`qwen3.5-0.8b-mlx` or `lfm3-1.7b-mlx` in LM Studio's folder): synthetic logged conversations with hindsight → select → distill (one selected pass) → gate → fuse → `lms load` → request through the proxy returns from the new version → `undo`.
 - README: what it is, install, what it changes on your machine, how to remove it.
 
-## 9. Non-goals for v1
-Cloud anything; Ollama; Windows/Linux/CUDA (keep the training backend behind an interface so a PyTorch/PEFT backend can be added); RL; executing tools at night; multi-device sync; a chat UI.
+## 9. Non-goals
+Cloud anything (accounts, telemetry, cloud training); running the user's tools or touching their files (practice runs only in an isolated sandbox); multi-device sync; a chat UI. Ollama, Linux and CUDA, once non-goals for v1, are supported; reinforcement learning is planned (see ROADMAP.md).
