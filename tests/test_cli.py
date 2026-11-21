@@ -325,6 +325,43 @@ def test_a_setting_from_a_newer_version_does_not_stop_every_command(tmp_path):
     assert Config.load(tmp_path).port == Config().port
 
 
+def test_init_without_a_service_manager_connects_agents(tmp_path, config, monkeypatch, capsys):
+    """Linux without a systemd user manager (#12): no unit file, no wait for
+    a service that cannot start; agents are connected and the user is told
+    to run songe serve."""
+    import json as _json
+    from types import SimpleNamespace
+
+    from songe import agents, cli, launchd, platform
+    from songe.platform.services import Systemd
+
+    def run(argv, **kw):
+        raise FileNotFoundError(2, "No such file or directory", "systemctl")
+
+    unit = tmp_path / "systemd/user/songe.service"
+    monkeypatch.setattr(
+        platform, "current", lambda: SimpleNamespace(service=lambda: Systemd(unit, run=run))
+    )
+    def install(*args, **kwargs):
+        raise AssertionError("no service manager to install into")
+
+    monkeypatch.setattr(launchd, "install", install)
+    monkeypatch.setattr(agents.Path, "home", lambda: tmp_path)
+    path = tmp_path / ".config/opencode/opencode.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(_json.dumps({"provider": {}}), encoding="utf-8")
+    root = tmp_path / "data"
+    root.mkdir()
+    config.public_model = "songe/granite"
+    changes = agents.proposed(config, root=root)
+    args = SimpleNamespace(launchd_target=None, make_default=False, keep_default=False)
+    assert cli.service_fact(args) == "none · start it with songe serve"
+    cli.finish_initialization(config, args, root, changes)
+    assert "songe" in _json.dumps(_json.loads(path.read_text(encoding="utf-8"))["provider"])
+    assert "start Songe · no service manager here" in capsys.readouterr().out
+    assert not unit.exists()
+
+
 def test_init_applies_the_reviewed_change_after_the_new_service_edits_opencode(tmp_path, config, monkeypatch):
     """Live (first real install): init started the service, the service
     updated opencode.json (context lengths), and init stopped with "Agent

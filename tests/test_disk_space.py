@@ -271,7 +271,10 @@ def test_init_explicit_model_never_converts_or_calibrates(volumes, monkeypatch):
     from songe.upstream import lmstudio
 
     _, _, _, store, config = volumes
-    hardware = SimpleNamespace(accelerators=lambda: [Accel("cuda", "fake")])
+    hardware = SimpleNamespace(
+        accelerators=lambda: [Accel("cuda", "fake")],
+        service=lambda: SimpleNamespace(available=lambda: True),
+    )
     monkeypatch.setattr(platform, "current", lambda: hardware)
     monkeypatch.setattr(cli, "detect_agent_binding", lambda: ("", ""))
     monkeypatch.setattr(lmstudio, "find_lms", lambda: "fake-lms")

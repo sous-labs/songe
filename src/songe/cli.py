@@ -122,6 +122,20 @@ def confirm_install(config, args):
     return True
 
 
+def service_manager(args):
+    """Whether init can install the background service. Linux without a
+    systemd user manager (containers, WSL without systemd) cannot."""
+    if getattr(args, "launchd_target", None) is not None:
+        return True
+    from .platform import current
+
+    return current().service().available()
+
+
+def service_fact(args):
+    return "starts at login" if service_manager(args) else f"none · start it with {NAME} serve"
+
+
 def detect_agent_binding(home=None):
     home = home or Path.home()
     opencode = (
@@ -331,7 +345,7 @@ def initialize(args, root):
                             ", ".join(str(path) for path, *_ in changes) or "none",
                         ),
                         ("Data", str(root)),
-                        ("Service", "starts at login"),
+                        ("Service", service_fact(args)),
                         ("Replace", "loaded copy when a better version is ready"),
                     ]
                 )
@@ -510,7 +524,7 @@ def initialize(args, root):
         else:
             how = "choose one with " + ("/models" if agent == "opencode" else "/model")
         rows.append(("Agent", f"{agent} → Songe models · {how}"))
-    rows += [("Data", str(root)), ("Service", "starts at login")]
+    rows += [("Data", str(root)), ("Service", service_fact(args))]
     if not can_train:
         rows.append(("Learning", "records only · no GPU for training"))
     else:
@@ -659,23 +673,25 @@ def finish_initialization(config, args, root, changes, repropose=None):
 
     # A reinstall after `songe uninstall` (which pauses) learns again.
     Store(private_dir(root)).set("paused", False)
-    with step("Starting service", "Service running · starts at login"):
-        launchd.install(
-            config, root, args.launchd_target, activate=args.launchd_target is None
-        )
-        if args.launchd_target is None:
-            deadline = time.monotonic() + config.upstream_timeout
-            while True:
-                if LocalClient(root, config).snapshot()["service_running"]:
-                    break
-                if time.monotonic() >= deadline:
-                    # Do not leave a service that restarts every ten seconds.
-                    launchd.remove(None, activate=True, root=root)
-                    raise RuntimeError(
-                        f"Service did not start · is port {config.port} in use? "
-                        f"· agent settings unchanged · see {root / 'songe.log'}"
-                    )
-                time.sleep(config.guard_max_interval)
+    managed = service_manager(args)
+    if managed:
+        with step("Starting service", "Service running · starts at login"):
+            launchd.install(
+                config, root, args.launchd_target, activate=args.launchd_target is None
+            )
+            if args.launchd_target is None:
+                deadline = time.monotonic() + config.upstream_timeout
+                while True:
+                    if LocalClient(root, config).snapshot()["service_running"]:
+                        break
+                    if time.monotonic() >= deadline:
+                        # Do not leave a service that restarts every ten seconds.
+                        launchd.remove(None, activate=True, root=root)
+                        raise RuntimeError(
+                            f"Service did not start · is port {config.port} in use? "
+                            f"· agent settings unchanged · see {root / 'songe.log'}"
+                        )
+                    time.sleep(config.guard_max_interval)
     # The newly started service writes agent settings itself (its own
     # entries, context lengths), so a reviewed file may have changed since
     # (live: "Agent configuration changed since review" right after "Service
@@ -707,7 +723,8 @@ def finish_initialization(config, args, root, changes, repropose=None):
     console().print()
     console().print("Use your agent as usual · learning starts when idle")
     facts(
-        [
+        ([] if managed else [(f"{NAME} serve", "start Songe · no service manager here")])
+        + [
             (f"{NAME} open", "dashboard"),
             (f"{NAME} status", "what it is doing"),
             (f"{NAME} pause", "stop learning"),

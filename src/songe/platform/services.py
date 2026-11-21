@@ -16,6 +16,11 @@ LABEL = f"ai.souslabs.{NAME}"
 
 
 class OwnedService:
+    def available(self):
+        """Whether the service manager can be reached (launchd and Task
+        Scheduler always can)."""
+        return True
+
     def check_owner(self, expected):
         if not self.target.exists():
             return
@@ -171,6 +176,21 @@ class Systemd(OwnedService):
         lines += ["Restart=on-failure", "[Install]", "WantedBy=default.target", ""]
         atomic_write(self.target, "\n".join(lines).encode())
 
+    def available(self):
+        # Containers, WSL without systemd and other init systems have no user
+        # manager; systemctl is then missing or cannot reach it.
+        if not self.activate:
+            return True
+        try:
+            return (
+                self.run(
+                    ["systemctl", "--user", "show-environment"], capture_output=True
+                ).returncode
+                == 0
+            )
+        except OSError:
+            return False
+
     def install(self, argv, env):
         self.write_definition(argv, env)
         if self.activate:
@@ -226,6 +246,10 @@ class Systemd(OwnedService):
         return argv, env
 
     def uninstall(self):
+        if self.activate and not self.available():
+            # Nothing to stop; a unit file from an earlier try still goes.
+            self.target.unlink(missing_ok=True)
+            return
         if self.activate and self.target.exists():
             self.run(
                 ["systemctl", "--user", "disable", "--now", self.target.name],

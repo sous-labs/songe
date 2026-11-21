@@ -191,6 +191,26 @@ def test_service_activation_uses_user_scope(tmp_path):
     assert all(argv[:2] == ["systemctl", "--user"] for argv in calls)
 
 
+@pytest.mark.parametrize("missing", [True, False])
+def test_systemd_without_a_user_manager(tmp_path, missing):
+    # Containers and WSL without systemd (#12): systemctl is absent, or
+    # present without a user manager to talk to.
+    calls = []
+
+    def run(argv, **kw):
+        calls.append(argv)
+        if missing:
+            raise FileNotFoundError(2, "No such file or directory", "systemctl")
+        return subprocess.CompletedProcess(argv, 1)
+
+    service = Systemd(tmp_path / "songe.service", run=run)
+    assert not service.available()
+    service.target.write_text("[Unit]\n", encoding="utf-8")  # an earlier try
+    service.uninstall()
+    assert not service.target.exists()
+    assert all(argv[2:] == ["show-environment"] for argv in calls)
+
+
 def test_launchd_waits_for_unload_before_bootstrap(tmp_path, monkeypatch):
     import subprocess
     from types import SimpleNamespace

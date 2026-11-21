@@ -219,7 +219,9 @@ def test_init_snapshot_only_shows_diffs_when_requested(
         platform,
         "current",
         lambda: SimpleNamespace(
-            accelerators=lambda: [], data_dir=lambda: tmp_path / "data"
+            accelerators=lambda: [],
+            data_dir=lambda: tmp_path / "data",
+            service=lambda: SimpleNamespace(available=lambda: True),
         ),
     )
     monkeypatch.setattr(discovery, "lmstudio_downloads", lambda: tmp_path / "models")

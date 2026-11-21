@@ -235,7 +235,9 @@ def test_init_selects_agents_upstream_and_asks_once(
     )
     platform = SimpleNamespace(
         accelerators=lambda: [Accel("cpu", "test")],
-        service=lambda: SimpleNamespace(target=tmp_path / "service"),
+        service=lambda: SimpleNamespace(
+            target=tmp_path / "service", available=lambda: True
+        ),
         memory=lambda: Memory(2**30, 2**29),
     )
     import songe.platform
