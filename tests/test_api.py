@@ -396,3 +396,12 @@ def test_gpu_line_reads_mac_and_nvidia_and_only_while_a_dream_runs(monkeypatch):
     assert common.gpu_usage(max_age=0) == {"busy": 45, "memory": 9800 * 1024**2}
     # Nothing running: no line.
     assert gpu_line(SimpleNamespace(process=None)) is None
+
+
+def test_undo_before_any_deep_dream_says_there_is_nothing_yet(store):
+    from songe.api import return_target
+
+    with pytest.raises(ValueError, match="^No earlier version yet"):
+        return_target(store, {})
+    with pytest.raises(ValueError, match="^Version not retained$"):
+        return_target(store, {"night": 3})

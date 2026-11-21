@@ -519,7 +519,12 @@ def return_target(store, payload):
             (v for v in store.versions() if v["night"] == payload["night"]), None
         )
     else:
-        target = store.version(store.get("previous")) if store.get("previous") else None
+        if not store.get("previous"):
+            # Nothing to go back to is the normal state before a Deep Dream.
+            raise ValueError(
+                "No earlier version yet · a Deep Dream that passes its checks adds one"
+            )
+        target = store.version(store.get("previous"))
     if not target:
         raise ValueError("Version not retained")
     if target["id"] == store.get("current"):
