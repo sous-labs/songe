@@ -722,3 +722,30 @@ def test_a_copied_example_is_no_lesson_and_conditional_rules_are_rules():
         "when writing search algorithms, always measure the runtime"
     assert rule_sentence("always run more. 3 numbers don't show anything") == "always run more."
     assert rule_sentence("Use the feedback from each guess.") is None
+
+
+def test_opencode_1_19_titles_compactions_and_continue_are_not_the_user():
+    # Recorded from opencode 1.19.6 (#15): its title and summary requests and
+    # the message it sends after a compaction were read as the user's own, and
+    # a Quick Dream took "Do not include the <template> tags" as a preference.
+    from songe.reading import timeline
+
+    task = {"role": "user", "content": "List the files, then tell me what app.py prints."}
+    title = {"messages": [
+        {"role": "system", "content": "You are a title generator. You output ONLY a thread title."},
+        task]}
+    first = {"messages": [
+        {"role": "system", "content": "You are a context summarization agent."},
+        {"role": "user", "content": "Here is the conversation so far:\n\n<conversation>\n[User]: hi\n</conversation>\n\n"
+         "Create a new anchored summary from the conversation history in the <conversation> tags above so "
+         "another coding agent can continue the work.\n\nDo not include the <template> tags in your response."}]}
+    update = {"messages": [
+        {"role": "system", "content": "You are a context summarization agent."},
+        {"role": "user", "content": "Here is the conversation so far:\n\n<conversation>\n[User]: hi\n</conversation>\n\n"
+         "<prior-summary>\n## Objective\n- hi\n</prior-summary>\n\nThe <prior-summary> summarizes everything that "
+         "happened before the <conversation>. Construct a new summary that combines both."}]}
+    assert [timeline.kind_of(r) for r in (title, first, update)] == ["title", "compaction", "compaction"]
+    resumed = {"messages": [SYSTEM, task, {"role": "assistant", "content": "Done."}, {"role": "user", "content":
+        "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed."}]}
+    items = timeline.build([(1, resumed, reply({"role": "assistant", "content": "Nothing left."}), 200)])
+    assert [i["kind"] for i in items if i["kind"] in {"user", "harness"}] == ["harness"]

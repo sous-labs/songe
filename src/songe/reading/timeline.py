@@ -16,7 +16,8 @@ import json
 
 from ..steps import CONTINUED
 
-TITLE = "You name conversations"
+# opencode before 1.19, and 1.19.
+TITLE = ("You name conversations", "You are a title generator")
 # An agent compacting its own context sends one of these in the user's place
 # (opencode; pi). Recognised anywhere in the last user message: pi puts the
 # transcript first and the instruction after it.
@@ -27,10 +28,17 @@ COMPACT = (
     "The messages above are a conversation to summarize",
     "<previous-summary>",
     "This is the PREFIX of a turn that was too large",
+    # opencode 1.19: a first summary, and one that folds in the previous one.
+    "Create a new anchored summary from the conversation history",
+    "The <prior-summary> summarizes everything that happened before",
 )
 # Messages the agent harness adds in the user's place: feedback from the
 # harness, not from the user.
-HARNESS = ("Your last response hit the output token limit",)
+HARNESS = (
+    "Your last response hit the output token limit",
+    # opencode 1.19 sends this after a compaction.
+    "Continue if you have next steps, or stop and ask for clarification",
+)
 # After compaction: the summary, and sometimes a transcript of earlier turns.
 CHECKPOINT = ("<conversation-checkpoint>", "[User]: ")
 
