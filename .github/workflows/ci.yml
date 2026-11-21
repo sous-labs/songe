@@ -34,6 +34,13 @@ jobs:
       - run: uv run --no-sync ruff check src tests scripts .github/ci packaging/homebrew
       - run: uv run --no-sync pytest
       - run: uv build
+      - name: Install smoke test (built package, fake model server)
+        shell: bash
+        run: |
+          uv venv smoke-venv --python 3.12
+          uv pip install --python smoke-venv dist/*.whl
+          bin=smoke-venv/bin; [ -d smoke-venv/Scripts ] && bin=smoke-venv/Scripts
+          "$bin/python" .github/ci/smoke.py --songe "$bin/songe"
 
   macos:
     runs-on: macos-15
@@ -51,3 +58,28 @@ jobs:
       - run: uv run --no-sync pytest
       - run: uv build
       - run: uv run --no-sync songe --version
+      - name: Install smoke test (built package, fake model server)
+        shell: bash
+        run: |
+          uv venv smoke-venv --python 3.12
+          uv pip install --python smoke-venv dist/*.whl
+          bin=smoke-venv/bin; [ -d smoke-venv/Scripts ] && bin=smoke-venv/Scripts
+          "$bin/python" .github/ci/smoke.py --songe "$bin/songe"
+
+  # The dashboard in a real (headless) browser: it must render the model
+  # without script errors. Runs next to the tests, so it adds no wait.
+  dashboard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv build --wheel
+      - run: |
+          uv venv smoke-venv --python 3.12
+          uv pip install --python smoke-venv dist/*.whl playwright
+          smoke-venv/bin/python -m playwright install --with-deps --only-shell chromium
+      - run: smoke-venv/bin/python .github/ci/smoke.py --songe smoke-venv/bin/songe --browser
