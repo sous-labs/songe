@@ -11,3 +11,4 @@ test-output/
 
 # The private research repository (sous-labs/songe-dev), checked out here.
 research/
+smoke-venv/
