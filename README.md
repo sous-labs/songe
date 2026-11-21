@@ -1,5 +1,5 @@
 <p align="center">
-  <a href="https://souslabs.ai/songe"><img src="https://souslabs.ai/assets/songe-share-v1.png" alt="Songe: a bed on the moon, and the command pip install songe"></a>
+  <a href="https://souslabs.ai"><img src="https://souslabs.ai/assets/songe-banner-v1.gif" alt="Songe: a bed on the moon, and the command pip install songe"></a>
 </p>
 
 <h3 align="center">A training engine for your local model, using your idle compute.</h3>
@@ -9,7 +9,7 @@
   <a href="#-how-it-works">How it works</a> •
   <a href="#-commands">Commands</a> •
   <a href="ROADMAP.md">Roadmap</a> •
-  <a href="https://souslabs.ai/songe">Website</a>
+  <a href="https://souslabs.ai">Website</a>
 </p>
 
 <p align="center">
