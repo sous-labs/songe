@@ -1214,10 +1214,14 @@ def doctor(config, root, local):
         path = path.parent
     try:
         disk = shutil.disk_usage(path)
+        model = Path(config.model) if config.model else None
         artifact_bytes = (
-            sum(p.stat().st_size for p in Path(config.model).rglob("*") if p.is_file())
-            if config.model and Path(config.model).exists()
-            else None
+            None
+            if model is None or not model.exists()
+            # A GGUF model is one file; rglob finds nothing under a file.
+            else model.stat().st_size
+            if model.is_file()
+            else sum(p.stat().st_size for p in model.rglob("*") if p.is_file())
         )
         size = (
             f"; model {artifact_bytes / 1e9:.1f} GB"

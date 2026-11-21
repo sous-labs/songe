@@ -197,6 +197,30 @@ def test_tui_command_is_lazy_and_does_not_initialize_store(tmp_path, monkeypatch
     assert not root.exists()
 
 
+def test_doctor_counts_a_single_file_model(tmp_path, monkeypatch, capsys):
+    # llama.cpp and Ollama serve one GGUF file, not a folder.
+    import httpx
+
+    from songe import cli
+    from songe.config import Config
+
+    def down(*args, **kwargs):
+        raise httpx.ConnectError("stopped")
+
+    monkeypatch.setattr(httpx.Client, "get", down)
+    monkeypatch.setattr(cli, "measured_hardware", lambda: ("linux", 1, 1, "cpu"))
+    model = tmp_path / "model.gguf"
+    with open(model, "wb") as file:
+        file.truncate(300_000_000)  # sparse: st_size without the writes
+    root = tmp_path / "data"
+    Config(upstream="llamacpp", model=str(model)).save(root)
+    main(["--data-dir", str(root), "doctor"])
+    disk = next(
+        line for line in capsys.readouterr().out.splitlines() if line.startswith("Disk:")
+    )
+    assert disk.endswith("; model 0.3 GB")
+
+
 def test_doctor_recognizes_agent_v2_and_live_service(tmp_path, monkeypatch, capsys):
     import json
 
