@@ -174,7 +174,7 @@
       },
       "copy": [
         "Collecting",
-        "Use your agent through Songe"
+        "Pick a songe/… model in your agent"
       ]
     },
     {
@@ -376,14 +376,14 @@
         "activity": {
           "now": "measuring training size · 44 of ~900 tokens",
           "phase": "calibrate",
-          "next": "Use your agent through Songe · Qwen learns from conversations"
+          "next": "Pick a songe/… model in your agent · Qwen learns from conversations"
         }
       },
       "copy": [
         "Measuring",
         "What this machine can train · 44 of 900 tokens · first time only"
       ],
-      "next": "Use your agent through Songe · Qwen learns from conversations"
+      "next": "Pick a songe/… model in your agent · Qwen learns from conversations"
     },
     {
       "name": "restoring an older version",
@@ -463,7 +463,7 @@
       "snapshot": {},
       "summary": [
         "No conversations yet",
-        "use your agent through Songe"
+        "pick a songe/… model in your agent"
       ]
     },
     {
@@ -897,7 +897,7 @@
       },
       "summary": [
         "No conversations yet",
-        "use your agent through Songe"
+        "pick a songe/… model in your agent"
       ]
     },
     {
@@ -916,7 +916,7 @@
       },
       "summary": [
         "No conversations yet",
-        "use your agent through Songe"
+        "pick a songe/… model in your agent"
       ]
     },
     {
@@ -1162,7 +1162,7 @@
       },
       "summary": [
         "No conversations yet",
-        "use your agent through Songe"
+        "pick a songe/… model in your agent"
       ]
     },
     {
@@ -1214,7 +1214,7 @@
       "snapshot": {},
       "summary": [
         "No conversations yet",
-        "use your agent through Songe"
+        "pick a songe/… model in your agent"
       ]
     },
     {
@@ -1264,7 +1264,7 @@
     },
     {
       "raw": "select model · learning enabled + learnable experience",
-      "text": "Choose New or All for a model, then use your agent through Songe."
+      "text": "Choose New or All for a model, then pick a songe/… model in your agent."
     },
     {
       "raw": "swap Qwen · checks pass + no proxy requests",

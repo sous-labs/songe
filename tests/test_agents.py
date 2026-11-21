@@ -223,3 +223,43 @@ def test_commented_opencode_config_never_crashes_the_service(
     assert path.read_bytes() == commented
     with pytest.raises(agents.NotPlainJSON, match="comments"):
         agents.read_json(path)
+
+
+def test_routing_says_which_agents_still_need_a_songe_model(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.delenv("PI_CODING_AGENT_DIR", raising=False)
+    assert agents.routing(home) == {}  # neither agent installed
+    oc = home / ".config/opencode/opencode.json"
+    oc.parent.mkdir(parents=True)
+    oc.write_text('{"model": "anthropic/claude"}', encoding="utf-8")
+    (home / ".pi/agent").mkdir(parents=True)
+    assert agents.routing(home) == {"opencode": False, "pi": False}
+    oc.write_text('{"model": "songe/songe/qwen"}', encoding="utf-8")
+    (home / ".pi/agent/settings.json").write_text(
+        '{"defaultProvider": "songe", "defaultModel": "qwen"}', encoding="utf-8"
+    )
+    assert agents.routing(home) == {"opencode": True, "pi": True}
+
+
+def test_init_ends_with_the_step_left(config, monkeypatch):
+    from songe import cli
+
+    monkeypatch.setattr(agents, "routing", lambda home=None: {"opencode": True, "pi": False})
+    assert cli.next_step(config) == "One step left · pick a songe/… model in pi with /model"
+    monkeypatch.setattr(agents, "routing", lambda home=None: {"opencode": True})
+    assert cli.next_step(config).startswith("Use your agent as usual")
+    monkeypatch.setattr(agents, "routing", lambda home=None: {})
+    assert "127.0.0.1:7613/v1" in cli.next_step(config)
+
+
+def test_init_plan_names_agents_it_did_not_find(config, monkeypatch):
+    from songe import cli
+
+    monkeypatch.setattr(agents, "routing", lambda home=None: {"opencode": False})
+    assert cli.missing_agents(config) == [
+        ("Agent", "pi not found · run songe init again after installing it")
+    ]
+    monkeypatch.setattr(agents, "routing", lambda home=None: {})
+    rows = cli.missing_agents(config)
+    assert rows[-1] == ("Other", "any OpenAI-compatible tool · http://127.0.0.1:7613/v1")

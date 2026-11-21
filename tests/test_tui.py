@@ -180,7 +180,7 @@ async def test_model_switch_undo_and_active_training():
         assert str(app.query_one("#model-details", Static).render()) == (
             "Now          Nothing running\n"
             "Result       No update yet\n"
-            "Data         No conversations yet · use your agent through Songe\n"
+            "Data         No conversations yet · pick a songe/… model in your agent\n"
             "Next         First update after your first conversations\n"
             "Versions     Original · In use"
         )

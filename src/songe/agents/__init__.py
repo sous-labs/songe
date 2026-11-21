@@ -42,6 +42,32 @@ def targets(home=None):
     return paths
 
 
+KNOWN = ("opencode", "pi")
+
+
+def routing(home=None):
+    """Each installed agent, and whether its default model is a Songe one.
+
+    Init switches opencode's local default; pi's default (settings.json) and
+    a cloud default are the user's, so those still need a songe/ model picked.
+    """
+    home = home or Path.home()
+    found = {}
+    for kind, path in targets(home):
+        if kind == "pi":
+            path = path.parent / "settings.json"
+        try:
+            data = read_json(path)
+        except NotPlainJSON:
+            data = {}
+        if kind == "opencode":
+            model = data.get("model")
+            found[kind] = isinstance(model, str) and model.startswith("songe/")
+        else:
+            found[kind] = data.get("defaultProvider") == "songe"
+    return found
+
+
 def proposed(config, home=None, default=None, opencode_v2=False, root=None):
     from .opencode import configure as oc
     from .pi import configure as pi

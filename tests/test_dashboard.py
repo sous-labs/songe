@@ -48,7 +48,7 @@ def test_three_lines_idle_and_calibration_progress(config, store, monkeypatch):
     state = snapshot(config, store, worker, live=True)
     assert state["activity"]["now"] == "calibrating base-test · 2/4"
     assert state["activity"]["next"] == (
-        "Use your agent through Songe · base-test learns from conversations"
+        "Pick a songe/… model in your agent · base-test learns from conversations"
     )
     assert [key for key, value in lines(state)] == ["now", "next", "paused"]
 

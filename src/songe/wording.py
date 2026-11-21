@@ -25,7 +25,7 @@ def readable(value):
         (r"select enabled model", "choose a model with learning on"),
         (
             r"select model · learning enabled \+ learnable experience",
-            "Choose New or All for a model, then use your agent through Songe.",
+            "Choose New or All for a model, then pick a songe/… model in your agent.",
         ),
         (r"learnable experience", "conversations to learn from"),
         (r"held-out", "evaluation"),
@@ -71,7 +71,7 @@ def collecting_detail(detail):
     return f"{have}/{need} {noun}" + (unfit or "")
 
 
-USE_SONGE = "Use your agent through Songe"
+USE_SONGE = "Pick a songe/… model in your agent"
 MEASURE_WAIT = re.compile(
     r"measuring training size|calibration required|not measured yet"
 )

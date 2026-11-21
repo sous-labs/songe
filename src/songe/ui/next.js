@@ -650,7 +650,10 @@ function modelView(id, ml, inv, paused = false) {
   } else if (!dreams.length) {
     node.append(level === 'off'
       ? quiet(ml, inv, ['Not learning yet', 'Turn on auto-dream to let it learn from your new conversations.'])
-      : quiet(ml, inv, ['No Dream yet', `${plural(ml?.pending?.conversations || 0, 'conversations')} collected so far. ${auto ? 'It dreams when your computer is idle, or press Dream.' : 'Auto-dream is off: press Dream to run one.'}`]));
+      : !ml?.pending?.conversations
+        // Nothing recorded yet: the agent is probably not on a songe/ model.
+        ? quiet(ml, inv, ['No conversations yet', 'Pick a songe/… model in your agent (/models in opencode, /model in pi) and work as usual. Songe learns from those conversations.'])
+        : quiet(ml, inv, ['No Dream yet', `${plural(ml.pending.conversations, 'conversations')} collected so far. ${auto ? 'It dreams when your computer is idle, or press Dream.' : 'Auto-dream is off: press Dream to run one.'}`]));
     if (level !== 'off') node.append(nowLine(id, ml));
   } else {
     // The dashboard: a new Quick Dream on top, the Dream row, the chosen
@@ -776,6 +779,7 @@ function railState(ml, inv) {
     return r.outcome === 'adopted' ? [r.in_use === false ? outcomeText(r) : `${r.version} · better on ${r.improved.count}`, ''] : ['Kept its version', ''];
   }
   if (inv?.learning_level === 'off') return ['Not learning', 'muted'];
+  if (!ml?.pending?.conversations && !ml?.last) return ['No conversations yet', 'muted'];
   return [`Collecting · ${plural(ml?.pending?.conversations || 0, 'conversations')}`, ''];
 }
 function pickDefault(ids, models) {

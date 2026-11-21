@@ -1836,7 +1836,7 @@ class ModelScheduler(Scheduler):
         if short and row["support"] != "pending" and not resumes:
             # Checked before measuring: measuring again (15 min) only to find
             # nothing can be checked would waste the Dream.
-            return ("it needs a conversation to learn from · use your agent through Songe and"
+            return ("it needs a conversation to learn from · use a songe/… model in your agent and"
                     " react to its work (a correction or a reply), then dream again")
         if not measuring and not resumes:
             upcoming = await asyncio.to_thread(next_update, store)

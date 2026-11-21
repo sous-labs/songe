@@ -9,7 +9,7 @@
 ✓ Connected pi
 ✓ Ready · http://127.0.0.1:7613/v1
 
-Use your agent as usual · learning starts when idle
+One step left · pick a songe/… model in pi with /model
   songe open       dashboard
   songe status     what it is doing
   songe pause      stop learning

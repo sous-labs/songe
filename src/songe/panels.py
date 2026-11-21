@@ -274,7 +274,7 @@ def dashboard_rows(model, training=None, snapshot=None):
         "now": "Learning off" if model_level(model) == "off" else "Nothing running",
         "result": "No update yet",
         "learned": "your approvals, corrections and retries",
-        "data": "No conversations yet · use your agent through Songe",
+        "data": "No conversations yet · pick a songe/… model in your agent",
         "next": "Turn on New or All to learn"
         if model_level(model) == "off"
         else "First update after your first conversations"

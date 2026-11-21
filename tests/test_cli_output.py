@@ -232,6 +232,8 @@ def test_init_snapshot_only_shows_diffs_when_requested(
     monkeypatch.setattr(
         agents, "proposed", lambda *a, **kw: [(tmp_path / "agent.json", {}, "", diff)]
     )
+    # opencode was switched to a Songe model; pi's default is the user's.
+    monkeypatch.setattr(agents, "routing", lambda home=None: {"opencode": True, "pi": False})
     applied = []
     monkeypatch.setattr(agents, "apply", lambda *a: applied.append("agents"))
     monkeypatch.setattr(launchd, "install", lambda *a, **kw: applied.append("service"))

@@ -344,6 +344,7 @@ def initialize(args, root):
                             "Agents",
                             ", ".join(str(path) for path, *_ in changes) or "none",
                         ),
+                        *missing_agents(config),
                         ("Data", str(root)),
                         ("Service", service_fact(args)),
                         ("Replace", "loaded copy when a better version is ready"),
@@ -524,6 +525,7 @@ def initialize(args, root):
         else:
             how = "choose one with " + ("/models" if agent == "opencode" else "/model")
         rows.append(("Agent", f"{agent} → Songe models · {how}"))
+    rows += missing_agents(config)
     rows += [("Data", str(root)), ("Service", service_fact(args))]
     if not can_train:
         rows.append(("Learning", "records only · no GPU for training"))
@@ -721,7 +723,7 @@ def finish_initialization(config, args, root, changes, repropose=None):
         agents.migrate(config, root)
     result(f"Ready · http://127.0.0.1:{config.port}/v1")
     console().print()
-    console().print("Use your agent as usual · learning starts when idle")
+    console().print(next_step(config))
     facts(
         ([] if managed else [(f"{NAME} serve", "start Songe · no service manager here")])
         + [
@@ -731,6 +733,38 @@ def finish_initialization(config, args, root, changes, repropose=None):
             (f"{NAME} uninstall", "remove everything"),
         ]
     )
+
+
+def missing_agents(config):
+    """Plan rows for agents Songe could set up but did not find."""
+    from . import agents
+
+    installed = agents.routing()
+    rows = [
+        ("Agent", f"{agent} not found · run songe init again after installing it")
+        for agent in agents.KNOWN
+        if agent not in installed
+    ]
+    if not installed:
+        rows.append(("Other", f"any OpenAI-compatible tool · http://127.0.0.1:{config.port}/v1"))
+    return rows
+
+
+def next_step(config):
+    """The last line of init: what is left before Songe sees any work."""
+    from . import agents
+
+    routed = agents.routing()
+    left = [agent for agent, on_songe in routed.items() if not on_songe]
+    if routed and not left:
+        return "Use your agent as usual · learning starts when idle"
+    if not routed:
+        return (
+            f"One step left · point your agent at http://127.0.0.1:{config.port}/v1"
+            " and pick a songe/… model"
+        )
+    how = {"opencode": "in opencode with /models", "pi": "in pi with /model"}
+    return "One step left · pick a songe/… model " + ", ".join(how[a] for a in left)
 
 
 def agent_name(path):
