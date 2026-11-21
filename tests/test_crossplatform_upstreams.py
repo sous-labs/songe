@@ -111,6 +111,25 @@ async def test_ollama_upload_import_warm_park_restore(tmp_path):
     await upstream.close()
 
 
+async def test_ollama_reports_the_context_it_runs_each_model_with():
+    # Agents are told this limit: Ollama served 4096 (its default) or 16384
+    # (OLLAMA_CONTEXT_LENGTH) while opencode was told 8192.
+    def handler(request):
+        assert request.url.path == "/api/ps"
+        return httpx.Response(
+            200,
+            json={
+                "models": [
+                    {"name": "qwen1.5b:latest", "context_length": 16384},
+                    {"name": "older:latest"},
+                ]
+            },
+        )
+
+    upstream = Ollama(config("ollama"), transport=httpx.MockTransport(handler))
+    assert await upstream.served_contexts() == {"qwen1.5b:latest": 16384}
+
+
 async def test_ollama_http_error_does_not_warm_model(tmp_path):
     path = tmp_path / "base.gguf"
     path.write_bytes(b"bytes")

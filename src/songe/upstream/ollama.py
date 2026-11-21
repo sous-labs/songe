@@ -56,6 +56,17 @@ class Ollama:
     async def _running(self):
         return (await self._request("GET", "/api/ps")).get("models", [])
 
+    async def served_contexts(self):
+        """Context Ollama runs each loaded model with (its OLLAMA_CONTEXT_LENGTH,
+        4096 by default), from /api/ps. A model that is not loaded is not
+        listed and keeps the fallback. Songe's own loads set no num_ctx, so
+        every value is the user's server setting."""
+        return {
+            m["name"]: int(m["context_length"])
+            for m in await self._running()
+            if m.get("name") and m.get("context_length")
+        }
+
     async def digest(self, version):
         def fingerprint():
             path = Path(version["artifact"]).resolve()
