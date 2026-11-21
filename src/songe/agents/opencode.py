@@ -61,21 +61,41 @@ def configure(data, config, default=None, v2=False):
     }
     providers[NAME] = {**existing, **provider}
     models = exposed(config)
-    # The model the user chose, not whichever sorts first in the library.
     chosen = f"{NAME}/" + (
         config.public_model if config.public_model in models else models[0]
     )
     if default is None:
-        # Automatic: local models go through Songe so it can learn from them;
-        # a cloud default is the user's choice and has nothing to learn.
-        if not data.get("model") or local_model(data, data["model"]):
-            # The model init chose already follows the one the agent last ran
-            # (opencode's recent pick wins over its config default), so the
-            # agent's default is the model that learns, not a stale default.
-            data["model"] = chosen
+        # Automatic: a local default moves to the Songe version of the same
+        # model, so it learns from what the user already runs. Anything else
+        # (a cloud model, no default, a model Songe does not offer) is left
+        # as it is: init no longer picks one model for the user (live: it
+        # made a 27B 1-bit model this Mac cannot train the default).
+        same = same_model(data.get("model"), models) if local_model(data, data.get("model") or "") else None
+        if same:
+            data["model"] = f"{NAME}/{same}"
     elif default:
         data["model"] = chosen
     return data
+
+
+def same_model(reference, models):
+    """The Songe model for the agent's local default ("lmstudio/granite-4.2-3b"
+    → "songe/granite-4.2-3b"), or None."""
+    import re
+
+    def key(name):
+        return re.sub(r"[^a-z0-9]", "", str(name).rsplit("/", 1)[-1].lower().removesuffix(".gguf"))
+
+    wanted = key(str(reference or "").partition("/")[2])
+    if not wanted:
+        return None
+    exact = [m for m in models if key(m) == wanted]
+    if exact:
+        return exact[0]
+    # Servers name the same model slightly differently ("qwen3.5-4b-mlx" in
+    # LM Studio, "Qwen3.5-4B-MLX-4bit" as a folder): one is the other's start.
+    near = [m for m in models if key(m).startswith(wanted) or wanted.startswith(key(m))]
+    return min(near, key=lambda m: abs(len(key(m)) - len(wanted))) if near else None
 
 
 LOCAL_PROVIDERS = {"lmstudio", "ollama", "llamacpp", "llama.cpp", "mlx", "vllm"}

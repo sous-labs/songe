@@ -100,13 +100,15 @@ def test_local_default_routes_through_songe_and_cloud_stays(config):
 
     config.exposed_models = ["Qwen3.5-4B-MLX-4bit", "LFM3-1.7B-MLX-4bit"]
     config.public_model = "songe/Qwen3.5-4B-MLX-4bit"
-    # A local default becomes the model init chose (the one that learns),
-    # routed through Songe, even when the stale config default was another.
-    for stale in ("lmstudio/qwen3.5-4b-mlx", "lmstudio/lfm3-1.7b"):
-        local = configure({"model": stale, "small_model": "lmstudio/lfm3-1.7b"}, config)
-        assert local["model"].startswith("songe/")
-        assert local["model"].endswith("/Qwen3.5-4B-MLX-4bit")
-    assert local["small_model"] == "lmstudio/lfm3-1.7b"  # titles are untouched
+    # A local default moves to the Songe version of the same model (live:
+    # init made a model the machine could not train the default instead).
+    qwen = configure({"model": "lmstudio/qwen3.5-4b-mlx", "small_model": "lmstudio/lfm3-1.7b"}, config)
+    assert qwen["model"] == "songe/songe/Qwen3.5-4B-MLX-4bit"
+    assert qwen["small_model"] == "lmstudio/lfm3-1.7b"  # titles are untouched
+    assert configure({"model": "lmstudio/lfm3-1.7b"}, config)["model"] == "songe/songe/LFM3-1.7B-MLX-4bit"
+    # A local model Songe does not offer, or no default at all, is left as it is.
+    assert configure({"model": "lmstudio/bonsai-27b"}, config)["model"] == "lmstudio/bonsai-27b"
+    assert "model" not in configure({}, config)
     # A cloud default is the user's choice.
     cloud = configure({"model": "anthropic/claude-sonnet"}, config)
     assert cloud["model"] == "anthropic/claude-sonnet"
@@ -115,7 +117,7 @@ def test_local_default_routes_through_songe_and_cloud_stays(config):
         "model": "mine/qwen3.5-4b",
         "provider": {"mine": {"options": {"baseURL": "http://127.0.0.1:8080/v1"}}},
     }
-    assert configure(custom, config)["model"].startswith("songe/")
+    assert configure(custom, config)["model"] == "songe/songe/Qwen3.5-4B-MLX-4bit"
     assert configure(custom, config, default=False)["model"] == "mine/qwen3.5-4b"
 
 

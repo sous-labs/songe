@@ -494,16 +494,22 @@ def initialize(args, root):
         "mlx": "mlx-lm",
         "vllm": "vLLM",
     }
-    public = config.public_model
     server = labels.get(config.upstream, config.upstream)
-    rows = [("Model", f"{Path(ref.serving_id).name}  ({server})")]
+    from .models.names import exposed
+
+    # Every chat model on the server gets a songe/ version; init shows the
+    # server and how many, not one model (live: it showed a model the
+    # machine could not train, as if it were the only one).
+    count = len(exposed(config))
+    rows = [("Models", f"{count} from {server}, each as songe/…")]
     for path, _, result, _ in changes:
         agent = "opencode" if "opencode" in str(path) else "pi"
-        # Say "default" only when the agent's default now goes through Songe.
-        default = ", default" if b'"model": "songe/' in result else ""
-        if agent == "pi" and not default:
-            default = " · choose it with /model"
-        rows.append(("Agent", f"{agent} → {public}{default}"))
+        picked = json.loads(result).get("model") if agent == "opencode" else None
+        if isinstance(picked, str) and picked.startswith("songe/"):
+            how = f"default {picked.removeprefix('songe/')}"
+        else:
+            how = "choose one with " + ("/models" if agent == "opencode" else "/model")
+        rows.append(("Agent", f"{agent} → Songe models · {how}"))
     rows += [("Data", str(root)), ("Service", "starts at login")]
     if not can_train:
         rows.append(("Learning", "records only · no GPU for training"))
