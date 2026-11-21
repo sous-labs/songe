@@ -494,7 +494,9 @@ def create_app(config=None, store=None, client=None, scheduler=None):
                 },
                 502,
             )
-        upstream_url = config.upstream_url
+        # A Songe-owned server runs only while Songe needs it; what no version
+        # claims goes to the user's own server, which is always up.
+        upstream_url = config.server_source_url or config.upstream_url
         if serving and hasattr(getattr(scheduler, "upstream", None), "request_url"):
             upstream_url = scheduler.upstream.request_url(serving)
         url = upstream_url.rstrip("/") + request.url.path[3:]

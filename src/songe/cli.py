@@ -1091,16 +1091,18 @@ def doctor(config, root, local):
         for name in ("lms", "ollama", "llama-server", "mlx_lm", "vllm")
         if (path := shutil.which(name))
     ]
+    # The user's own server, not one Songe runs only while it needs it.
+    server = config.server_source_url or config.upstream_url
     try:
         with httpx.Client(trust_env=False, timeout=1) as client:
-            response = client.get(config.upstream_url.rstrip("/") + "/models")
+            response = client.get(server.rstrip("/") + "/models")
             response.raise_for_status()
             models = response.json()["data"]
             if not isinstance(models, list):
                 raise ValueError("Model listing: list required")
-        endpoint = f"{len(models)} models at {config.upstream_url}"
+        endpoint = f"{len(models)} models at {server}"
     except (httpx.HTTPError, ValueError, KeyError) as exc:
-        endpoint = f"{config.upstream_url} unavailable · {type(exc).__name__}"
+        endpoint = f"{server} unavailable · {type(exc).__name__}"
         problems.append("upstream")
     print(
         f"Upstreams: {len(tools)} executables"

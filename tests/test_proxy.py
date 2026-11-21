@@ -204,6 +204,40 @@ async def test_upstream_errors_and_unmapped_bytes_unchanged(
     await upstream.aclose()
 
 
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b'{"model":"unrelated","messages":[{"role":"user","content":"hi"}]}',
+        b'{"messages":[{"role":"user","content":"hi"}]}',
+        b"{not json",
+    ],
+)
+async def test_unmapped_requests_reach_the_users_server(config, store, raw):
+    # The owned server runs only while Songe needs it (#10); the user's own
+    # server is always up and answers what no version claims.
+    config.upstream = "llamacpp"
+    config.upstream_url = "http://127.0.0.1:41001/v1"
+    config.server_source_url = "http://127.0.0.1:8080/v1"
+    config.server_owned = True
+
+    async def handler(request):
+        if request.url.port != 8080:
+            raise httpx.ConnectError("refused", request=request)
+        assert request.content == raw
+        return httpx.Response(200, stream=Chunks([b'{"choices":[]}']))
+
+    app, upstream = await pair(config, store, handler)
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1"
+        ) as client,
+    ):
+        response = await client.post("/v1/chat/completions", content=raw)
+        assert response.status_code == 200
+    await upstream.aclose()
+
+
 async def test_logging_failure_does_not_break_proxy(config, store, monkeypatch):
     def fail(*a):
         raise OSError("disk full")

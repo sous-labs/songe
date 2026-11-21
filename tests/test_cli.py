@@ -127,6 +127,39 @@ def test_doctor_measured_lines_and_no_writes(tmp_path, monkeypatch, capsys):
     assert not root.exists()
 
 
+def test_doctor_checks_the_users_server_not_the_owned_one(
+    tmp_path, monkeypatch, capsys
+):
+    import httpx
+
+    from songe import cli
+    from songe.config import Config
+
+    def get(self, url, **kwargs):
+        # The Songe-owned llama-server is down outside a Dream (#10).
+        if not url.startswith("http://127.0.0.1:8080/"):
+            raise httpx.ConnectError("refused")
+        return httpx.Response(
+            200, json={"data": [{"id": "m"}]}, request=httpx.Request("GET", url)
+        )
+
+    monkeypatch.setattr(httpx.Client, "get", get)
+    monkeypatch.setattr(cli, "measured_hardware", lambda: ("linux", 1, 1, "cpu"))
+    root = tmp_path / "data"
+    Config(
+        upstream="llamacpp",
+        upstream_url="http://127.0.0.1:41001/v1",
+        server_source_url="http://127.0.0.1:8080/v1",
+        server_owned=True,
+    ).save(root)
+    main(["--data-dir", str(root), "doctor"])
+    upstreams = next(
+        line for line in capsys.readouterr().out.splitlines()
+        if line.startswith("Upstreams:")
+    )
+    assert upstreams.endswith("1 models at http://127.0.0.1:8080/v1")
+
+
 def test_cli_controls_use_local_api(tmp_path, monkeypatch):
     from songe import cli
 
