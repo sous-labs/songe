@@ -53,8 +53,33 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
-  publish:
+  # One real Deep Dream on a rented GPU (Modal) with the exact wheel being
+  # released; minutes, so it runs here and never on pull requests. The Modal
+  # key lives only in the release-check environment, open to v* tags.
+  dream-check:
     needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    environment: release-check
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: python-distributions
+          path: dist/
+      - name: Deep Dream with the release wheel
+        env:
+          MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+        run: |
+          test -n "$MODAL_TOKEN_ID" || { echo "::error::MODAL_TOKEN_ID is not set in the release-check environment"; exit 1; }
+          SONGE_WHEEL=$(ls dist/*.whl) uvx modal run .github/ci/release_dream.py
+
+  publish:
+    needs: [build, dream-check]
     runs-on: ubuntu-latest
     environment:
       name: pypi

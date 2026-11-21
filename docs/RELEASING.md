@@ -68,18 +68,32 @@ This checks the installed framework, not a Songe training run. `songe init` disc
 
 ## CI coverage
 
-`.github/workflows/ci.yml` runs Ruff, pytest and `uv build` on Ubuntu and
-Windows with Python 3.11 and 3.12 for every push and pull request. The
-`macos-14` job asserts `arm64` and runs only on `main` pushes and `v*` tags.
-It also checks `songe --version`. uv caches are managed by
+`.github/workflows/ci.yml` runs on every pull request, and before each
+release. On Ubuntu and Windows with Python 3.11 and 3.12, and on an Apple
+Silicon `macos-15` runner: Ruff, pytest, `uv build`, then the install smoke
+test (`.github/ci/smoke.py`): the built wheel in a clean venv runs `songe init
+--yes` against a fake model server in a throwaway home, serves a chat request,
+and `songe uninstall --purge` must restore the agent config. A separate
+`dashboard` job runs the same with the dashboard loaded in headless Chromium,
+failing on any script error. These checks take seconds; pull requests stay a
+few minutes. uv caches are managed by
 [setup-uv](https://docs.astral.sh/uv/guides/integration/github/).
+
+Only before a release, `release.yml`'s `dream-check` job runs one real Deep
+Dream (`.github/ci/release_dream.py`): on a Modal GPU it installs the release
+wheel with `[cuda]`, records made-up conversations with corrections for a small
+model (Qwen2.5-0.5B-Instruct) and runs the Dream worker to a decision.
+Publishing waits for it. It needs `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` as
+secrets of the `release-check` environment, which only `v*` tags may use. Run
+it by hand with `SONGE_WHEEL=dist/<wheel> uvx modal run
+.github/ci/release_dream.py`.
 
 The test-only plugin in `.github/ci/platform_checks.py` reports Metal tests as
 skipped when Metal cannot be imported or is unavailable, including sandboxed
 Mac sessions. Non-MLX installations skip the model-support test that reads
 MLX-LM's installed metadata. Windows uses the same portable worker and mutation leases as Unix. The remaining store permission assertion skips on Windows because POSIX mode `0700` is not a Windows ACL check. Other portable
-tests, including HTTP streaming, run on Windows. No job installs a CUDA/ROCm
-training stack, loads real models, or establishes GPU training support.
+tests, including HTTP streaming, run on Windows. No pull-request job installs a
+CUDA/ROCm training stack or loads real models; only the release Dream check does.
 
 ## One-time PyPI Trusted Publishing setup
 
