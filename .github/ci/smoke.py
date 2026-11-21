@@ -137,6 +137,8 @@ def main():
     parser.add_argument("--songe", required=True, help="the installed songe command")
     parser.add_argument("--browser", action="store_true", help="also load the dashboard")
     args = parser.parse_args()
+    # Songe prints ✓ and ·; a Windows runner's console is cp1252.
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
     fake = ThreadingHTTPServer(("127.0.0.1", 0), FakeServer)
     threading.Thread(target=fake.serve_forever, daemon=True).start()
