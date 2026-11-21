@@ -179,7 +179,7 @@ def run_probe(model, output):
     }
     optimizer = backend.optimizer(config.learning_rate)
     training = time.monotonic()
-    loss, gradients = backend.train_step(step, optimizer, seed=7613)
+    loss, gradients, _ = backend.train_step(step, optimizer, seed=7613)
     backend.apply(gradients, optimizer)
     seconds = time.monotonic() - training
     result = {

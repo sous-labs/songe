@@ -307,10 +307,31 @@ class Linux:
         except (OSError, ValueError):
             return None
 
+    def apple_accelerator(self):
+        # Apple Silicon under Linux (Asahi): the SoC GPU is the same
+        # unified-memory Metal-class device macOS reports, driven by mlx.
+        # The device tree names it; memory is shared, so report host figures.
+        try:
+            compatible = (self.proc / "device-tree/compatible").read_bytes()
+        except OSError:
+            return None
+        if b"apple," not in compatible:
+            return None
+        try:
+            memory = self.memory()
+            total, free = memory.total, memory.available
+        except (OSError, ValueError):
+            total, free = 0, 0
+        return Accel("metal", "Apple Silicon", total, free)
+
     def accelerators(self):
         # DRM inventory does not imply a usable training device. Intel graphics
         # needs real allocation telemetry before it can be advertised as XPU.
-        return discrete_accelerators() or [Accel("cpu", "CPU")]
+        discrete = discrete_accelerators()
+        apple = self.apple_accelerator()
+        if apple is not None:
+            discrete.append(apple)
+        return discrete or [Accel("cpu", "CPU")]
 
     def keep_awake(self, pid):
         if not shutil.which("systemd-inhibit"):

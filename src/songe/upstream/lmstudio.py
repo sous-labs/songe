@@ -52,8 +52,9 @@ class LMStudio:
         self.lease_seconds = SERVING_IDLE_TTL_SECONDS
         from ..platform import current
 
+        kinds = {a.kind for a in current().accelerators()}
         self.serves = (
-            ("mlx-fused", "gguf-full") if current().name == "darwin" else ("gguf-full",)
+            ("mlx-fused", "gguf-full") if "metal" in kinds else ("gguf-full",)
         )
         self.url = getattr(config, "upstream_url", "http://127.0.0.1:1234/v1")
 

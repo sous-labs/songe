@@ -40,8 +40,10 @@ def trainable_base(
         )
     if ref.format == "mlx":
         return source
-    if backend_kind == "mlx" and getattr(platform, "name", sys.platform) != "darwin":
-        raise ValueError("The MLX backend requires macOS")
+    if backend_kind == "mlx" and "metal" not in {
+        a.kind for a in getattr(platform, "accelerators", lambda: [])()
+    }:
+        raise ValueError("The MLX backend requires an MLX-capable machine")
     if ref.format == "safetensors" and backend_kind == "torch":
         return source
     if ref.format not in {"safetensors", "gguf"}:

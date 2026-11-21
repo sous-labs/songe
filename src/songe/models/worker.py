@@ -1,14 +1,15 @@
 """Entrypoint run only under the artifact memory guard."""
 
 import argparse
-import sys
 from pathlib import Path
 
 
 def convert(kind, source, destination):
     if kind == "mlx":
-        if sys.platform != "darwin":
-            raise RuntimeError("mlx_lm.convert requires macOS")
+        import importlib.util
+
+        if importlib.util.find_spec("mlx_lm.convert") is None:
+            raise RuntimeError("mlx_lm.convert requires the MLX stack")
         from mlx_lm.convert import convert as mlx_convert
 
         output = destination / "model"  # mlx-lm requires a nonexistent output path.
