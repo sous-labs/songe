@@ -1174,6 +1174,8 @@ def doctor(config, root, local):
                 )
                 if url == f"http://127.0.0.1:{config.port}/v1":
                     configured.append(kind)
+                elif not provider:
+                    invalid.append(f"{kind}: no {NAME} provider")
                 else:
                     invalid.append(f"{kind}: provider URL differs")
             except (OSError, ValueError, AttributeError):

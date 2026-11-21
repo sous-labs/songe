@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import pytest
+
 from songe.cli import initialize, main
 from songe.config import Config
 from songe.schedule import Probes
@@ -230,6 +232,41 @@ def test_doctor_recognizes_agent_v2_and_live_service(tmp_path, monkeypatch, caps
     assert "1 configured (opencode)" in output
     assert "Service: running on 127.0.0.1:7613, ready" in output
     assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "data,expected",
+    [
+        ({}, "opencode: no songe provider"),
+        (
+            {"provider": {"songe": {"options": {"baseURL": "http://127.0.0.1:9/v1"}}}},
+            "opencode: provider URL differs",
+        ),
+    ],
+)
+def test_doctor_tells_a_missing_provider_from_a_wrong_url(
+    tmp_path, monkeypatch, capsys, data, expected
+):
+    import json
+
+    import httpx
+
+    from songe import cli
+
+    path = tmp_path / "home/.config/opencode/opencode.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(data), encoding="utf-8")
+    monkeypatch.setattr(cli, "measured_hardware", lambda: ("linux", 1, 1, "cpu"))
+
+    def down(*args, **kwargs):
+        raise httpx.ConnectError("stopped")
+
+    monkeypatch.setattr(httpx.Client, "get", down)
+    main(["--data-dir", str(tmp_path / "missing"), "doctor"])
+    agents = next(
+        line for line in capsys.readouterr().out.splitlines() if line.startswith("Agents:")
+    )
+    assert agents == f"Agents: 0 configured; songe init; {expected}"
 
 
 def test_status_explains_corrupt_offline_store(tmp_path, monkeypatch, capsys):
