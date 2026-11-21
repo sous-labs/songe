@@ -108,23 +108,13 @@ _GROWTH = {}
 def needs_growth(config, store):
     """Cached until the store is written or the policy changes: the pool scan
     decodes every step, and dashboards ask on each refresh."""
+    from ..log import change_mark
+
     path = getattr(store, "path", None)
-    if path is None:
+    mark = change_mark(path) if path is not None else None
+    if mark is None:
         return _needs_growth(config, store)
-    files = [path, path.with_name(path.name + "-wal")]
-
-    def changed(file):
-        try:
-            return file.stat().st_mtime_ns
-        except OSError:
-            return 0  # No write-ahead log, or SQLite just folded it in.
-
-    key = (
-        str(path),
-        getattr(store, "model_id", ""),
-        tuple(changed(f) for f in files),
-        policy_key(config),
-    )
+    key = (str(path), getattr(store, "model_id", ""), mark, policy_key(config))
     if key not in _GROWTH:
         if len(_GROWTH) > 64:  # one entry per model and store version
             _GROWTH.clear()

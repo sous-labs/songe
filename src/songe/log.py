@@ -48,6 +48,42 @@ def close_connections():
     rename a database file that is open; uninstall --purge removes it)."""
     for key in list(_CONNECTIONS.__dict__.get("cache", {})):
         _forget(key)
+    for key in list(_CONNECTIONS.__dict__.get("watchers", {})):
+        _unwatch(key)
+
+
+def _unwatch(key):
+    entry = _CONNECTIONS.__dict__.get("watchers", {}).pop(key, None)
+    if entry:
+        try:
+            entry[0].close()
+        except sqlite3.Error:
+            pass
+
+
+def change_mark(path):
+    """A value that differs after every commit to `path`, from any
+    connection or process; None when there is no database yet.
+
+    File times cannot do this: Linux stamps them from a clock that ticks
+    every few milliseconds, so several commits can leave them unchanged.
+    SQLite's data_version changes whenever another connection commits, and
+    this connection never writes. The token tells a reopened connection's
+    count apart from an earlier one's."""
+    identity = _identity(path)
+    if identity is None:
+        return None
+    watchers = _CONNECTIONS.__dict__.setdefault("watchers", {})
+    key = str(path)
+    if key in watchers and watchers[key][1] != identity:
+        _unwatch(key)  # The file was replaced or removed since.
+    entry = watchers.pop(key, None)
+    if entry is None:
+        entry = (sqlite3.connect(path, timeout=5), identity, uuid.uuid4().hex)
+    watchers[key] = entry  # most recently used last
+    for old in list(watchers)[: max(0, len(watchers) - _CACHED_PER_THREAD)]:
+        _unwatch(old)
+    return entry[2], entry[0].execute("PRAGMA data_version").fetchone()[0]
 
 
 def _cached(path):

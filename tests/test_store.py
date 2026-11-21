@@ -223,3 +223,33 @@ def test_a_replaced_database_file_is_reopened(store):
     with fresh.connect() as after:
         assert after is not before
         assert after.execute("SELECT COUNT(*) FROM state").fetchone()[0] >= 0
+
+
+def test_change_mark_moves_with_every_commit(tmp_path):
+    import subprocess
+
+    from songe.log import change_mark, close_connections
+
+    store = Store(tmp_path / "data")
+    assert change_mark(tmp_path / "missing.sqlite3") is None
+    first = change_mark(store.path)
+    store.set("a", 1)
+    second = change_mark(store.path)
+    assert second != first
+    assert change_mark(store.path) == second  # no commit, no change
+    # Another process's commit counts too.
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; from pathlib import Path; from songe.log import Store; "
+            "Store(Path(sys.argv[1])).set('b', 2)",
+            str(store.root),
+        ],
+        check=True,
+    )
+    third = change_mark(store.path)
+    assert third != second
+    # A reopened watcher never repeats an earlier connection's mark.
+    close_connections()
+    assert change_mark(store.path) not in {first, second, third}

@@ -404,6 +404,30 @@ def test_target_grows_to_pending_tail_after_majority_is_learned(config, store):
     assert measure_pool(config, store, Tokenizer())[1] == 1000
 
 
+def test_growth_answer_follows_a_write_in_the_same_file_time_tick(config, store):
+    # Linux file times tick every few milliseconds; a commit right after a
+    # call can leave them unchanged (#11). Pin them to show it.
+    import os
+
+    steps = [step(700, i) for i in range(1, 10)] + [step(1000, 10)]
+    store.sync_steps(steps)
+    samples, target, key = measure_pool(config, store, Tokenizer())
+    rows = [
+        original_rows()[0]
+        | {"sequence": 700, "response_tokens": 128, "token_chunk": 32}
+    ]
+    saved = {"rows": rows, "samples": samples}
+    saved["progress"] = progress(config, saved, target, key)
+    store.set("calibration", saved)
+    files = [store.path, store.path.with_name(store.path.name + "-wal")]
+    assert not needs_growth(config, store)
+    times = [os.stat(f) for f in files]
+    store.mark_scored(steps[:9])
+    for file, stat in zip(files, times, strict=True):
+        os.utime(file, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    assert needs_growth(config, store)
+
+
 @pytest.mark.parametrize("available", [False, True])
 def test_public_learning_entry_runs_growth_instead_of_training(
     config, store, measured, monkeypatch, available
