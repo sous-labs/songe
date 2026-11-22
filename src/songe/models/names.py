@@ -22,11 +22,16 @@ def catalog(config, store=None):
             (row["id"], row["config"]["public_model"])
             for row in registry.entries(store)
         )
+    primary_alias = (
+        (config.public_model if config.model else public_name(primary)) if primary else None
+    )
     for model in config.exposed_models:
-        if model != config.public_model and model not in result.values():
+        # Saved names are public ones; the primary's own must not come back
+        # as a second model (a serve-only install has no public_model).
+        if model not in {config.public_model, primary_alias} and model not in result.values():
             result.setdefault(model, public_name(model))
     if primary:
-        result[primary] = config.public_model if config.model else public_name(primary)
+        result[primary] = primary_alias
     elif not result:
         result[config.public_model] = config.public_model
     # Publishers can ship different weights with the same folder name.

@@ -416,6 +416,19 @@ def test_name_collisions_keep_distinct_models(config, store):
     assert set(config.exposed_models) == set(aliases.values())
 
 
+def test_serve_only_install_lists_each_model_once(config):
+    # Seen with Ollama when its files are not readable: init saved the public
+    # names, and the primary came back as "songe/smollm2-135m-96cda480" too.
+    from songe.models.names import catalog, exposed
+
+    config.model, config.model_ref = "", {}
+    config.public_model = "songe/local"
+    config.base_identifier = "smollm2:135m"
+    config.exposed_models = ["songe/smollm2-135m", "songe/qwen1.5b-latest"]
+    assert sorted(exposed(config)) == ["songe/qwen1.5b-latest", "songe/smollm2-135m"]
+    assert catalog(config)["smollm2:135m"] == "songe/smollm2-135m"
+
+
 def test_migration_keeps_user_edited_legacy_entry(config, store, tmp_path):
     config = catalog_config(config)
     path = tmp_path / "opencode.json"
