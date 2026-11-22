@@ -816,5 +816,8 @@ async def test_lms_restart_retains_an_unconfirmed_pending_load(tmp_path, monkeyp
     assert store.get("lmstudio_claims")["instances"]["alias"]["pending"]
     await fresh.close()
     assert not fresh.memory_watcher.done()
-    fresh.memory_watcher.cancel()
-    await asyncio.gather(fresh.memory_watcher, return_exceptions=True)
+    # End the watcher through its own exit condition (nothing left to
+    # guard). Cancelling it while it awaits asyncio.to_thread hung on
+    # Python 3.11 in about half the runs (#82).
+    fresh.owned.clear()
+    await asyncio.wait_for(fresh.memory_watcher, 5)
