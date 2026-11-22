@@ -338,10 +338,10 @@
   "catching_up": "Catching up on your earlier conversations. After this, Quick Dreams take a few minutes.",
   "next_after_quick": "Then the preferences in the prompt update",
   "next_after_reading": "Then the preferences in the prompt update · a Deep Dream starts after a long quiet period",
-  "machine_line": "{name} · {memory} GB · trains models up to about {size}B",
+  "machine_line": "{name} · {memory} GB · can train models up to about {size}B (estimate)",
   "machine_gpus": "GPU {index} of {gpus}: ",
   "machine_cannot": "{name} · no GPU for training (serves only)",
-  "machine_title": "A rough estimate for dense models trained in 4-bit; each model's real limit is measured before its first Deep Dream.",
+  "machine_title": "An estimate from this machine's memory, for dense models trained in 4-bit. Each model's real limit is measured before its first Deep Dream and shown on its page.",
   "training_window": "trains on up to {window} tokens per conversation",
   "training_served": "serves up to {served} · ",
   "training_limit": {
