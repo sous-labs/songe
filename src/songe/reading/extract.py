@@ -16,6 +16,7 @@ from .rules import extract as rule_signals
 from .views import (
     call_line,
     events,
+    first_line,
     last_user_item,
     result_view,
     shorten_paths,
@@ -50,6 +51,10 @@ def workdir_of(rows):
         if m:
             return m.group(1)
     return None
+
+
+# Command results the review shows in full: the turn's last ones.
+REVIEW_FULL = 8
 
 
 def call_text(items, result_item):
@@ -314,10 +319,18 @@ class Session:
                     "tool", e["type"], e["item"], e["steps"], result_view(e["text"]), where
                 )
             elif e["kind"] == "review":
+                # The turn's last results in full, earlier ones one line each
+                # (command and the first line of its result): a turn of dozens
+                # of build-fix steps made 20-50k-token prompts (live, Inkling).
+                # A distant failure can still be flagged; the follow-up calls
+                # (responsible, lesson) see that step in full.
+                full_from = len(e["items"]) - REVIEW_FULL
                 view = self.short(
                     "\n".join(
                         f"STEP {items[i]['step']}: {call_text(items, i)}\n  output: {result_view(items[i]['content'], 500)}"
-                        for i in e["items"]
+                        if n >= full_from
+                        else f"STEP {items[i]['step']}: {call_text(items, i)}  ->  {first_line(items[i]['content'])}"
+                        for n, i in enumerate(e["items"])
                     )
                 )
                 answer = await self.model.ask(

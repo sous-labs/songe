@@ -15,6 +15,11 @@ import time
 
 import httpx
 
+# Answer room for a cut-off answer's second try, and for a reader's later
+# questions once a model needed it.
+ROOM_CAP = 4
+TOKENS_CAP = 32768
+
 
 class Stopped(Exception):
     """The user came back (or reading was otherwise told to stop)."""
@@ -57,6 +62,8 @@ class Reader:
         self.max_tokens = max_tokens
         self.client = client or httpx.AsyncClient(timeout=timeout, trust_env=False)
         self.calls = self.cached = 0
+        self.room = 1  # multiplier on max_tokens, grown by cut-off answers
+        self.length_retries = 0
         self.seconds = 0.0
         self.structured = True
 
@@ -90,7 +97,34 @@ class Reader:
         if self.template_switch:
             body["chat_template_kwargs"] = {"enable_thinking": think}
         started = time.monotonic()
-        answer = None
+        # Reasoning models keep thinking even when asked not to (live,
+        # Inkling: ~3,000 tokens per answer, 17 of 43 cut off at the limit; a
+        # cut-off JSON is lost and asked again on the next read). An answer
+        # stopped by the limit is asked once more with twice the room, and
+        # this reader keeps the larger room for its later questions.
+        body["max_tokens"] = int(body["max_tokens"] * self.room)
+        for attempt in range(2):
+            answer, finish = await self.post(body, prompt, schema, name)
+            if "error" in answer and finish == "length" and attempt == 0:
+                self.room = min(self.room * 2, ROOM_CAP)
+                self.length_retries += 1
+                body = body | {"max_tokens": min(body["max_tokens"] * 2, TOKENS_CAP)}
+                continue
+            break
+        self.calls += 1
+        self.seconds += time.monotonic() - started
+        if "error" in answer:
+            # Not cached: a later read asks again (a cached failure would be
+            # reused for good).
+            self.errors = getattr(self, "errors", 0) + 1
+        else:
+            await asyncio.to_thread(cache_put, self.store, key, name, answer)
+        return answer
+
+
+    async def post(self, body, prompt, schema, name):
+        """One question: (answer, finish reason). Structured output when the
+        server takes it, else asked plainly with the schema in the prompt."""
         if self.structured:
             response = await self.client.post(
                 self.url + "/chat/completions",
@@ -107,33 +141,28 @@ class Reader:
                 self.structured = False
             else:
                 response.raise_for_status()
-                answer = read(response)
-        if not self.structured:
-            response = await self.client.post(
-                self.url + "/chat/completions",
-                json=body
-                | {
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": prompt
-                            + "\nThe JSON must match this schema: "
-                            + json.dumps(schema),
-                        }
-                    ]
-                },
-            )
-            response.raise_for_status()
-            answer = read(response)
-        self.calls += 1
-        self.seconds += time.monotonic() - started
-        if "error" in answer:
-            # Not cached: a later read asks again (a cached failure would be
-            # reused for good).
-            self.errors = getattr(self, "errors", 0) + 1
-        else:
-            await asyncio.to_thread(cache_put, self.store, key, name, answer)
-        return answer
+                return read(response), finish_reason(response)
+        response = await self.client.post(
+            self.url + "/chat/completions",
+            json=body
+            | {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": prompt + "\nThe JSON must match this schema: " + json.dumps(schema),
+                    }
+                ]
+            },
+        )
+        response.raise_for_status()
+        return read(response), finish_reason(response)
+
+
+def finish_reason(response):
+    try:
+        return ((response.json().get("choices") or [{}])[0]).get("finish_reason")
+    except ValueError:
+        return None
 
 
 def read(response):
