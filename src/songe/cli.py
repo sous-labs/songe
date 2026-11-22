@@ -281,7 +281,10 @@ def initialize(args, root):
                         discovery.lmstudio(folder=folder), config.lms, folder
                     )
                 elif name == "ollama":
-                    found = discovery.ollama(folder=config.ollama_models_dir or None)
+                    # Tags made with `ollama create` are only listed by its API.
+                    found = discovery.ollama(
+                        folder=config.ollama_models_dir or None, url=url
+                    )
                 else:
                     found = getattr(discovery, name)(url)
                 refs += found

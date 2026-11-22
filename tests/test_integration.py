@@ -253,7 +253,8 @@ def test_init_selects_agents_upstream_and_asks_once(
         ModelRef("ollama", "other:latest", "gguf", base, "test"),
         ModelRef("ollama", "chosen:latest", "gguf", base, "test"),
     ]
-    monkeypatch.setattr(discovery, "ollama", lambda **kw: refs)
+    asked = []
+    monkeypatch.setattr(discovery, "ollama", lambda **kw: asked.append(kw) or refs)
     monkeypatch.setattr(discovery, "lmstudio", lambda **kw: [])
     monkeypatch.setattr(discovery, "mlx", lambda url: [])
     monkeypatch.setattr(discovery, "llamacpp", lambda url: [])
@@ -290,6 +291,8 @@ def test_init_selects_agents_upstream_and_asks_once(
     assert not config.calibration_available
     assert len(approvals) == 1 and applied == ["service", "agents"]
     assert Store(root).version()["artifact"] == str(base)
+    # Tags made with `ollama create` are only listed by Ollama's API.
+    assert asked[0]["url"] == "http://127.0.0.1:11439/v1"
 
 
 async def test_supervisor_registers_candidate_slots_and_vllm_runtime_controls(

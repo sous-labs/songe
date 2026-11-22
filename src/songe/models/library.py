@@ -86,11 +86,12 @@ def scan(config):
                 pass  # Offline CLI still leaves the local library visible.
         return list(items.values())
     if config.upstream == "ollama":
+        root = config.upstream_url.rstrip("/").removesuffix("/v1")
+        # Tags made with `ollama create` are only listed by its API.
         refs = {
             r.serving_id: r
-            for r in discovery.ollama(folder=config.ollama_models_dir or None)
+            for r in discovery.ollama(folder=config.ollama_models_dir or None, url=root)
         }
-        root = config.upstream_url.rstrip("/").removesuffix("/v1")
         try:
             tags = discovery._get(root + "/api/tags").get("models", [])
         except (OSError, ValueError, httpx.HTTPError):

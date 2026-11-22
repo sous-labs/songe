@@ -164,9 +164,13 @@ def test_inventory_protocols_are_read_only_and_include_every_served_model(
         }
 
     monkeypatch.setattr(discovery, "_get", get)
-    monkeypatch.setattr(discovery, "ollama", lambda **kw: [])
+    asked = []
+    monkeypatch.setattr(discovery, "ollama", lambda **kw: asked.append(kw) or [])
     result = scan_library(config)
     assert len(result) == 2
+    if kind == "ollama":
+        # Tags made with `ollama create` are only listed by Ollama's API.
+        assert asked[0]["url"] == "http://fake"
     assert (
         all(m["loaded"] for m in result)
         if kind != "ollama"
