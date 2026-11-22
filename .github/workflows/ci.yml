@@ -87,3 +87,65 @@ jobs:
           uv pip install --python smoke-venv dist/*.whl playwright
           smoke-venv/bin/python -m playwright install --with-deps --only-shell chromium
       - run: smoke-venv/bin/python .github/ci/smoke.py --songe smoke-venv/bin/songe --browser
+
+  # The install smoke test against real model servers (in Docker, with a
+  # 145 MB model): the llama.cpp and Ollama paths the fake server cannot show.
+  # Images are pinned so a server release never breaks a PR by surprise.
+  servers:
+    name: smoke / ${{ matrix.server }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - server: llamacpp
+            # -c differs from Songe's 8192 fallback, so the agent's limit
+            # shows that the served context was read (#28).
+            args: --upstream llamacpp --upstream-url http://127.0.0.1:8080/v1 --context 4096
+          - server: ollama
+            args: --upstream ollama --upstream-url http://127.0.0.1:11434/v1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/models
+          key: smollm2-135m-instruct-q8_0
+      - name: Tiny model
+        run: |
+          mkdir -p "$RUNNER_TEMP/models"
+          test -s "$RUNNER_TEMP/models/smol.gguf" || curl -fsSL --retry 3 -o "$RUNNER_TEMP/models/smol.gguf" \
+            https://huggingface.co/bartowski/SmolLM2-135M-Instruct-GGUF/resolve/main/SmolLM2-135M-Instruct-Q8_0.gguf
+      # The model is mounted at the same path inside the container, so Songe
+      # reads the weights the server reports, as on a user's machine.
+      - name: Start llama.cpp
+        if: matrix.server == 'llamacpp'
+        run: |
+          m="$RUNNER_TEMP/models"
+          docker run -d --name server -p 8080:8080 -v "$m:$m:ro" ghcr.io/ggml-org/llama.cpp:server-b12464 \
+            -m "$m/smol.gguf" --host 0.0.0.0 --port 8080 -c 4096 --jinja
+          for i in $(seq 90); do curl -fs http://127.0.0.1:8080/health && exit 0; sleep 2; done; exit 1
+      - name: Start Ollama
+        if: matrix.server == 'ollama'
+        run: |
+          m="$RUNNER_TEMP/models"
+          mkdir -p "$RUNNER_TEMP/ollama"
+          docker run -d --name server -p 11434:11434 -v "$RUNNER_TEMP/ollama:/root/.ollama" -v "$m:$m:ro" ollama/ollama:0.40.17
+          for i in $(seq 60); do curl -fs http://127.0.0.1:11434/api/version && break; sleep 2; done
+          # A tag made with `ollama create`, as from a user's own GGUF (#46).
+          docker exec server sh -c "printf 'FROM $m/smol.gguf\n' > /tmp/Modelfile && ollama create smol -f /tmp/Modelfile"
+          # Written by root in the container; Songe reads it as the runner user.
+          sudo chmod -R a+rX "$RUNNER_TEMP/ollama"
+          echo "OLLAMA_ARGS=--ollama-models-dir $RUNNER_TEMP/ollama/models" >> "$GITHUB_ENV"
+      - run: uv build --wheel
+      - run: |
+          uv venv smoke-venv --python 3.12
+          uv pip install --python smoke-venv dist/*.whl
+      - run: smoke-venv/bin/python .github/ci/smoke.py --songe smoke-venv/bin/songe --model smol ${{ matrix.args }} $OLLAMA_ARGS
+      - name: Server log
+        if: failure()
+        run: docker logs server 2>&1 | tail -100
