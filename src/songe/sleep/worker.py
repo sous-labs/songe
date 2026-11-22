@@ -66,8 +66,8 @@ def preview(config, store):
         from ..practice.pool import (
             MOMENTS_PER_CONVERSATION,
             ensure_heldout,
+            gate_moments,
             heldout_fill,
-            last_moments,
             practice_steps,
             real_test_steps,
         )
@@ -75,9 +75,9 @@ def preview(config, store):
         # Every moment the user reacted to is a test (never trained on under
         # Dreams); held-out practice lessons fill up to the usual size of the
         # test set, more lessons held out on demand when short.
-        # Each conversation's last moments, as heldout_units counts them:
-        # the check stays bounded however long the history grows.
-        heldout = last_moments(real_test_steps(store))
+        # Each conversation's sampled moments (as many as heldout_units
+        # counts): the check stays bounded however long the history grows.
+        heldout = gate_moments(real_test_steps(store))
         ensure_heldout(store, config.min_heldout)
         train = practice_steps(store)
         per = {}

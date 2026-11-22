@@ -77,7 +77,7 @@ def practice_steps(store, split="train"):
     return steps
 
 
-MOMENTS_PER_CONVERSATION = 3  # judged.PER_UNIT: a conversation's last moments
+MOMENTS_PER_CONVERSATION = 3  # judged.PER_UNIT: a conversation's test moments
 DRIFT_MAX = 48  # confirmed successes measured for drift, at most
 
 
@@ -106,16 +106,27 @@ def real_test_steps(store):
 _UNITS = {}
 
 
-def last_moments(steps, per=None):
-    """Each conversation's last moments with feedback (its order kept): the
-    test moments the gate scores and judges. Every moment of every recorded
-    conversation made the check grow with history (live, Inkling: 4,788
-    measurements, ~100 hours, for 12 long conversations)."""
+def sampled(steps, per):
+    """`per` of these steps, chosen by the hash of their id: spread over the
+    whole conversation like a random sample, yet the same ones every Dream
+    (a conversation's choice changes only when it gains moments). Order kept.
+    Its last moments would be biased (the end of a session is not typical)
+    and the costliest: they carry the longest histories."""
+    if len(steps) <= per:
+        return list(steps)
+    chosen = {id(s) for s in sorted(steps, key=lambda s: digest(str(s["id"])))[:per]}
+    return [s for s in steps if id(s) in chosen]
+
+
+def gate_moments(steps, per=None):
+    """Each conversation's sampled moments with feedback: what the gate
+    scores and judges. All of them made the check grow with history (live,
+    Inkling: 4,788 measurements, ~100 hours, for 12 long conversations)."""
     per = per or MOMENTS_PER_CONVERSATION
     by = {}
     for s in steps:
         by.setdefault(s["conversation"], []).append(s)
-    keep = {id(s) for ss in by.values() for s in ss[-per:]}
+    keep = {id(s) for ss in by.values() for s in sampled(ss, per)}
     return [s for s in steps if id(s) in keep]
 
 
@@ -230,10 +241,10 @@ def drift_steps(store):
                     "source_id": exchange,
                 }
             )
-    # Bounded like the test moments: each session's last successes, the
+    # Bounded like the test moments: each session's sampled successes, the
     # newest sessions first, DRIFT_MAX at most (every success in history
     # made the check grow with it).
-    steps = last_moments(steps)
+    steps = gate_moments(steps)
     return steps[-DRIFT_MAX:]
 
 

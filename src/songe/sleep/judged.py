@@ -61,12 +61,15 @@ def said(content):
 
 
 def moments(steps):
-    """The gate's held-out steps to judge: each unit's last PER_UNIT, units
-    in turn so every one counts before any gets more, MOMENTS at most."""
+    """The gate's held-out steps to judge: each unit's PER_UNIT sampled
+    moments (practice.pool.sampled, the same ones the gate scores), units in
+    turn so every one counts before any gets more, MOMENTS at most."""
+    from ..practice.pool import sampled
+
     units = {}
     for s in steps:
         units.setdefault(s["conversation"], []).append(s)
-    queues = [ss[-PER_UNIT:] for ss in units.values()]
+    queues = [sampled(ss, PER_UNIT) for ss in units.values()]
     out = []
     while any(queues) and len(out) < MOMENTS:
         for q in queues:
