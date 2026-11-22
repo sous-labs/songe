@@ -927,3 +927,32 @@ def test_a_pressed_deep_dream_waiting_for_memory_to_train_shows_then_ends(store)
     schedule.Scheduler.note_fit_wait(fake, sample, 13 * 2**30)
     assert learner.get("dream_stopped")["detail"] == "Waiting for memory"
     assert store.get("requested_sleep") is False and learner.get("fit_wait") is None
+
+
+def test_a_pressed_deep_dream_whose_night_failed_retries_then_says_why(store):
+    """Live (Inkling): a pressed Dream's training night failed, the page said
+    "retry in 5m", and with auto-dream off nothing retried and no note came."""
+    import time as _time
+    from types import SimpleNamespace
+
+    from songe.schedule import FAILED_NIGHT_RETRIES, ModelScheduler
+
+    fake = SimpleNamespace(installation_store=store)
+    learner = store.scoped("m")
+    launch = {"model": "m", "requested": True, "nights": 0, "at": _time.time() - 1}
+    learner.night(None, status="failed")  # the pressed Dream's night, failed
+    args = {"calibrating": False, "failed": True, "interrupted": False, "stopped_by": None, "memory_stop": False}
+    for count in range(1, FAILED_NIGHT_RETRIES):
+        learner.set("failures", {"count": count, "at": _time.time()})
+        store.set("requested_sleep", False)
+        ModelScheduler.carry_on(fake, "m", launch, **args)
+        # The announced retry is this request, kept armed.
+        assert store.get("requested_sleep") is True and store.get("requested_model") == "m"
+        assert learner.get("dream_stopped") is None
+    learner.set("failures", {"count": FAILED_NIGHT_RETRIES, "at": _time.time()})
+    learner.set("child_error", "Learning stopped: killed by SIGKILL (out of memory?)")
+    store.set("requested_sleep", False)
+    ModelScheduler.carry_on(fake, "m", launch, **args)
+    stopped = learner.get("dream_stopped")
+    assert store.get("requested_sleep") is False and stopped["reason"] == "training"
+    assert "failed 3 times" in stopped["detail"] and "SIGKILL" in stopped["detail"]

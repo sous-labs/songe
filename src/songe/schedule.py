@@ -152,6 +152,7 @@ def work_costs(config, calibration):
 
 SLICE_PAUSE_MAX = 300  # seconds between work slices, at most
 WORKER_ERR = "worker.err"  # the last learning child's stderr
+FAILED_NIGHT_RETRIES = 3  # a pressed Dream's failed nights retried, then a note
 
 
 def exit_reason(code, err_path, tail=600):
@@ -2199,12 +2200,6 @@ class ModelScheduler(Scheduler):
         learner = self.installation_store.scoped(model)
         if learner.get("growth_requested") and calibrating:
             learner.set("growth_requested", None)
-        if len(learner.nights()) > launch["nights"]:
-            learner.set("dream_growth", None)
-            learner.set("memory_wait", None)
-            learner.set("dream_memory_waits", None)
-            learner.set("dream_capacity_edges", None)
-            return  # It is under way: unfinished nights resume on their own.
         if stopped_by in {"cancelled", "paused"} or self.installation_store.get("paused", False):
             return  # The user stopped it.
 
@@ -2221,6 +2216,28 @@ class ModelScheduler(Scheduler):
             learner.set("dream_stopped", {"kind": "deep", "at": time.time(), "reason": "training",
                                           "detail": str(detail)[:300], "kept": counts(learner)["kept"]})
             logger.warning("deep_dream_stopped %s: %s", model, detail)
+
+        nights = learner.nights()
+        if len(nights) > launch["nights"]:
+            if nights[-1]["status"] == "failed":
+                # A failed night does not resume on its own, and with
+                # auto-dream off nothing else starts it: the retry announced
+                # ("failed · retry in 5m") is this request, kept armed (the
+                # failure back-off sets when). A few failures in a row end in
+                # a note saying why (live, Inkling: "retry in 5m", then
+                # nothing for an hour and no word).
+                failures = (learner.get("failures") or {}).get("count", 0)
+                if failures >= FAILED_NIGHT_RETRIES:
+                    why = learner.get("child_error") or "an error stopped it"
+                    stop(f"training failed {failures} times in a row: {why}")
+                    return
+                again()
+                return
+            learner.set("dream_growth", None)
+            learner.set("memory_wait", None)
+            learner.set("dream_memory_waits", None)
+            learner.set("dream_capacity_edges", None)
+            return  # It is under way: unfinished nights resume on their own.
 
         measured = any(r.get("sequence") for r in (learner.get("calibration") or {}).get("rows", []))
         if memory_stop and calibrating and measured:
