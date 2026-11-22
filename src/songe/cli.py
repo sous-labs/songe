@@ -329,14 +329,23 @@ def initialize(args, root):
     if not refs:
         # Models may be usable for forwarding even when the server does not
         # expose local weight paths. This is a supported serve-only binding.
-        for name in [requested] if requested else defaults:
-            url = getattr(args, "upstream_url", None) or defaults[name]
+        # A server Songe does not recognize gets the generic OpenAI client.
+        given = getattr(args, "upstream_url", None)
+        if requested:
+            candidates = [(requested, given or defaults[requested])]
+        elif given:
+            candidates = [(discovery.identify(given), given)]
+        else:
+            candidates = [(agent_upstream, agent_url)] if agent_url else []
+            candidates += [(name, defaults[name]) for name in defaults]
+        for name, url in candidates:
             try:
                 ids = upstream_model_ids(url)
             except (OSError, ValueError, httpx.HTTPError):
                 continue
             if ids:
-                config.upstream, config.upstream_url = name, url
+                label = name or "OpenAI-compatible"
+                config.upstream, config.upstream_url = name or "vllm", url
                 config.exposed_models = ids
                 if not config.model:
                     config.base_identifier = ids[0]
@@ -346,7 +355,7 @@ def initialize(args, root):
                 facts(
                     [
                         ("Models", ", ".join(ids)),
-                        ("Upstream", f"{name} · {url}"),
+                        ("Upstream", f"{label} · {url}"),
                         (
                             "Agents",
                             ", ".join(str(path) for path, *_ in changes) or "none",
