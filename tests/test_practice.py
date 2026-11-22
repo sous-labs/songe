@@ -109,3 +109,19 @@ def test_forget_deletes_practice(store):
     store.forget()
     with store.connect() as db:
         assert db.execute("SELECT COUNT(*) FROM practice").fetchone()[0] == 0
+
+
+def test_not_copy_catches_non_latin_verbatim_requests():
+    from songe.practice import checks
+
+    ar_req = "أصلح دالة حساب الضريبة في ملف الفواتير للعميل السري"
+    ar_ev = checks.copy_evidence({"request": ar_req}, {}, [ar_req], [])
+    assert ar_ev and ar_ev[0].startswith("request overlap")
+
+    zh_req = "修复客户发票文件中的税率计算函数"
+    zh_ev = checks.copy_evidence({"request": zh_req}, {}, [zh_req], [])
+    assert zh_ev and zh_ev[0].startswith("request overlap")
+
+    # Different Arabic request should not trigger copy overlap.
+    ar_other = "أنشئ جدول بيانات جديد لإدارة المخزون الشهري"
+    assert checks.copy_evidence({"request": ar_other}, {}, [ar_req], []) == []

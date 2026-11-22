@@ -20,6 +20,7 @@ import ast
 import hashlib
 import json
 import re
+import unicodedata
 
 from ..reading.timeline import clip
 
@@ -71,12 +72,17 @@ def render_text(messages, limit=4000):
     return clip("\n".join(out), limit)
 
 
+_TRIGRAM_TOKENS = re.compile(r"[\u3400-\u9fff\uf900-\ufaff\u3040-\u30ff]|\w+")
+
+
 def words(text):
     return set(re.findall(r"[a-z_][a-z0-9_]{2,}", (text or "").lower()))
 
 
 def trigrams(text):
-    w = re.findall(r"[a-z0-9_]+", (text or "").lower())
+    norm = unicodedata.normalize("NFKC", (text or "").lower())
+    cleaned = "".join(ch for ch in norm if unicodedata.category(ch) != "Mn" and ch != "\u0640")
+    w = _TRIGRAM_TOKENS.findall(cleaned)
     return {tuple(w[i : i + 3]) for i in range(len(w) - 2)}
 
 

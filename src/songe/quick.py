@@ -21,6 +21,7 @@ Lesson: {"id", "text", "signals": [signal ids], "added_at", "count"}
 
 import re
 import time
+import unicodedata
 
 from .reading import store as reading
 from .reading.rules import DEICTIC, RULE_START, SENTENCES, rule_sentence  # noqa: F401
@@ -30,7 +31,7 @@ KEY = "prompt_lessons"
 USER = {"correction", "retry", "approval"}
 LESSON_CHARS = 300
 SIMILAR = 0.5  # word overlap (Jaccard) at which two lessons are one
-WORDS = re.compile(r"[a-z0-9]+")
+WORDS = re.compile(r"[\u3400-\u9fff\uf900-\ufaff\u3040-\u30ff]|[^\W_]+")
 COMMON = {
     "the", "a", "an", "to", "of", "and", "or", "in", "on", "for", "with", "is",
     "it", "that", "this", "be", "as", "when", "if", "you", "your", "use", "by",
@@ -43,6 +44,14 @@ BLOCK = (
 )
 
 
+def _tokens(text):
+    """Unicode word tokens (splitting CJK ideographs/kana so no-space scripts
+    still match, and stripping combining marks/tatweel so Arabic words stay intact)."""
+    norm = unicodedata.normalize("NFKC", str(text).lower())
+    cleaned = "".join(ch for ch in norm if unicodedata.category(ch) != "Mn" and ch != "\u0640")
+    return WORDS.findall(cleaned)
+
+
 def stem(word):
     """A rough stem, so "valid"/"validity", "runs"/"running" count as one."""
     for suffix in ("ations", "ation", "ities", "ity", "ings", "ing", "ies", "ed", "es", "ly", "s"):
@@ -52,14 +61,14 @@ def stem(word):
 
 
 def words(text):
-    return {stem(w) for w in WORDS.findall(text.lower()) if w not in COMMON}
+    return {stem(w) for w in _tokens(text) if w not in COMMON}
 
 
 def normal(text):
     """For telling two sentences are the same one: lower case, words only, a
     leading "please" ignored."""
-    words = WORDS.findall(str(text).lower())
-    return " ".join(words[1:] if words[:1] == ["please"] else words)
+    tokens = _tokens(text)
+    return " ".join(tokens[1:] if tokens[:1] == ["please"] else tokens)
 
 
 def similar(a, b):
@@ -360,7 +369,7 @@ def quick_dream(store, config, now=None, merged=None, kept=None):
     # One lesson per sentence: the same text twice is one lesson.
     unique = {}
     for lesson in pool:
-        key = normal(lesson["text"])
+        key = normal(lesson["text"]) or " ".join(lesson["text"].split()).lower()
         if key in unique:
             first = unique[key]
             first["signals"] = list(dict.fromkeys(first["signals"] + lesson["signals"]))
@@ -475,9 +484,13 @@ def undo(store, entry_id):
     entry = next((e for e in history if e["id"] == entry_id), None)
     if entry is None:
         raise ValueError("Unknown Quick Dream")
-    added = {normal(t) for t in entry.get("added") or []}
+    added = {normal(t) or " ".join(str(t).split()).lower() for t in entry.get("added") or []}
     current = state(store)
-    gone = [lesson for lesson in current["lessons"] if normal(lesson["text"]) in added]
+    gone = [
+        lesson
+        for lesson in current["lessons"]
+        if (normal(lesson["text"]) or " ".join(str(lesson["text"]).split()).lower()) in added
+    ]
     if gone:
         store.set(KEY, current | {
             "lessons": [lesson for lesson in current["lessons"] if lesson not in gone],

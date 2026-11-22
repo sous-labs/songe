@@ -794,3 +794,36 @@ async def test_the_undo_quick_control(config, store):
         reply = (await client.post("/api/control", json={"action": "undo_quick", "id": entry["id"]})).json()
     assert reply["ok"] and reply["message"].startswith("Quick Dream undone · 1 preference removed")
     assert quick.active(store) == []
+
+
+def test_non_latin_lessons_do_not_collide_resurrect_or_wipe_on_undo(config, store):
+    """Non-Latin lessons (Arabic, CJK) must stay distinct, respect remove(), and
+    only remove their own Quick Dream entries on undo()."""
+    ar_comments = "لا تضف تعليقات في الكود أبداً"
+    ar_formal = "اكتب الشرح دائماً بالعربية الفصحى"
+    zh_rule = "请总是使用简洁的中文回复"
+
+    assert quick.normal(ar_comments) != quick.normal(ar_formal)
+    assert quick.normal("لا تضف تعليقات في الكود أبداً") == quick.normal("لا تضف تعليقات في الكود أبدا")
+    assert quick.similar(ar_comments, ar_comments)
+    assert quick.similar(zh_rule, "总是使用简洁的中文回复")
+
+    add_signal(store, "a1", ar_comments, kind="tool_error", generality="always", revision=1)
+    e1 = quick.record(store, quick.quick_dream(store, config, now=10.0), at=10.0)
+    add_signal(store, "a2", ar_formal, kind="tool_error", generality="always", revision=2)
+    add_signal(store, "z1", zh_rule, kind="tool_error", generality="always", revision=3)
+    e2 = quick.record(store, quick.quick_dream(store, config, now=20.0), at=20.0)
+
+    # All three distinct non-Latin lessons survive (none collapsed into an empty key).
+    assert len(quick.active(store)) == 3
+
+    # Undoing Quick Dream 2 removes only its two lessons, leaving Quick Dream 1's Arabic lesson intact.
+    assert quick.undo(store, e2["id"]) == 2
+    remaining = quick.active(store)
+    assert len(remaining) == 1 and "تعليقات" in remaining[0]["text"]
+
+    # Removing the remaining Arabic lesson keeps it removed on subsequent Quick Dreams.
+    quick.remove(store, remaining[0]["id"])
+    quick.quick_dream(store, config, now=30.0)
+    assert quick.active(store) == []
+    assert e1["id"] != e2["id"]
