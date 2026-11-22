@@ -945,6 +945,31 @@ class Store:
             (cutoff,),
         )
 
+    def test_moment_conversations(self):
+        """The conversation of each active, eligible step with feedback
+        (hindsight): what heldout_units counts. SQLite reads the two fields;
+        no step payload (a whole agent history each) becomes Python objects
+        (live: 1,495 steps of 128k-token sessions decoded on every dashboard
+        refresh starved the API)."""
+        truthy = (
+            "CASE json_type(s.payload,'$.hindsight')"
+            " WHEN 'array' THEN json_array_length(s.payload,'$.hindsight') > 0"
+            " WHEN 'object' THEN json_extract(s.payload,'$.hindsight') != '{}'"
+            " WHEN 'text' THEN length(json_extract(s.payload,'$.hindsight')) > 0"
+            " WHEN 'true' THEN 1"
+            " WHEN 'integer' THEN json_extract(s.payload,'$.hindsight') != 0"
+            " WHEN 'real' THEN json_extract(s.payload,'$.hindsight') != 0"
+            " ELSE 0 END"
+        )
+        with self.connect() as db:
+            eligible, params = self._learning_filter(db)
+            rows = db.execute(
+                "SELECT json_extract(s.payload,'$.conversation') FROM steps s"
+                " WHERE s.retired_at IS NULL AND " + eligible + " AND " + truthy,
+                params,
+            )
+            return [row[0] for row in rows]
+
     def active_steps(self, split=None):
         with self.connect() as db:
             eligible, params = self._learning_filter(db)

@@ -102,17 +102,45 @@ def real_test_steps(store):
     return [s | {"split": "heldout"} for s in store.active_steps() if s.get("hindsight")]
 
 
+_UNITS = {}
+
+
 def heldout_units(store):
     """Test moments the gate can judge: up to three from each real
     conversation with feedback, plus one from each held-out practice lesson
-    (user decision: moments, not conversations)."""
+    (user decision: moments, not conversations).
+
+    Called several times per dashboard refresh: counted in SQL (no payload
+    decoding) and remembered until the database changes."""
+    from ..log import change_mark
+
+    path = getattr(store, "path", None)
+    mark = change_mark(path) if path is not None else None
+    key = (str(path), getattr(store, "model_id", ""))
+    if mark is not None and _UNITS.get(key, (None,))[0] == mark:
+        return _UNITS[key][1]
     per = {}
-    for s in real_test_steps(store):
-        if s.get("hindsight"):
-            per[s["conversation"]] = per.get(s["conversation"], 0) + 1
+    for conversation in store.test_moment_conversations():
+        per[conversation] = per.get(conversation, 0) + 1
     real = sum(min(n, MOMENTS_PER_CONVERSATION) for n in per.values())
-    lessons = len({s["signal_id"] for s in practice_steps(store, split="held_out")})
+    lessons = len(held_out_lessons(store))
+    if mark is not None:
+        _UNITS[key] = (mark, real + lessons)
     return real + lessons
+
+
+def held_out_lessons(store):
+    """Signal ids of kept practice lessons that are held out, without
+    decoding the scenes."""
+    with store.connect() as db:
+        rows = db.execute(
+            "SELECT json_extract(payload,'$.signal_id') FROM practice"
+            " WHERE model_id=? AND kept=1"
+            " AND COALESCE(json_array_length(payload,'$.messages'), 0) > 0",
+            (store.model_id,),
+        ).fetchall()
+    extra = set(store.get(EXTRA_HELD_OUT) or [])
+    return {sig for (sig,) in rows if held_out(sig, extra)}
 
 
 def ensure_heldout(store, need):
