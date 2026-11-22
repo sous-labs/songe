@@ -31,6 +31,15 @@ class TorchOptions:
     gradient_checkpointing: bool = True
     weight_decay: float = 0.01  # AdamW's reference default.
     max_grad_norm: float = 1.0  # Same clipping norm as sleep.distill.train.
+    # "auto": paged 8-bit AdamW (bitsandbytes) when the base is loaded in 4-bit,
+    # where AdamW's two fp32 states per adapter weight are gigabytes; else AdamW.
+    optimizer: str = "auto"
+    # Big-model memory savers; "auto" turns each on when the base is loaded in
+    # 4-bit (it would not fit in bf16), where every gigabyte counts.
+    # The input embedding is a lookup by token id: it can live in host RAM.
+    embedding_on_host: str = "auto"
+    # Activations saved for backward go to host RAM (pinned) during training.
+    offload_activations: str = "auto"
 
 
 @dataclass(frozen=True)
@@ -137,7 +146,7 @@ class TorchBackend:
 
     def __init__(self, config, check=lambda: None, train=True):
         import torch
-        from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+        from peft import LoraConfig, get_peft_model
         from transformers import (
             AutoConfig,
             AutoModelForCausalLM,
@@ -224,11 +233,18 @@ class TorchBackend:
         self.model.config.use_cache = False
         if train:
             if self.quantized:
-                self.model = prepare_model_for_kbit_training(
-                    self.model,
-                    use_gradient_checkpointing=self.options.gradient_checkpointing,
-                    gradient_checkpointing_kwargs={"use_reentrant": False},
-                )
+                # What prepare_model_for_kbit_training does, except that it
+                # upcasts every unquantized weight to fp32, the frozen
+                # vocabulary matrices included: 5 GB more than bf16 on a 27B
+                # with a 248k vocabulary (live, RTX 5090), and a load peak
+                # that fragments the allocator. Only norms and biases (1-D)
+                # are upcast here, for numerical stability, as peft does.
+                for param in self.model.parameters():
+                    if param.ndim == 1 and param.dtype in {torch.float16, torch.bfloat16}:
+                        param.data = param.data.float()
+            self.embedding_on_host = self._auto(self.options.embedding_on_host) and (
+                self._embedding_to_host()
+            )
             self.model = get_peft_model(
                 self.model,
                 LoraConfig(
@@ -257,6 +273,45 @@ class TorchBackend:
         ):
             raise ValueError("The chunked head must remain frozen")
 
+    def _auto(self, value):
+        if value not in {"auto", "on", "off"}:
+            raise ValueError(f"Expected auto, on or off, not {value!r}")
+        if value == "auto":
+            device = getattr(self, "device", None)
+            return bool(getattr(self, "quantized", False)) and (
+                device is not None and device.type == "cuda"
+            )
+        return value == "on"
+
+    def _option(self, name):
+        return getattr(getattr(self, "options", None) or TorchOptions(), name)
+
+    def _embedding_to_host(self):
+        """Move the input embedding to host RAM; only token ids go in and one
+        hidden row per token comes back. Not for tied embeddings, whose matrix
+        is also the output head that runs on the accelerator."""
+        torch = self.torch
+        embedding = self.model.get_input_embeddings()
+        head = self.model.get_output_embeddings()
+        if embedding is None or self.device.type == "cpu" or (
+            head is not None and head.weight.data_ptr() == embedding.weight.data_ptr()
+        ):
+            return False
+        embedding.to("cpu")
+        device = self.device
+
+        def to_host(module, args):
+            return tuple(a.to("cpu") if torch.is_tensor(a) else a for a in args)
+
+        def to_device(module, args, output):
+            return output.to(device, non_blocking=True)
+
+        embedding.register_forward_pre_hook(to_host)
+        embedding.register_forward_hook(to_device)
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()
+        return True
+
     def _checked(self):
         self._user_check()
         self._peak_rss = max(self._peak_rss, self._process.memory_info().rss)
@@ -283,10 +338,21 @@ class TorchBackend:
         finally:
             self.model.train(was_training)
 
+    def _host_copy(self, tensor):
+        """A copy in host RAM (pinned on CUDA for fast transfers back)."""
+        copy = tensor.detach().to("cpu", copy=True)
+        device = getattr(self, "device", None)
+        return copy.pin_memory() if device is not None and device.type == "cuda" else copy
+
     def snapshot_teacher(self):
-        """The teacher for this cycle is the version it starts from (DESIGN 3.3)."""
+        """The teacher for this cycle is the version it starts from (DESIGN 3.3).
+
+        Kept in host RAM: on accelerators two adapter-sized copies (this one
+        and the student's while the teacher runs) would otherwise sit in GPU
+        memory for the whole Dream, 3.7 GB on a 27B at rank 64.
+        """
         self.teacher_weights = {
-            n: p.detach().clone()
+            n: self._host_copy(p)
             for n, p in self.model.named_parameters()
             if p.requires_grad
         }
@@ -301,16 +367,19 @@ class TorchBackend:
         was_training = self.model.training
         self.model.eval()
         params = dict(self.model.named_parameters())
-        current = {n: params[n].detach().clone() for n in weights}
+        current = {n: self._host_copy(params[n]) for n in weights}
         try:
             with self.torch.no_grad():
                 for n, w in weights.items():
-                    params[n].copy_(w)
+                    params[n].copy_(w, non_blocking=True)
                 yield
         finally:
             with self.torch.no_grad():
                 for n, w in current.items():
-                    params[n].copy_(w)
+                    params[n].copy_(w, non_blocking=True)
+            device = getattr(self, "device", None)
+            if device is not None and device.type == "cuda":
+                self.torch.cuda.synchronize(device)
             self.model.train(was_training)
 
     def prefix_state(self, ids):
@@ -578,7 +647,13 @@ class TorchBackend:
         )
         tail = prompt[split:]
         self.model.train()
+        saving = (
+            self.torch.autograd.graph.save_on_cpu(pin_memory=True)
+            if self._auto(self._option("offload_activations"))
+            else contextlib.nullcontext()
+        )
         try:
+            saving.__enter__()
             inputs = self.torch.tensor([tail + y[:-1]], device=self.device)
             hidden = (
                 self._causal()
@@ -627,6 +702,7 @@ class TorchBackend:
                 len(y),
             )
         finally:
+            saving.__exit__(None, None, None)
             self.model.eval()
 
     def optimizer(self, schedule):
@@ -635,11 +711,25 @@ class TorchBackend:
         self._schedule = schedule
         self._updates = 0
         lr = schedule(0) if callable(schedule) else float(schedule)
-        self._optimizer = torch.optim.AdamW(
-            (p for p in self.model.parameters() if p.requires_grad),
-            lr=lr,
-            weight_decay=self.options.weight_decay,
-        )
+        parameters = [p for p in self.model.parameters() if p.requires_grad]
+        choice = self._option("optimizer")
+        if choice == "auto":
+            choice = "paged_adamw_8bit" if self._auto("auto") else "adamw"
+        if choice == "paged_adamw_8bit":
+            # Two 8-bit states per adapter weight instead of two fp32 ones, in
+            # paged memory that spills to host RAM under a spike rather than
+            # failing the step.
+            import bitsandbytes as bnb
+
+            self._optimizer = bnb.optim.PagedAdamW8bit(
+                parameters, lr=lr, weight_decay=self.options.weight_decay
+            )
+        elif choice == "adamw":
+            self._optimizer = torch.optim.AdamW(
+                parameters, lr=lr, weight_decay=self.options.weight_decay
+            )
+        else:
+            raise ValueError(f"Unknown optimizer: {choice}")
         return self._optimizer
 
     def apply(self, grads, optimizer=None):

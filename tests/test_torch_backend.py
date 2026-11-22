@@ -463,3 +463,37 @@ def test_full_sleep_worker_on_cpu_with_random_hf_model(tmp_path, monkeypatch):
             __import__("pathlib").Path(candidate["artifact"])
             / "adapter_model.safetensors"
         ).is_file()
+
+
+def test_big_model_memory_savers_stay_off_for_a_bf16_base(backend):
+    # A base that fits in bf16 keeps the plain setup: no host offloads and
+    # AdamW (the savers are for 4-bit bases, where every gigabyte counts).
+    assert backend.quantized is False
+    assert backend.embedding_on_host is False
+    assert backend._auto("auto") is False
+    assert backend._auto("on") is True and backend._auto("off") is False
+    with pytest.raises(ValueError, match="auto, on or off"):
+        backend._auto("sometimes")
+    assert isinstance(backend.optimizer(1e-3), backend.torch.optim.AdamW)
+
+
+def test_unknown_optimizer_is_refused(backend):
+    backend.options.optimizer = "sgd"
+    with pytest.raises(ValueError, match="Unknown optimizer"):
+        backend.optimizer(1e-3)
+
+
+def test_teacher_snapshot_lives_in_host_ram_and_round_trips(backend):
+    backend.snapshot_teacher()
+    assert all(w.device.type == "cpu" for w in backend.teacher_weights.values())
+    params = {n: p for n, p in backend.model.named_parameters() if p.requires_grad}
+    before = {n: p.detach().clone() for n, p in params.items()}
+    with torch.no_grad():
+        for p in params.values():
+            p.add_(1.0)  # the student moves on during the Dream
+    moved = {n: p.detach().clone() for n, p in params.items()}
+    with backend.teacher():
+        for n, p in params.items():
+            torch.testing.assert_close(p.detach().cpu(), before[n].cpu())
+    for n, p in params.items():
+        torch.testing.assert_close(p.detach(), moved[n])

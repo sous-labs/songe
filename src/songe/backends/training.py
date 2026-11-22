@@ -41,6 +41,14 @@ def sample_plan(pool, anchors, fraction):
 CHECKPOINT_MIN_SECONDS = 30.0
 
 
+def _inplace(value, method, other):
+    """value <op>= other without a copy for tensors (a large adapter's
+    gradients are gigabytes); plain numbers (test doubles) get the result."""
+    if hasattr(value, method):
+        return getattr(value, method)(other)
+    return {"mul_": value * other, "add_": value + other, "div_": value / other}[method]
+
+
 def train(backend, pool, anchors, work, progress):
     config = backend.config
     if not pool:
@@ -188,7 +196,9 @@ def train(backend, pool, anchors, work, progress):
                 if count < 1:
                     raise ValueError("Training sample has no loss tokens")
                 if is_torch:
-                    grad = {n: g * count for n, g in grad.items()}
+                    # In place: each copy of a large adapter's gradients is
+                    # gigabytes of accelerator memory.
+                    grad = {n: _inplace(g, "mul_", count) for n, g in grad.items()}
                 else:
                     grad = tree_map(lambda g, n=count: g * n, grad)
                 if not is_anchor:
@@ -196,7 +206,9 @@ def train(backend, pool, anchors, work, progress):
                 if gradients is None:
                     gradients = grad
                 elif is_torch:
-                    gradients = {n: gradients[n] + grad[n] for n in gradients}
+                    gradients = {
+                        n: _inplace(g, "add_", grad[n]) for n, g in gradients.items()
+                    }
                 else:
                     gradients = tree_map(lambda a, b: a + b, gradients, grad)
                 if not is_torch:
@@ -210,7 +222,7 @@ def train(backend, pool, anchors, work, progress):
                 loss += value * count
                 tokens += count
             if is_torch:
-                gradients = {n: g / tokens for n, g in gradients.items()}
+                gradients = {n: _inplace(g, "div_", tokens) for n, g in gradients.items()}
             else:
                 gradients = tree_map(lambda x, n=tokens: x / n, gradients)
                 gradients, norm = backend.optim.clip_grad_norm(gradients, max_norm=1.0)
