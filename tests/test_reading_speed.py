@@ -107,3 +107,25 @@ async def test_a_keep_going_reply_is_not_classified():
     await Session("s", items, model, "/w").run_all([])
     classified = [p for name, p in model.prompts if name == "classify"]
     assert len(classified) == 1 and "you broke the build" in classified[0]
+
+
+async def test_reader_stats_are_logged_per_stage(store, caplog):
+    import logging
+
+    def server(request):
+        return httpx.Response(200, json={"choices": [{"finish_reason": "stop",
+                                                      "message": {"content": json.dumps({"ok": True})}}],
+                                         "usage": {"completion_tokens": 100}})
+
+    reader = reading_client.Reader(store, "http://model/v1", "m",
+                                   client=httpx.AsyncClient(transport=httpx.MockTransport(server)))
+    with caplog.at_level(logging.INFO, logger="songe.reading.client"):
+        await reader.ask("first", {"type": "object"}, "review")
+        reader.log_stats("read")
+        reader.log_stats("practice")  # nothing new since: no line
+        await reader.ask("second", {"type": "object"}, "review")
+        await reader.close()
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("reader_stats")]
+    assert len(lines) == 2
+    assert "stage=read calls=1" in lines[0] and "per_call=100" in lines[0]
+    assert "stage=close calls=2" in lines[1]

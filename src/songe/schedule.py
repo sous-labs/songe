@@ -2543,6 +2543,7 @@ class ModelScheduler(Scheduler):
                         on_session=counted, on_start=starting,
                     )
                     activity["stage"] = "prompt"
+                    reader.log_stats("read")
                     if read:
                         learner.event("read", f"{read} sessions")
                     if quick:
@@ -2580,6 +2581,7 @@ class ModelScheduler(Scheduler):
                     if practice:
                         activity["stage"] = "practice"
                         written = await practice_store.write(learner, reader, per_signal)
+                        reader.log_stats("practice")
                         if written:
                             learner.event("practice", f"{written} scenes")
                         learner.set("dream_preparing", None)

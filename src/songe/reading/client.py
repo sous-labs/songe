@@ -74,14 +74,22 @@ class Reader:
         self.seconds = 0.0
         self.structured = True
 
+    def log_stats(self, stage):
+        """What a stage cost so far (cumulative), for comparing models and
+        settings. Logged after reading and after practice: one reader serves
+        both, and a Dream's practice can take hours (live: no stats while it
+        ran)."""
+        if self.calls == getattr(self, "_logged_calls", 0):
+            return
+        self._logged_calls = self.calls
+        logger.info(
+            "reader_stats stage=%s calls=%s cached=%s seconds=%.0f tokens_out=%s per_call=%s cut_off=%s forced=%s",
+            stage, self.calls, self.cached, self.seconds, self.tokens_out,
+            self.tokens_out // max(1, self.calls), self.cut_off, self.forced,
+        )
+
     async def close(self):
-        if self.calls:
-            # What a read cost, for comparing models and settings.
-            logger.info(
-                "reader_stats calls=%s cached=%s seconds=%.0f tokens_out=%s per_call=%s cut_off=%s forced=%s",
-                self.calls, self.cached, self.seconds, self.tokens_out,
-                self.tokens_out // self.calls, self.cut_off, self.forced,
-            )
+        self.log_stats("close")  # only what came after the last stage line
         await self.client.aclose()
 
     def key(self, prompt, schema, name, temperature=0):
