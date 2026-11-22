@@ -1,7 +1,11 @@
 import copy
+import json
+import os
+from pathlib import Path
 
 from .. import NAME
 from ..models.names import exposed
+from .base import JSON, Agent, NotEditable
 
 
 def context_for(config, model):
@@ -113,3 +117,75 @@ def local_model(data, reference):
         (settings.get("settings") or settings.get("options") or {}).get("baseURL") or ""
     )
     return any(host in url for host in ("127.0.0.1", "localhost", "[::1]"))
+
+
+class OpenCode(Agent):
+    name = "opencode"
+    suggest_when_missing = True
+    pick = "/models"
+    legacy_models = True
+    file_names = ("opencode.json", "opencode.jsonc")
+
+    @staticmethod
+    def folder(home):
+        return Path(os.environ.get("XDG_CONFIG_HOME", str(home / ".config"))) / "opencode"
+
+    def files(self, home):
+        folder = self.folder(home)
+        if not folder.exists():
+            return []
+        jsonc, plain = folder / "opencode.jsonc", folder / "opencode.json"
+        # A JSONC file is read (and then skipped with a note), never shadowed.
+        return [(jsonc if jsonc.exists() and not plain.exists() else plain, JSON)]
+
+    def configure(self, path, data, config, *, default=None, v2=False):
+        return configure(data, config, default=default, v2=v2)
+
+    def snippet(self, path, config, *, default=None, v2=False):
+        key = "providers" if v2 else "provider"
+        entry = configure({}, config, default=default, v2=v2)
+        return {key: entry[key]} if key in entry else entry
+
+    def owns(self, path, data):
+        return NAME in (data.get("providers") or data.get("provider") or {})
+
+    def status(self, path, data, config):
+        provider = (data.get("providers", data.get("provider", {})) or {}).get(NAME, {})
+        url = provider.get("settings", provider.get("options", {})).get("baseURL")
+        if url == f"http://127.0.0.1:{config.port}/v1":
+            return "configured"
+        return "missing" if not provider else "differs"
+
+    def on_songe(self, home):
+        try:
+            data = JSON.load((self.folder(home) / "opencode.json").read_bytes())
+        except (OSError, NotEditable):
+            return False
+        model = data.get("model")
+        return isinstance(model, str) and model.startswith(f"{NAME}/")
+
+    def binding(self, home):
+        path = self.folder(home) / "opencode.json"
+        state = (
+            Path(os.environ.get("XDG_STATE_HOME", str(home / ".local/state")))
+            / "opencode/model.json"
+        )
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return "", ""
+        model = value.get("model", "")
+        # The model picked in opencode's UI lives in its state file and wins
+        # over the config default, so it is the one the user actually runs.
+        try:
+            recent = json.loads(state.read_text(encoding="utf-8")).get("recent") or []
+            if recent and recent[0].get("modelID"):
+                model = f"{recent[0].get('providerID', '')}/{recent[0]['modelID']}"
+        except (OSError, ValueError, AttributeError):
+            pass
+        provider, _, model_id = model.partition("/")
+        definition = (value.get("providers") or value.get("provider") or {}).get(provider, {})
+        options = definition.get("settings") or definition.get("options") or {}
+        if model:
+            return model_id or model, options.get("baseURL", "").rstrip("/")
+        return "", ""

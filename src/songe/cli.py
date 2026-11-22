@@ -148,49 +148,14 @@ def service_fact(args):
 
 
 def detect_agent_binding(home=None):
+    """(model, base URL) the user's agent runs now: opencode's, then pi's."""
+    from . import agents
+
     home = home or Path.home()
-    opencode = (
-        Path(os.environ.get("XDG_CONFIG_HOME", home / ".config"))
-        / "opencode/opencode.json"
-    )
-    pi = Path(os.environ.get("PI_CODING_AGENT_DIR", home / ".pi/agent"))
-    state = (
-        Path(os.environ.get("XDG_STATE_HOME", home / ".local/state"))
-        / "opencode/model.json"
-    )
-    try:
-        value = json.loads(opencode.read_text(encoding="utf-8"))
-        model = value.get("model", "")
-        # The model picked in opencode's UI lives in its state file and wins
-        # over the config default, so it is the one the user actually runs.
-        try:
-            recent = json.loads(state.read_text(encoding="utf-8")).get("recent") or []
-            if recent and recent[0].get("modelID"):
-                model = f"{recent[0].get('providerID', '')}/{recent[0]['modelID']}"
-        except (OSError, ValueError, AttributeError):
-            pass
-        provider, _, model_id = model.partition("/")
-        definition = (value.get("providers") or value.get("provider") or {}).get(
-            provider, {}
-        )
-        options = definition.get("settings") or definition.get("options") or {}
+    for adapter in agents.ADAPTERS:
+        model, url = adapter.binding(home)
         if model:
-            return model_id or model, options.get("baseURL", "").rstrip("/")
-    except (OSError, ValueError, AttributeError):
-        pass
-    try:
-        value = json.loads((pi / "settings.json").read_text(encoding="utf-8"))
-        model = value.get("defaultModel") or value.get("model")
-        models = (
-            json.loads((pi / "models.json").read_text(encoding="utf-8"))
-            if (pi / "models.json").is_file()
-            else {}
-        )
-        provider = models.get("providers", {}).get(value.get("defaultProvider"), {})
-        if isinstance(model, str):
-            return model, provider.get("baseUrl", "").rstrip("/")
-    except (OSError, ValueError, AttributeError):
-        pass
+            return model, url
     return "", ""
 
 
@@ -598,16 +563,20 @@ def initialize(args, root):
     # Agents group them under the Songe provider (opencode shows
     # songe/songe/<name>), so the words name the provider, not a prefix (#72).
     rows = [("Models", f"{count} from {server}, listed under Songe")]
+    shown = set()
     for path, _, result, _ in changes:
-        agent = "opencode" if "opencode" in str(path) else "pi"
-        picked = json.loads(result).get("model") if agent == "opencode" else None
+        adapter = agents.adapter_for(path)
+        if adapter is None or adapter.name in shown:
+            continue  # One row per agent, however many files it has.
+        shown.add(adapter.name)
+        picked = json.loads(result).get("model") if adapter.name == "opencode" else None
         if isinstance(picked, str) and picked.startswith("songe/"):
             # opencode shows it as songe/songe/<name>; the name alone is
             # what the user finds under Songe (#72).
             how = f"default {picked.removeprefix('songe/').removeprefix('songe/')}"
         else:
-            how = "choose one with " + ("/models" if agent == "opencode" else "/model")
-        rows.append(("Agent", f"{agent} → Songe models · {how}"))
+            how = f"choose one with {adapter.pick}"
+        rows.append(("Agent", f"{adapter.name} → Songe models · {how}"))
     rows += missing_agents(config)
     rows += [("Data", str(root)), ("Service", service_fact(args))]
     if not can_train:
@@ -807,7 +776,7 @@ def finish_initialization(config, args, root, changes, repropose=None):
         change
         for change in changes
         if not change[0].exists()
-        or json.loads(change[0].read_bytes()) != json.loads(change[2])
+        or agents.load(change[0]) != agents.load(change[0], change[2])
     ]
     names = sorted({agent_name(path) for path, *_ in changes})
     with step(
@@ -865,12 +834,19 @@ def next_step(config):
             f"One step left · point your agent at http://127.0.0.1:{config.port}/v1"
             " and pick a Songe model"
         )
-    how = {"opencode": "in opencode with /models", "pi": "in pi with /model"}
-    return "One step left · pick a Songe model " + ", ".join(how[a] for a in left)
+    picks = {a.name: a.pick for a in agents.ADAPTERS}
+    return "One step left · pick a Songe model " + ", ".join(
+        f"in {a} with {picks[a]}" for a in left
+    )
 
 
 def agent_name(path):
-    """opencode or pi, from the configuration file Songe edits."""
+    """The harness a configuration file Songe edits belongs to."""
+    from . import agents
+
+    adapter = agents.adapter_for(path)
+    if adapter:
+        return adapter.name
     return "opencode" if "opencode" in str(path) else "pi"
 
 
@@ -1304,23 +1280,18 @@ def doctor(config, root, local):
     configured, invalid = [], []
     try:
         for kind, path in agents.targets():
+            adapter = agents.adapter_for(path)
             try:
-                raw = json.loads(path.read_text(encoding="utf-8"))
-                providers = raw.get("providers", raw.get("provider", {}))
-                provider = providers.get(NAME, {})
-                url = (
-                    provider.get("settings", provider.get("options", {})).get("baseURL")
-                    if kind == "opencode"
-                    else provider.get("baseUrl")
-                )
-                if url == f"http://127.0.0.1:{config.port}/v1":
-                    configured.append(kind)
-                elif not provider:
-                    invalid.append(f"{kind}: no {NAME} provider")
-                else:
-                    invalid.append(f"{kind}: provider URL differs")
+                found = adapter.status(path, agents.load(path), config)
             except (OSError, ValueError, AttributeError):
                 invalid.append(f"{kind}: unreadable configuration")
+                continue
+            if found == "configured":
+                configured.append(kind)
+            elif found == "missing":
+                invalid.append(f"{kind}: no {NAME} provider")
+            elif found == "differs":
+                invalid.append(f"{kind}: provider URL differs")
     except ValueError as exc:
         invalid.append(str(exc))
     problems += invalid

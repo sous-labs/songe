@@ -1,15 +1,32 @@
-"""Reviewable, reversible agent configuration edits."""
+"""Reviewable, reversible agent configuration edits.
+
+Each harness is an adapter (agents/base.py): its files, the codec that reads
+them, and what Songe adds. Everything here works through the adapters, so a
+new harness is one module and its edits are recorded and undone like the rest.
+"""
 
 import difflib
 import json
-import os
 from pathlib import Path
 
 from ..storage import atomic_write, write_json
+from .base import JSON, NotEditable
+from .opencode import OpenCode
+from .pi import Pi
+
+ADAPTERS = (OpenCode(), Pi())
+
+# A file Songe will not rewrite (the older name, still used by callers).
+NotPlainJSON = NotEditable
 
 
-class NotPlainJSON(ValueError):
-    pass
+def adapter_for(path):
+    return next((a for a in ADAPTERS if a.handles(Path(path))), None)
+
+
+def codec_for(path):
+    adapter = adapter_for(path)
+    return adapter.codec(path) if adapter else JSON
 
 
 def read_json(path):
@@ -25,24 +42,25 @@ def read_json(path):
         ) from None
 
 
+def load(path, raw=None):
+    """An agent file as a tree, through its adapter's codec."""
+    raw = path.read_bytes() if raw is None and path.exists() else raw
+    try:
+        return codec_for(path).load(raw or b"")
+    except NotEditable as exc:
+        raise NotEditable(
+            f"{path}: {exc} · remove them, or add Songe's entries by hand "
+            "(songe init --show-diff)"
+        ) from None
+
+
 def targets(home=None):
     home = home or Path.home()
-    pi = Path(os.environ.get("PI_CODING_AGENT_DIR", str(home / ".pi/agent")))
-    config_home = Path(os.environ.get("XDG_CONFIG_HOME", str(home / ".config")))
-    paths = []
-    if (config_home / "opencode").exists():
-        jsonc = config_home / "opencode/opencode.jsonc"
-        plain = config_home / "opencode/opencode.json"
-        # A JSONC file is read (and then skipped with a note), never shadowed.
-        paths.append(
-            ("opencode", jsonc if jsonc.exists() and not plain.exists() else plain)
-        )
-    if pi.exists():
-        paths.append(("pi", pi / "models.json"))
-    return paths
+    return [(a.name, path) for a in ADAPTERS for path, _ in a.files(home)]
 
 
-KNOWN = ("opencode", "pi")
+# Harnesses init names in its plan when they are not installed.
+KNOWN = tuple(a.name for a in ADAPTERS if a.suggest_when_missing)
 
 
 def routing(home=None):
@@ -52,74 +70,53 @@ def routing(home=None):
     a cloud default are the user's, so those still need a songe/ model picked.
     """
     home = home or Path.home()
-    found = {}
-    for kind, path in targets(home):
-        if kind == "pi":
-            path = path.parent / "settings.json"
-        try:
-            data = read_json(path)
-        except NotPlainJSON:
-            data = {}
-        if kind == "opencode":
-            model = data.get("model")
-            found[kind] = isinstance(model, str) and model.startswith("songe/")
-        else:
-            found[kind] = data.get("defaultProvider") == "songe"
-    return found
+    return {a.name: a.on_songe(home) for a in ADAPTERS if a.files(home)}
 
 
 def proposed(config, home=None, default=None, opencode_v2=False, root=None):
-    from .opencode import configure as oc
-    from .pi import configure as pi
-
+    home = home or Path.home()
     changes = []
-    for kind, path in targets(home):
-        original = path.read_bytes() if path.exists() else None
-        try:
-            if path.suffix == ".jsonc":
-                raise NotPlainJSON(path)
-            data = read_json(path)
-        except NotPlainJSON:
-            # One commented config must not block the other agents.
-            skip_note(kind, path, config, default, opencode_v2)
-            continue
-        if root:
-            data = remove_legacy_models(data, path, root, config)
-        new = (
-            oc(data, config, default=default, v2=opencode_v2)
-            if kind == "opencode"
-            else pi(data, config)
-        )
-        result = (json.dumps(new, indent=2, ensure_ascii=False) + "\n").encode()
-        if original != result:
-            diff = "".join(
-                difflib.unified_diff(
-                    (original or b"").decode().splitlines(True),
-                    result.decode().splitlines(True),
-                    fromfile=str(path),
-                    tofile=str(path),
-                )
-            )
-            changes.append((path, original, result, diff))
+    for adapter in ADAPTERS:
+        for path, codec in adapter.files(home):
+            original = path.read_bytes() if path.exists() else None
+            try:
+                if path.suffix == ".jsonc":
+                    raise NotEditable(path)
+                data = codec.load(original or b"")
+            except NotEditable:
+                # One commented config must not block the other agents.
+                skip_note(adapter, path, config, default, opencode_v2)
+                continue
+            if root and adapter.legacy_models:
+                data = remove_legacy_models(data, path, root, config)
+            new = adapter.configure(path, data, config, default=default, v2=opencode_v2)
+            result = codec.dump(new)
+            changes.extend(diff_change(path, original, result))
     return changes
 
 
-def skip_note(kind, path, config, default, opencode_v2):
+def diff_change(path, original, result):
+    """[(path, original, result, diff)] when the file would change, else []."""
+    if original == result:
+        return []
+    diff = "".join(
+        difflib.unified_diff(
+            (original or b"").decode().splitlines(True),
+            result.decode().splitlines(True),
+            fromfile=str(path),
+            tofile=str(path),
+        )
+    )
+    return [(path, original, result, diff)]
+
+
+def skip_note(adapter, path, config, default, opencode_v2):
     import sys
 
-    from .opencode import configure as oc
-    from .pi import configure as pi
-
-    key = "providers" if kind == "opencode" and opencode_v2 else "provider"
-    entry = (
-        oc({}, config, default=default, v2=opencode_v2)
-        if kind == "opencode"
-        else pi({}, config)
-    )
-    entry = {key: entry[key]} if key in entry else entry
+    entry = adapter.snippet(path, config, default=default, v2=opencode_v2)
     print(
         f"Skipped {path} · it has comments · add this by hand:\n"
-        + json.dumps(entry, indent=2, ensure_ascii=False),
+        + adapter.codec(path).dump(entry).decode().rstrip("\n"),
         file=sys.stderr,
     )
 
@@ -176,7 +173,10 @@ def migrate(config, root, *, update_agents=True):
     manifest = read_json(root / "agent-backups.json") if update_agents else {}
     for name, record in manifest.items():
         path = Path(name)
-        if not path.exists():
+        adapter = adapter_for(path)
+        # Renames and new models are about opencode's and pi's provider
+        # entries; other harnesses are kept current by refresh_limits.
+        if not path.exists() or (adapter and not adapter.legacy_models):
             continue
         original = path.read_bytes()
         try:
@@ -274,8 +274,9 @@ def apply(changes, root):
     manifest_path = root / "agent-backups.json"
     manifest = read_json(manifest_path)
     for path, original, result, _ in changes:
-        old = json.loads(original) if original else {}
-        new = json.loads(result)
+        codec = codec_for(path)
+        old = codec.load(original) if original else {}
+        new = codec.load(result)
         entry = manifest.get(str(path))
         if entry is None:
             backup = new_backup(root, manifest)
@@ -289,8 +290,8 @@ def apply(changes, root):
         if "edits" not in entry:
             # Migrate the original manifest using its first backup, not the
             # newly reviewed document (which may include later user changes).
-            first = read_json(Path(entry["backup"])) if entry["backup"] else {}
-            entry["edits"] = edits(first, json.loads(entry["written"]))
+            first = codec.load(Path(entry["backup"]).read_bytes()) if entry["backup"] else {}
+            entry["edits"] = edits(first, codec.load(entry["written"].encode()))
         owned = {tuple(e["path"]): e for e in entry["edits"]}
         for edit in edits(old, new):
             key = tuple(edit["path"])
@@ -303,7 +304,7 @@ def apply(changes, root):
                 continue
             descendants = [p for p in owned if p[: len(key)] == key]
             if descendants:
-                first = read_json(Path(entry["backup"])) if entry["backup"] else {}
+                first = codec.load(Path(entry["backup"]).read_bytes()) if entry["backup"] else {}
                 for part in key[:-1]:
                     first = first.get(part, {}) if isinstance(first, dict) else {}
                 edit = edit | {"had": key[-1] in first, "old": first.get(key[-1])}
@@ -326,13 +327,14 @@ def restore(root):
     conflicts = []
     for name, entry in list(manifest.items()):
         path = Path(name)
+        codec = codec_for(path)
         try:
-            current = read_json(path)
-        except NotPlainJSON:
+            current = codec.load(path.read_bytes()) if path.exists() else {}
+        except NotEditable:
             conflicts.append(name)
             continue
-        original = read_json(Path(entry["backup"])) if entry["backup"] else {}
-        owned = entry.get("edits", edits(original, json.loads(entry["written"])))
+        original = codec.load(Path(entry["backup"]).read_bytes()) if entry["backup"] else {}
+        owned = entry.get("edits", edits(original, codec.load(entry["written"].encode())))
         unresolved = []
         for edit in owned:
             parent = current
@@ -370,7 +372,7 @@ def restore(root):
             else:
                 path.unlink(missing_ok=True)
         else:
-            write_json(path, current)
+            atomic_write(path, codec.dump(current))
         if unresolved:
             conflicts.append(name)
             entry["edits"] = unresolved
@@ -383,33 +385,27 @@ def restore(root):
 def refresh_limits(config, home=None, root=None):
     """Rewrite only Songe's own entries when served contexts change.
 
-    Agents without a Songe provider are left alone; defaults never change.
+    Agents without Songe's entries are left alone; defaults never change.
     With `root`, the rewrite is recorded as Songe's own edit, so uninstall
     still restores the file instead of preserving it as a user conflict."""
-    from .opencode import configure as oc
-    from .pi import configure as pi
-
+    home = home or Path.home()
     changed = []
-    for kind, path in targets(home):
-        if not path.exists() or path.suffix == ".jsonc":
-            continue
-        try:
-            data = read_json(path)
-        except NotPlainJSON:
-            continue
-        providers = data.get("providers") or data.get("provider") or {}
-        if "songe" not in providers:
-            continue
-        new = (
-            oc(data, config, default=False, v2="providers" in data)
-            if kind == "opencode"
-            else pi(data, config)
-        )
-        if new != data:
-            result = (json.dumps(new, indent=2, ensure_ascii=False) + "\n").encode()
-            if root is None:
-                atomic_write(path, result)
-            else:
-                apply([(path, path.read_bytes(), result, "")], root)
-            changed.append(path)
+    for adapter in ADAPTERS:
+        for path, codec in adapter.files(home):
+            if not path.exists() or path.suffix == ".jsonc":
+                continue
+            try:
+                data = codec.load(path.read_bytes())
+            except NotEditable:
+                continue
+            if not adapter.owns(path, data):
+                continue
+            new = adapter.configure(path, data, config, default=False)
+            if new != data:
+                result = codec.dump(new)
+                if root is None:
+                    atomic_write(path, result)
+                else:
+                    apply([(path, path.read_bytes(), result, "")], root)
+                changed.append(path)
     return changed
