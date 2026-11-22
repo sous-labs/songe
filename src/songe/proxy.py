@@ -314,7 +314,8 @@ def create_app(config=None, store=None, client=None, scheduler=None):
                 await asyncio.to_thread(store.record, *args)
                 queue_refresh()
             except Exception:
-                logger.error("experience_write_failed")
+                # Keep the cause: a full disk and a broken store look alike otherwise.
+                logger.exception("experience_write_failed")
             finally:
                 pending_bytes -= capture_bytes
 

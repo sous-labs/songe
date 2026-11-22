@@ -511,7 +511,7 @@ def test_ready_version_waits_for_swap_and_gate_hides_old_training_progress(
     training["phase"] = "check"
     assert (
         activity(config, store, worker, training, models, live=True)["now"]
-        == "checking base-test"
+        == "evaluating base-test"
     )
 
 

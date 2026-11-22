@@ -2,10 +2,10 @@
   "_note": "Draft for the Learning cycle (docs/CONTRACTS.md §8). One table for every surface; the service sends only the keys. Not read by the shipped dashboard yet.",
   "stage": {
     "measure": "Getting ready",
-    "read": "Reading your replies",
+    "read": "Rewind",
     "practice": "Practice",
     "train": "Training",
-    "check": "Checking",
+    "check": "Evaluation",
     "result": "Result",
     "gap_check": "Finding what it missed",
     "rehearsal": "Rehearsal"

@@ -1061,13 +1061,13 @@
       "pipeline": {},
       "snapshot": {
         "activity": {
-          "now": "checking Qwen",
+          "now": "evaluating Qwen",
           "phase": "gate",
           "model": "qwen"
         }
       },
       "summary": [
-        "Checking",
+        "Evaluating",
         ""
       ]
     },

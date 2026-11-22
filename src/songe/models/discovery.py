@@ -309,25 +309,28 @@ def mlx(url, transport=None):
 
 
 def identify(url):
-    """Identify a custom local endpoint through read-only protocol metadata."""
+    """Identify a custom local endpoint through read-only protocol metadata;
+    None when it is none of the servers Songe knows."""
     root = url.rstrip("/").removesuffix("/v1")
+
+    def answers(path, key):
+        try:
+            return key in _get(root + path, timeout=1)
+        except (httpx.HTTPError, ValueError, TypeError):
+            return False
+
+    # Other servers answer /api/version too (llama-swap: {"version": "v275",
+    # ...}); only Ollama also lists its models at /api/tags.
+    if answers("/api/version", "version") and answers("/api/tags", "models"):
+        return "ollama"
     for name, path, key in (
-        ("ollama", "/api/version", "version"),
         ("llamacpp", "/props", "model_path"),
         ("vllm", "/version", "version"),
+        ("lmstudio", "/api/v0/models", "data"),
     ):
-        try:
-            if key in _get(root + path, timeout=1):
-                return name
-        except (httpx.HTTPError, ValueError, TypeError):
-            continue
-    try:
-        data = _get(root + "/api/v0/models", timeout=1)
-        if "data" in data:
-            return "lmstudio"
-    except (httpx.HTTPError, ValueError, TypeError):
-        pass
-    return "mlx"
+        if answers(path, key):
+            return name
+    return None
 
 
 def lmstudio_key_path(executable, key, folder):

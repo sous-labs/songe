@@ -1044,3 +1044,81 @@ async def test_reader_reads_the_base_from_the_users_server(learners):
         assert reader.url == "http://127.0.0.1:8080/v1"
     finally:
         await reader.close()
+
+
+SERVERS = {
+    # What each server answers on the probes identify() makes (404 otherwise).
+    "ollama": {"/api/version": {"version": "0.40.17"}, "/api/tags": {"models": []}},
+    "llama-swap": {
+        "/api/version": {"build_date": "2026-11-20", "commit": "e0274d5", "version": "v275"}
+    },
+    "llama-server": {"/props": {"model_path": "/models/x.gguf"}},
+    "unknown": {},
+}
+
+
+def serve(monkeypatch, answers):
+    import httpx
+
+    from songe.models import discovery
+
+    def get(url, transport=None, timeout=5.0):
+        for path, body in answers.items():
+            if url.endswith(path):
+                return body
+        raise httpx.HTTPStatusError("404", request=httpx.Request("GET", url), response=httpx.Response(404))
+
+    monkeypatch.setattr(discovery, "_get", get)
+
+
+@pytest.mark.parametrize(
+    "server,expected",
+    [("ollama", "ollama"), ("llama-swap", None), ("llama-server", "llamacpp"), ("unknown", None)],
+)
+def test_identify_tells_ollama_from_servers_that_only_share_api_version(
+    monkeypatch, server, expected
+):
+    # #61: llama-swap answers /api/version and was taken for Ollama. #62: an
+    # unknown server is None, not a guess ("mlx").
+    from songe.models import discovery
+
+    serve(monkeypatch, SERVERS[server])
+    assert discovery.identify("http://127.0.0.1:9292/v1") == expected
+
+
+@pytest.mark.parametrize("through", ["agent", "upstream-url"])
+def test_forwarding_init_uses_an_unrecognized_server_as_openai_compatible(
+    tmp_path, monkeypatch, capsys, through
+):
+    # #61: the serve-only fallback never tried the agent's own server. #62:
+    # with only --upstream-url it recorded the first built-in name, lmstudio.
+    from songe import agents, cli, launchd
+    from songe.models import discovery
+    from songe.platform import Memory
+
+    url = "http://127.0.0.1:9292/v1"
+    platform = SimpleNamespace(
+        name="test", accelerators=lambda: [], memory=lambda: Memory(1000, 500),
+        service=lambda: SimpleNamespace(available=lambda: True),
+    )
+    monkeypatch.setattr("songe.platform.current", lambda: platform)
+    monkeypatch.setattr(
+        cli, "detect_agent_binding", lambda: ("qwen", url) if through == "agent" else ("", "")
+    )
+    serve(monkeypatch, SERVERS["llama-swap"])
+    for name in ("ollama", "lmstudio", "llamacpp", "mlx", "vllm"):
+        monkeypatch.setattr(discovery, name, lambda *a, **kw: [])
+    monkeypatch.setattr(discovery, "loaded_lmstudio", lambda *a, **kw: [])
+    monkeypatch.setattr(cli, "upstream_model_ids", lambda u: ["qwen"] if u == url else [])
+    monkeypatch.setattr(agents, "proposed", lambda *a, **kw: [])
+    monkeypatch.setattr(agents, "apply", lambda *a: None)
+    monkeypatch.setattr(launchd, "install", lambda *a, **kw: None)
+    root = tmp_path / "data"
+    argv = ["--data-dir", str(root), "init", "--yes", "--launchd-target", str(tmp_path / "svc")]
+    if through == "upstream-url":
+        argv += ["--upstream-url", url]
+    cli.initialize(cli.parser().parse_args(argv), root)
+    config = Config.load(root)
+    assert (config.upstream, config.upstream_url) == ("vllm", url)
+    assert config.exposed_models == ["songe/qwen"]
+    assert f"OpenAI-compatible · {url}" in capsys.readouterr().out

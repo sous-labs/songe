@@ -280,8 +280,11 @@ def main():
         assert offered == [public], f"opencode should list {public} once: {offered}"
 
         step("chat through Songe")
+        # A real model decides how long it talks; uncapped, a 135M model ran
+        # past the 30 s timeout on a CPU runner (#59).
         status, body = http(url + "/v1/chat/completions", {
-            "model": public, "messages": [{"role": "user", "content": "ping"}],
+            "model": public, "max_tokens": 8,
+            "messages": [{"role": "user", "content": "ping"}],
         })
         answer = json.loads(body)["choices"][0]["message"]["content"]
         if real:

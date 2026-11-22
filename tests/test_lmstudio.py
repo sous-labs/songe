@@ -241,3 +241,40 @@ def test_only_the_users_own_loads_are_remembered(tmp_path):
     served = asyncio.run(upstream.served_contexts())
     assert served == {"pub/A": 8192, "pub/B": 65536}
     assert upstream.user_contexts == {"pub/B": 65536}
+
+
+@pytest.mark.parametrize(
+    "supported, remembered, expected",
+    [
+        # LM Studio's default (8192) cannot hold opencode's prompt (#65).
+        (131072, None, 32768),
+        (4096, None, 4096),  # Never more than the model supports.
+        (131072, 16384, 16384),  # The user's own setting wins.
+        (None, None, None),  # Unknown limit: leave it to LM Studio.
+    ],
+)
+def test_first_load_has_room_for_an_agents_prompt(
+    tmp_path, supported, remembered, expected
+):
+    from songe.log import Store
+
+    class Listed(FakeLMS):
+        async def command(self, *args):
+            out = await super().command(*args)
+            if args[:2] == ("ls", "--json") and supported:
+                models = json.loads(out)
+                for model in models:
+                    model["maxContextLength"] = supported
+                return json.dumps(models)
+            return out
+
+    lms = Listed(tmp_path, appear_after=99)
+    lms.store = Store(tmp_path / "d")
+    if remembered:
+        lms.store.set("served_context_ids", {"songe/granite/base": remembered})
+    base = {
+        "artifact": str(tmp_path / "lmstudio-community/granite-4.2-3b-MLX-4bit"),
+        "identifier": "songe/granite/base",
+    }
+    asyncio.run(lms.load(base))
+    assert lms.contexts == [expected]

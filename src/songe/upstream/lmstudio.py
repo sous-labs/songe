@@ -22,6 +22,11 @@ def local_models(folder):
 
 
 SERVING_IDLE_TTL_SECONDS = 3600
+# Context for a model Songe loads that the user has never run in LM Studio.
+# LM Studio's own default (often 4096 or 8192) is smaller than a coding
+# agent's system prompt and tools (about 13k tokens for opencode), so the
+# first message would fail (#65). Capped by what the model supports.
+FIRST_LOAD_CONTEXT = 32768
 
 
 def find_lms():
@@ -45,6 +50,7 @@ class LMStudio:
         self.loaded = set()
         self.routes = {}
         self.reused = {}
+        self.max_contexts = {}
         # LM Studio's TTL is an idle timeout, not a load deadline: a few
         # seconds unloaded the served model between requests. Match LM
         # Studio's own JIT default, which still bounds an orphaned load if
@@ -105,6 +111,10 @@ class LMStudio:
             listing = json.loads(await self.command("ls", "--json") or "[]")
             for model in listing:
                 if Path(model.get("path", "")) == relative and model.get("modelKey"):
+                    if model.get("maxContextLength"):
+                        self.max_contexts[model["modelKey"]] = int(
+                            model["maxContextLength"]
+                        )
                     return model["modelKey"]
             if loop.time() >= deadline:
                 raise RuntimeError(
@@ -157,7 +167,7 @@ class LMStudio:
         self.save_claims()
         # The SDK returns the immutable instance from the load operation itself.
         # Never adopt an alias discovered later in a CLI listing.
-        await self.request_load(key, identifier, self.remembered_context(version))
+        await self.request_load(key, identifier, self.load_context(version, key))
         self.routes[identifier] = identifier
         self.loaded.add(identifier)
         await self.live_owned()
@@ -229,6 +239,15 @@ class LMStudio:
                 except ValueError:
                     keys.append(str(path))
         return next((int(seen[k]) for k in keys if k in seen), None)
+
+    def load_context(self, version, key):
+        """The context to load with: the user's own setting for this model if
+        Songe has seen one, otherwise enough for a coding agent's prompt."""
+        remembered = self.remembered_context(version)
+        if remembered:
+            return remembered
+        supported = self.max_contexts.get(key)
+        return min(FIRST_LOAD_CONTEXT, supported) if supported else None
 
     async def request_load(self, key, identifier, context=None):
         from lmstudio import LMStudioServerError

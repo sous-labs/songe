@@ -238,7 +238,7 @@ async def test_unmapped_requests_reach_the_users_server(config, store, raw):
     await upstream.aclose()
 
 
-async def test_logging_failure_does_not_break_proxy(config, store, monkeypatch):
+async def test_logging_failure_does_not_break_proxy(config, store, monkeypatch, caplog):
     def fail(*a):
         raise OSError("disk full")
 
@@ -265,6 +265,9 @@ async def test_logging_failure_does_not_break_proxy(config, store, monkeypatch):
             )
             assert response.status_code == 200
     await upstream.aclose()
+    # #67: the log names the cause, not only that a recording was lost.
+    assert "experience_write_failed" in caplog.text
+    assert "disk full" in caplog.text
 
 
 async def test_fallback_explicit_base_path_and_adapter(config, store):
