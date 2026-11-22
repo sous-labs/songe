@@ -10,11 +10,12 @@ import json
 from pathlib import Path
 
 from ..storage import atomic_write, write_json
-from .base import JSON, NotEditable
+from .aider import Aider
+from .base import JSON, NotEditable, codec_named
 from .opencode import OpenCode
 from .pi import Pi
 
-ADAPTERS = (OpenCode(), Pi())
+ADAPTERS = (OpenCode(), Pi(), Aider())
 
 # A file Songe will not rewrite (the older name, still used by callers).
 NotPlainJSON = NotEditable
@@ -24,7 +25,12 @@ def adapter_for(path):
     return next((a for a in ADAPTERS if a.handles(Path(path))), None)
 
 
-def codec_for(path):
+def codec_for(path, entry=None):
+    """How to read an agent file: as recorded in its backup manifest entry
+    when there is one, so it is undone the way it was written, else by its
+    adapter."""
+    if entry and entry.get("codec"):
+        return codec_named(entry["codec"])
     adapter = adapter_for(path)
     return adapter.codec(path) if adapter else JSON
 
@@ -287,6 +293,7 @@ def apply(changes, root):
                 "written": result.decode(),
                 "edits": [],
             }
+        entry["codec"] = codec.name
         if "edits" not in entry:
             # Migrate the original manifest using its first backup, not the
             # newly reviewed document (which may include later user changes).
@@ -336,7 +343,7 @@ def restore(root):
     conflicts = []
     for name, entry in list(manifest.items()):
         path = Path(name)
-        codec = codec_for(path)
+        codec = codec_for(path, entry)
         try:
             current = codec.load(path.read_bytes()) if path.exists() else {}
         except NotEditable:

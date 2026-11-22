@@ -431,3 +431,105 @@ def test_an_opencode_file_of_another_shape_binds_nothing(tmp_path, monkeypatch):
     for text in ("[]", '{"model": 5}', '{"model": "x/y", "provider": {"x": "str"}}'):
         (folder / "opencode.json").write_text(text, encoding="utf-8")
         assert OpenCode().binding(tmp_path) == ("", "")
+
+
+def aider_home(tmp_path):
+    home = tmp_path / "home"
+    (home / ".aider").mkdir(parents=True)  # Aider has run once
+    return home
+
+
+def test_aider_gets_named_songe_models_and_restore_undoes_them(tmp_path, config):
+    # #64: Aider reaches Songe through per-model entries; OPENAI_API_BASE
+    # would also send the user's real OpenAI models to Songe.
+    import yaml
+
+    home = aider_home(tmp_path)
+    settings = home / ".aider.model.settings.yml"
+    original = b"- name: gpt-4o\n  edit_format: diff\n"
+    settings.write_bytes(original)
+    root = tmp_path / "songe"
+    root.mkdir()
+    changes = agents.proposed(config, home)
+    assert sorted(p.name for p, *_ in changes) == [
+        ".aider.model.metadata.json",
+        ".aider.model.settings.yml",
+    ]
+    agents.apply(changes, root)
+    name = "openai/" + config.public_model
+    entries = {e["name"]: e for e in yaml.safe_load(settings.read_text(encoding="utf-8"))}
+    assert entries["gpt-4o"] == {"name": "gpt-4o", "edit_format": "diff"}
+    assert entries[name]["extra_params"] == {
+        "api_base": "http://127.0.0.1:7613/v1",
+        "api_key": "local",
+    }
+    metadata = json.loads((home / ".aider.model.metadata.json").read_text(encoding="utf-8"))
+    assert metadata[name]["max_input_tokens"] == 8192
+    assert metadata[name]["litellm_provider"] == "openai"
+    assert not agents.proposed(config, home)  # idempotent
+    assert agents.routing(home) == {"aider": False}
+    assert agents.restore(root) == []
+    assert settings.read_bytes() == original
+    assert not (home / ".aider.model.metadata.json").exists()
+
+
+def test_aider_entries_follow_the_servers_context(tmp_path, config):
+    home = aider_home(tmp_path)
+    root = tmp_path / "songe"
+    root.mkdir()
+    agents.apply(agents.proposed(config, home), root)
+    config.served_contexts = {config.public_model: 32768}
+    assert len(agents.refresh_limits(config, home, root=root)) == 1
+    metadata = json.loads((home / ".aider.model.metadata.json").read_text(encoding="utf-8"))
+    assert metadata["openai/" + config.public_model]["max_input_tokens"] == 32768
+    assert agents.restore(root) == []
+
+
+def test_commented_aider_settings_are_left_alone_with_a_note(tmp_path, config, capsys):
+    home = aider_home(tmp_path)
+    settings = home / ".aider.model.settings.yml"
+    settings.write_text("# my models\n- name: gpt-4o\n", encoding="utf-8")
+    changes = agents.proposed(config, home)
+    assert [p.name for p, *_ in changes] == [".aider.model.metadata.json"]
+    note = capsys.readouterr().err
+    assert f"Skipped {settings}" in note and "openai/" + config.public_model in note
+
+
+def test_doctor_and_plan_name_aider_once(tmp_path, config, monkeypatch, capsys):
+    from songe import cli
+
+    home = aider_home(tmp_path)
+    root = tmp_path / "songe"
+    root.mkdir()
+    changes = agents.proposed(config, home)
+    assert {cli.agent_name(p) for p, *_ in changes} == {"aider"}
+    agents.apply(changes, root)
+    settings = home / ".aider.model.settings.yml"
+    adapter = agents.adapter_for(settings)
+    assert adapter.status(settings, agents.load(settings), config) == "configured"
+    assert adapter.pick == "--model openai/songe/…"
+    assert "aider" not in agents.KNOWN  # never listed as "not found"
+
+
+def test_restore_reads_each_file_with_the_codec_it_was_written_with(
+    tmp_path, config, monkeypatch
+):
+    # The manifest records the codec, so a later Songe that no longer knows
+    # the file (or maps its name differently) still undoes it exactly.
+    from pathlib import Path
+
+    home = aider_home(tmp_path)
+    settings = home / ".aider.model.settings.yml"
+    original = b"- name: gpt-4o\n  edit_format: diff\n"
+    settings.write_bytes(original)
+    root = tmp_path / "songe"
+    root.mkdir()
+    agents.apply(agents.proposed(config, home), root)
+    manifest = json.loads((root / "agent-backups.json").read_text(encoding="utf-8"))
+    assert {Path(k).name: v["codec"] for k, v in manifest.items()} == {
+        ".aider.model.settings.yml": "yaml-list:name",
+        ".aider.model.metadata.json": "json",
+    }
+    monkeypatch.setattr(agents, "ADAPTERS", agents.ADAPTERS[:2])  # no Aider
+    assert agents.restore(root) == []
+    assert settings.read_bytes() == original
