@@ -55,6 +55,11 @@ def workdir_of(rows):
 
 # Command results the review shows in full: the turn's last ones.
 REVIEW_FULL = 8
+# A reply that only says to go on carries no feedback ("ok" or "yes" can be
+# approvals, so they are still classified).
+KEEP_GOING = re.compile(
+    r"(please\s+)?(continue|go on|keep going|carry on|proceed|resume|next)(\s+please)?[.!]*", re.I
+)
 
 
 def call_text(items, result_item):
@@ -269,6 +274,12 @@ class Session:
         for e in events(items, rules):
             if e["kind"] == "user":
                 turn = last_user_item(items, e["item"])
+                if KEEP_GOING.fullmatch(" ".join(e["text"].split())):
+                    # "continue", "go on": no feedback to classify, and each
+                    # model call is ~37 s on a reasoning model (Inkling).
+                    e["classified"] = []
+                    self.user_events.append(e)
+                    continue
                 answer = await self.model.ask(
                     P.CLASSIFY.format(
                         earlier=self.short("\n".join(user_messages(items, e["item"]))),

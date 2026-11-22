@@ -10,15 +10,18 @@ user came back resumes without asking again.
 import asyncio
 import hashlib
 import json
+import logging
 import re
 import time
 
 import httpx
 
-# Answer room for a cut-off answer's second try, and for a reader's later
-# questions once a model needed it.
-ROOM_CAP = 4
+logger = logging.getLogger(__name__)
+
+# Answer room for a cut-off answer's second try.
 TOKENS_CAP = 32768
+# Asked of every reader question.
+BRIEF = "\nKeep your reasoning short. Answer with the JSON only."
 
 
 class Stopped(Exception):
@@ -62,12 +65,18 @@ class Reader:
         self.max_tokens = max_tokens
         self.client = client or httpx.AsyncClient(timeout=timeout, trust_env=False)
         self.calls = self.cached = 0
-        self.room = 1  # multiplier on max_tokens, grown by cut-off answers
-        self.length_retries = 0
+        self.length_retries = self.cut_off = self.tokens_out = 0
         self.seconds = 0.0
         self.structured = True
 
     async def close(self):
+        if self.calls:
+            # What a read cost, for comparing models and settings.
+            logger.info(
+                "reader_stats calls=%s cached=%s seconds=%.0f tokens_out=%s per_call=%s cut_off=%s retries=%s",
+                self.calls, self.cached, self.seconds, self.tokens_out,
+                self.tokens_out // self.calls, self.cut_off, self.length_retries,
+            )
         await self.client.aclose()
 
     def key(self, prompt, schema, name, temperature=0):
@@ -87,7 +96,9 @@ class Reader:
         think = name in self.think
         body = {
             "model": self.model,
-            "messages": [{"role": "user", "content": prompt}],
+            # Reasoning models think even when asked not to (Inkling); a
+            # short reasoning is asked for in words too.
+            "messages": [{"role": "user", "content": prompt + BRIEF}],
             "temperature": temperature,
             "max_tokens": (max_tokens or self.max_tokens) * (3 if think else 1),
             "stream": False,
@@ -97,25 +108,30 @@ class Reader:
         if self.template_switch:
             body["chat_template_kwargs"] = {"enable_thinking": think}
         started = time.monotonic()
-        # Reasoning models keep thinking even when asked not to (live,
-        # Inkling: ~3,000 tokens per answer, 17 of 43 cut off at the limit; a
-        # cut-off JSON is lost and asked again on the next read). An answer
-        # stopped by the limit is asked once more with twice the room, and
-        # this reader keeps the larger room for its later questions.
-        body["max_tokens"] = int(body["max_tokens"] * self.room)
+        # An answer stopped by the length limit is asked once more with twice
+        # the room; cut off again, the moment is given up (remembered, so the
+        # next read does not pay for it again). Later questions start with
+        # the normal room: a kept larger room was filled with more reasoning
+        # (live, Inkling: 3,000 -> 8,100 generated tokens per call, still 37%
+        # cut off).
         for attempt in range(2):
-            answer, finish = await self.post(body, prompt, schema, name)
-            if "error" in answer and finish == "length" and attempt == 0:
-                self.room = min(self.room * 2, ROOM_CAP)
-                self.length_retries += 1
-                body = body | {"max_tokens": min(body["max_tokens"] * 2, TOKENS_CAP)}
-                continue
+            answer, finish, used = await self.post(body, prompt + BRIEF, schema, name)
+            self.tokens_out += used
+            if "error" in answer and finish == "length":
+                self.cut_off += 1
+                if attempt == 0:
+                    self.length_retries += 1
+                    body = body | {"max_tokens": min(body["max_tokens"] * 2, TOKENS_CAP)}
+                    continue
+                answer = {"error": "cut off twice", "gave_up": True}
+                logger.warning("reader_gave_up %s: cut off at %s tokens twice", name, body["max_tokens"])
             break
         self.calls += 1
         self.seconds += time.monotonic() - started
-        if "error" in answer:
+        if "error" in answer and not answer.get("gave_up"):
             # Not cached: a later read asks again (a cached failure would be
-            # reused for good).
+            # reused for good). A moment given up on is cached: asking the
+            # same question again runs out of room again.
             self.errors = getattr(self, "errors", 0) + 1
         else:
             await asyncio.to_thread(cache_put, self.store, key, name, answer)
@@ -141,7 +157,7 @@ class Reader:
                 self.structured = False
             else:
                 response.raise_for_status()
-                return read(response), finish_reason(response)
+                return read(response), finish_reason(response), usage(response)
         response = await self.client.post(
             self.url + "/chat/completions",
             json=body
@@ -155,7 +171,15 @@ class Reader:
             },
         )
         response.raise_for_status()
-        return read(response), finish_reason(response)
+        return read(response), finish_reason(response), usage(response)
+
+
+def usage(response):
+    """Generated tokens of an answer (0 when the server does not say)."""
+    try:
+        return int(((response.json().get("usage") or {}).get("completion_tokens")) or 0)
+    except (ValueError, TypeError):
+        return 0
 
 
 def finish_reason(response):
@@ -187,8 +211,11 @@ def cache_get(store, key):
     with store.connect() as db:
         row = db.execute("SELECT answer FROM reading_cache WHERE key=?", (key,)).fetchone()
     answer = json.loads(row[0]) if row else None
-    # Failures cached by older versions are asked again.
-    return None if isinstance(answer, dict) and "error" in answer else answer
+    # Failures cached by older versions are asked again; a moment given up
+    # on (cut off twice) is not.
+    if isinstance(answer, dict) and "error" in answer and not answer.get("gave_up"):
+        return None
+    return answer
 
 
 def cache_put(store, key, name, answer):
