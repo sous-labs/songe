@@ -1348,6 +1348,17 @@ def test_llama_swap_models_come_from_running_commands(tmp_path, monkeypatch):
     assert discovery.command_flag("x --ctx-size=4096 -m 'a b.gguf'", "-m", "--model") == "a b.gguf"
 
 
+def test_llama_swap_commands_keep_windows_paths():
+    # POSIX splitting dropped the backslashes of C:\models\qwen.gguf.
+    from songe.models import discovery
+
+    command = r'C:\llama\llama-server.exe -m C:\models\qwen.gguf -c 8192'
+    assert discovery.command_flag(command, "-m", windows=True) == r"C:\models\qwen.gguf"
+    quoted = r'"C:\llama\llama-server.exe" --model "C:\My Models\qwen.gguf"'
+    assert discovery.command_flag(quoted, "--model", windows=True) == r"C:\My Models\qwen.gguf"
+    assert discovery.command_flag(command, "-m", windows=False) != r"C:\models\qwen.gguf"
+
+
 async def test_llama_swap_serves_its_bases_and_reports_their_context(tmp_path):
     import httpx
 

@@ -267,12 +267,16 @@ def llamaswap_running(root, transport=None):
     return running if isinstance(running, list) else None
 
 
-def command_flag(command, *names):
+def command_flag(command, *names, windows=None):
     """A flag's value in a llama-server command line, as /running shows it."""
+    windows = os.name == "nt" if windows is None else windows
     try:
-        words = shlex.split(command or "")
+        # POSIX splitting reads a Windows path's backslashes as escapes.
+        words = shlex.split(command or "", posix=not windows)
     except ValueError:
         return None
+    if windows:
+        words = [w[1:-1] if len(w) > 1 and w[0] == w[-1] and w[0] in "\"'" else w for w in words]
     for index, word in enumerate(words):
         for name in names:
             if word == name and index + 1 < len(words):
