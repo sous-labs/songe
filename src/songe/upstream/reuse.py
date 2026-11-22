@@ -26,6 +26,8 @@ async def served_base(config, version, *, transport=None, url=None):
         ) as client:
             if config.upstream == "llamacpp":
                 response = await client.get(url.removesuffix("/v1") + "/props")
+                if response.status_code == 404:
+                    return await swapped_base(client, url, version, artifact)
                 response.raise_for_status()
                 if Path(response.json()["model_path"]).resolve() != artifact:
                     return None
@@ -40,3 +42,24 @@ async def served_base(config, version, *, transport=None, url=None):
     except (httpx.HTTPError, ValueError, KeyError, TypeError, OSError):
         return None
     return None
+
+
+async def swapped_base(client, url, version, artifact):
+    """A base served by llama-swap: the loaded model whose command names these
+    weights, or the model's own id there, which llama-swap loads on request.
+    None for other servers without /props."""
+    from ..models.discovery import command_flag
+
+    response = await client.get(url.removesuffix("/v1") + "/running")
+    if response.status_code != 200 or not isinstance(response.json().get("running"), list):
+        return None
+    for entry in response.json()["running"]:
+        path = command_flag(entry.get("cmd"), "-m", "--model")
+        if path and Path(path).resolve() == artifact:
+            return {"model": entry["model"], "url": url}
+    response = await client.get(url + "/models")
+    response.raise_for_status()
+    if version.get("identifier") in {m.get("id") for m in response.json()["data"]}:
+        return {"model": version["identifier"], "url": url}
+    return None
+

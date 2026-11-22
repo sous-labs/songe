@@ -453,15 +453,27 @@ def initialize(args, root):
 
     # A model already offered under its songe/ name is not added again.
     offered = set(config.exposed_models)
+    # llama-swap lists models it has not loaded; they are offered too and
+    # forwarded, and their weights are found once llama-swap runs them.
+    swapped = []
+    if ref.upstream == "llamacpp":
+        try:
+            swapped = discovery.llamaswap_models(
+                endpoints.get((ref.upstream, ref.serving_id)) or config.upstream_url
+            )
+        except (httpx.HTTPError, ValueError):
+            swapped = []
     config.exposed_models = list(
         dict.fromkeys(
             [
                 *config.exposed_models,
                 *(
-                    r.serving_id
-                    for r in catalog_refs
-                    if r.upstream == ref.upstream
-                    and public_name(r.serving_id) not in offered
+                    serving_id
+                    for serving_id in [
+                        *(r.serving_id for r in catalog_refs if r.upstream == ref.upstream),
+                        *swapped,
+                    ]
+                    if public_name(serving_id) not in offered
                 ),
             ]
         )

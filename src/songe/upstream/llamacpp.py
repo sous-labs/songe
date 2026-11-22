@@ -5,6 +5,7 @@ be registered with --lora/--lora-init-without-apply. A new base or actual memory
 reclamation needs a supervisor, never a pretend unload by setting scale=0.
 """
 
+import asyncio
 from pathlib import Path
 
 import httpx
@@ -50,11 +51,22 @@ class LlamaCPP:
             response = await client.get(url + "/models")
             response.raise_for_status()
             models = response.json().get("data", [])
-        return {
+        served = {
             m["id"]: int(m["meta"]["n_ctx"])
             for m in models
             if isinstance(m.get("meta"), dict) and m["meta"].get("n_ctx")
         }
+        # llama-swap: each loaded model's command says its -c. Without one,
+        # the fallback stays rather than a guess at llama.cpp's default.
+        root = url.removesuffix("/v1")
+        running = await asyncio.to_thread(
+            discovery.llamaswap_running, root, self.transport
+        )
+        for entry in running or []:
+            context = discovery.command_flag(entry.get("cmd"), "-c", "--ctx-size")
+            if entry.get("model") and context and context.isdigit() and int(context):
+                served.setdefault(entry["model"], int(context))
+        return served
 
     async def _request(self, method, path, **kwargs):
         async with httpx.AsyncClient(

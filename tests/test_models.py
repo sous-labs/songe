@@ -1059,8 +1059,10 @@ SERVERS = {
     # What each server answers on the probes identify() makes (404 otherwise).
     "ollama": {"/api/version": {"version": "0.40.17"}, "/api/tags": {"models": []}},
     "llama-swap": {
-        "/api/version": {"build_date": "2026-11-20", "commit": "e0274d5", "version": "v275"}
+        "/api/version": {"build_date": "2026-11-20", "commit": "e0274d5", "version": "v275"},
+        "/running": {"running": []},
     },
+    "openai-only": {"/v1/models": {"data": [{"id": "qwen"}]}},
     "llama-server": {"/props": {"model_path": "/models/x.gguf"}},
     "unknown": {},
 }
@@ -1082,13 +1084,19 @@ def serve(monkeypatch, answers):
 
 @pytest.mark.parametrize(
     "server,expected",
-    [("ollama", "ollama"), ("llama-swap", None), ("llama-server", "llamacpp"), ("unknown", None)],
+    [
+        ("ollama", "ollama"),
+        ("llama-swap", "llamacpp"),
+        ("llama-server", "llamacpp"),
+        ("openai-only", None),
+        ("unknown", None),
+    ],
 )
 def test_identify_tells_ollama_from_servers_that_only_share_api_version(
     monkeypatch, server, expected
 ):
-    # #61: llama-swap answers /api/version and was taken for Ollama. #62: an
-    # unknown server is None, not a guess ("mlx").
+    # #61: llama-swap answers /api/version and was taken for Ollama; it is a
+    # llama.cpp source (#60). #62: an unknown server is None, not "mlx".
     from songe.models import discovery
 
     serve(monkeypatch, SERVERS[server])
@@ -1114,7 +1122,7 @@ def test_forwarding_init_uses_an_unrecognized_server_as_openai_compatible(
     monkeypatch.setattr(
         cli, "detect_agent_binding", lambda: ("qwen", url) if through == "agent" else ("", "")
     )
-    serve(monkeypatch, SERVERS["llama-swap"])
+    serve(monkeypatch, SERVERS["openai-only"])
     for name in ("ollama", "lmstudio", "llamacpp", "mlx", "vllm"):
         monkeypatch.setattr(discovery, name, lambda *a, **kw: [])
     monkeypatch.setattr(discovery, "loaded_lmstudio", lambda *a, **kw: [])
@@ -1291,3 +1299,83 @@ def test_a_full_graphics_card_says_what_to_do(learners, monkeypatch):
     ModelScheduler.carry_on(owner, "second", {"nights": len(learner.nights()), "at": 0}, calibrating=True,
                             failed=True, interrupted=False, stopped_by=None, memory_stop=False)
     assert learner.get("dream_stopped")["detail"] == wording.DEVICE_FULL
+
+
+SWAP_RUNNING = {
+    "running": [
+        {"model": "qwen", "state": "ready", "proxy": "http://localhost:5800",
+         "cmd": "/app/llama-server --port 5800 -m {path} -c 8192 --jinja"},
+        {"model": "tiny", "state": "ready", "cmd": "/app/llama-server --port 5801 --model={path}"},
+    ]
+}
+
+
+def swap_server(tmp_path, monkeypatch):
+    """llama-swap v275 as recorded: two of three configured models loaded."""
+    from songe.models import discovery
+
+    weights = tmp_path / "qwen.gguf"
+    weights.write_bytes(b"GGUF")
+    running = {
+        "running": [
+            entry | {"cmd": entry["cmd"].format(path=weights)}
+            for entry in SWAP_RUNNING["running"]
+        ]
+    }
+    running["running"][1]["cmd"] = running["running"][1]["cmd"].replace(
+        str(weights), str(tmp_path / "missing.gguf")
+    )
+    answers = {
+        "/running": running,
+        "/v1/models": {"data": [{"id": "qwen"}, {"id": "tiny"}, {"id": "other"}]},
+    }
+    serve(monkeypatch, answers)
+    monkeypatch.setattr(discovery, "read_gguf", lambda path: SimpleNamespace(architecture="qwen2"))
+    return weights, answers
+
+
+def test_llama_swap_models_come_from_running_commands(tmp_path, monkeypatch):
+    # #60: llama-swap has no /props; a loaded model's command names its
+    # weights. Models it has not loaded are offered, never loaded to look.
+    from songe.models import discovery
+
+    weights, _ = swap_server(tmp_path, monkeypatch)
+    refs = discovery.llamacpp("http://127.0.0.1:9292/v1")
+    assert [(r.upstream, r.serving_id, r.path, r.architecture) for r in refs] == [
+        ("llamacpp", "qwen", weights, "qwen2")
+    ]
+    assert discovery.llamaswap_models("http://127.0.0.1:9292/v1") == ["qwen", "tiny", "other"]
+    assert discovery.command_flag("x --ctx-size=4096 -m 'a b.gguf'", "-m", "--model") == "a b.gguf"
+
+
+async def test_llama_swap_serves_its_bases_and_reports_their_context(tmp_path):
+    import httpx
+
+    from songe.upstream.llamacpp import LlamaCPP
+    from songe.upstream.reuse import served_base
+
+    weights = tmp_path / "qwen.gguf"
+    weights.write_bytes(b"GGUF")
+    running = {"running": [{"model": "qwen", "cmd": f"/app/llama-server -m {weights} -c 8192"},
+                           {"model": "tiny", "cmd": "/app/llama-server -m /elsewhere.gguf"}]}
+
+    def handler(request):
+        if request.url.path == "/running":
+            return httpx.Response(200, json=running)
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json={"data": [{"id": "qwen"}, {"id": "tiny"}, {"id": "other"}]})
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(handler)
+    config = SimpleNamespace(upstream="llamacpp", upstream_url="http://owned/v1",
+                             server_source_url="http://swap/v1", upstream_timeout=5)
+    loaded = {"id": "base", "identifier": "qwen", "artifact": str(weights), "kind": "gguf-full"}
+    assert await served_base(config, loaded, transport=transport) == {"model": "qwen", "url": "http://swap/v1"}
+    # Not loaded: llama-swap loads it by its id, so Songe never starts its own.
+    asleep = {"id": "base", "identifier": "other", "artifact": str(tmp_path / "o.gguf"), "kind": "gguf-full"}
+    assert await served_base(config, asleep, transport=transport) == {"model": "other", "url": "http://swap/v1"}
+    unknown = asleep | {"identifier": "gone"}
+    assert await served_base(config, unknown, transport=transport) is None
+    upstream = LlamaCPP(config, transport=transport)
+    assert await upstream.served_contexts() == {"qwen": 8192}
+

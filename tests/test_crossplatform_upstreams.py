@@ -319,6 +319,8 @@ async def test_llamacpp_reports_the_context_the_users_server_runs_with():
     def handler(request):
         if request.url.host != "user":
             raise httpx.ConnectError("owned server is down", request=request)
+        if request.url.path == "/running":  # llama-swap only
+            return httpx.Response(404)
         assert request.url.path == "/v1/models"
         return httpx.Response(
             200,
