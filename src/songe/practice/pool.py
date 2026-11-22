@@ -78,6 +78,7 @@ def practice_steps(store, split="train"):
 
 
 MOMENTS_PER_CONVERSATION = 3  # judged.PER_UNIT: a conversation's last moments
+DRIFT_MAX = 48  # confirmed successes measured for drift, at most
 
 
 def test_minimum(config):
@@ -103,6 +104,19 @@ def real_test_steps(store):
 
 
 _UNITS = {}
+
+
+def last_moments(steps, per=None):
+    """Each conversation's last moments with feedback (its order kept): the
+    test moments the gate scores and judges. Every moment of every recorded
+    conversation made the check grow with history (live, Inkling: 4,788
+    measurements, ~100 hours, for 12 long conversations)."""
+    per = per or MOMENTS_PER_CONVERSATION
+    by = {}
+    for s in steps:
+        by.setdefault(s["conversation"], []).append(s)
+    keep = {id(s) for ss in by.values() for s in ss[-per:]}
+    return [s for s in steps if id(s) in keep]
 
 
 def heldout_units(store):
@@ -216,7 +230,11 @@ def drift_steps(store):
                     "source_id": exchange,
                 }
             )
-    return steps
+    # Bounded like the test moments: each session's last successes, the
+    # newest sessions first, DRIFT_MAX at most (every success in history
+    # made the check grow with it).
+    steps = last_moments(steps)
+    return steps[-DRIFT_MAX:]
 
 
 def bookkeeping(store, mode="dreams"):
