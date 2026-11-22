@@ -40,30 +40,40 @@ async def test_the_review_shows_the_turns_last_results_in_full():
         assert f"detail {n}.1" in prompt
 
 
-async def test_an_answer_cut_off_at_the_limit_is_asked_again_with_more_room(store):
+async def test_a_cut_off_answer_is_forced_from_the_reasoning_so_far(store):
     sent = []
 
     def server(request):
         body = json.loads(request.content)
-        sent.append(body["max_tokens"])
-        if len(sent) == 1:  # thinking ran out of room: broken JSON
-            return httpx.Response(200, json={"choices": [{"finish_reason": "length",
-                                                          "message": {"content": '{"parts": [{"kind": "feed'}}]})
-        return httpx.Response(200, json={"choices": [{"finish_reason": "stop",
-                                                      "message": {"content": json.dumps({"parts": []})}}]})
+        sent.append(body)
+        if len(sent) == 1:  # reasoned too long: no JSON yet
+            return httpx.Response(200, json={
+                "choices": [{"finish_reason": "length", "message": {
+                    "content": "", "reasoning_content": "Step 4 broke the build, so the answer is step 4."}}],
+                "usage": {"completion_tokens": 6000}})
+        return httpx.Response(200, json={
+            "choices": [{"finish_reason": "stop", "message": {"content": json.dumps({"steps": [4]})}}],
+            "usage": {"completion_tokens": 12}})
 
-    reader = reading_client.Reader(store, "http://model/v1", "m",
+    reader = reading_client.Reader(store, "http://model/v1", "m", server="vllm",
                                    client=httpx.AsyncClient(transport=httpx.MockTransport(server)))
-    answer = await reader.ask("question one", {"type": "object"}, "review")
-    assert answer == {"parts": []} and sent == [6000, 12000] and reader.length_retries == 1
-    # Later questions start with the normal room again: a kept larger room
-    # was filled with more reasoning (live, Inkling).
-    await reader.ask("question two", {"type": "object"}, "review")
-    assert sent[-1] == 6000
+    answer = await reader.ask("which step?", {"type": "object"}, "responsible")
+    assert answer == {"steps": [4]} and reader.forced == 1 and reader.tokens_out == 6012
+    forced = sent[1]
+    # Only the reasoning was cut: the follow-up shows it, asks for the JSON
+    # alone, with reasoning off and a small room (nothing thought twice).
+    assert "Step 4 broke the build" in forced["messages"][0]["content"]
+    assert forced["messages"][0]["content"].endswith("Answer with the JSON only.")
+    assert forced["reasoning_effort"] == "none"
+    assert forced["chat_template_kwargs"] == {"enable_thinking": False}
+    assert forced["max_tokens"] <= reading_client.FORCE_TOKENS
+    # The next question starts with the normal room.
+    await reader.ask("another question", {"type": "object"}, "review")
+    assert sent[-1]["max_tokens"] == 6000
     await reader.close()
 
 
-async def test_a_moment_cut_off_twice_is_given_up_and_remembered(store):
+async def test_a_moment_still_unreadable_when_forced_is_given_up_and_remembered(store):
     sent = []
 
     def server(request):
@@ -76,9 +86,9 @@ async def test_a_moment_cut_off_twice_is_given_up_and_remembered(store):
     reader = reading_client.Reader(store, "http://model/v1", "m",
                                    client=httpx.AsyncClient(transport=httpx.MockTransport(server)))
     answer = await reader.ask("which step?", {"type": "object"}, "responsible")
-    assert answer.get("gave_up") and [m for m, _ in sent] == [6000, 12000]
+    assert answer.get("gave_up") and [m for m, _ in sent] == [6000, reading_client.FORCE_TOKENS]
     # Short reasoning is asked for, and generated tokens are counted.
-    assert sent[0][1].endswith(reading_client.BRIEF) and reader.tokens_out == 18000
+    assert sent[0][1].endswith(reading_client.BRIEF) and reader.tokens_out == 6000 + reading_client.FORCE_TOKENS
     # The next read does not pay for it again.
     assert await reader.ask("which step?", {"type": "object"}, "responsible") == answer
     assert len(sent) == 2 and reader.cached == 1

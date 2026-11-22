@@ -18,8 +18,10 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-# Answer room for a cut-off answer's second try.
-TOKENS_CAP = 32768
+# A forced answer: the reasoning so far it is shown (its tail, where the
+# conclusions are) and the room it gets for the JSON alone.
+FORCE_CONTEXT = 6000
+FORCE_TOKENS = 4096
 # Asked of every reader question.
 BRIEF = "\nKeep your reasoning short. Answer with the JSON only."
 
@@ -65,7 +67,7 @@ class Reader:
         self.max_tokens = max_tokens
         self.client = client or httpx.AsyncClient(timeout=timeout, trust_env=False)
         self.calls = self.cached = 0
-        self.length_retries = self.cut_off = self.tokens_out = 0
+        self.forced = self.cut_off = self.tokens_out = 0
         self.seconds = 0.0
         self.structured = True
 
@@ -73,9 +75,9 @@ class Reader:
         if self.calls:
             # What a read cost, for comparing models and settings.
             logger.info(
-                "reader_stats calls=%s cached=%s seconds=%.0f tokens_out=%s per_call=%s cut_off=%s retries=%s",
+                "reader_stats calls=%s cached=%s seconds=%.0f tokens_out=%s per_call=%s cut_off=%s forced=%s",
                 self.calls, self.cached, self.seconds, self.tokens_out,
-                self.tokens_out // self.calls, self.cut_off, self.length_retries,
+                self.tokens_out // self.calls, self.cut_off, self.forced,
             )
         await self.client.aclose()
 
@@ -108,24 +110,36 @@ class Reader:
         if self.template_switch:
             body["chat_template_kwargs"] = {"enable_thinking": think}
         started = time.monotonic()
-        # An answer stopped by the length limit is asked once more with twice
-        # the room; cut off again, the moment is given up (remembered, so the
-        # next read does not pay for it again). Later questions start with
-        # the normal room: a kept larger room was filled with more reasoning
-        # (live, Inkling: 3,000 -> 8,100 generated tokens per call, still 37%
-        # cut off).
-        for attempt in range(2):
-            answer, finish, used = await self.post(body, prompt + BRIEF, schema, name)
+        # max_tokens caps the reasoning and the answer together: a model that
+        # reasons too long (Inkling reasons even when asked not to) stops
+        # before or inside its JSON. Then the answer is forced: one short
+        # follow-up with the reasoning so far, reasoning off, small room, so
+        # only the reasoning was cut and nothing is thought through twice.
+        # Forced and still unreadable, the moment is given up (remembered, so
+        # the next read does not pay for it again).
+        answer, finish, used, thought = await self.post(body, prompt + BRIEF, schema, name)
+        self.tokens_out += used
+        if "error" in answer and finish == "length":
+            self.cut_off += 1
+            self.forced += 1
+            forced_prompt = (
+                prompt
+                + "\n\nYour reasoning so far (it was cut off):\n"
+                + (thought or "(none)")[-FORCE_CONTEXT:]
+                + "\n\nStop reasoning now. Answer with the JSON only."
+            )
+            forced = body | {
+                "messages": [{"role": "user", "content": forced_prompt}],
+                "max_tokens": min(body["max_tokens"], FORCE_TOKENS),
+                "reasoning_effort": "none",
+            }
+            if self.template_switch:
+                forced["chat_template_kwargs"] = {"enable_thinking": False}
+            answer, finish, used, _ = await self.post(forced, forced_prompt, schema, name)
             self.tokens_out += used
-            if "error" in answer and finish == "length":
-                self.cut_off += 1
-                if attempt == 0:
-                    self.length_retries += 1
-                    body = body | {"max_tokens": min(body["max_tokens"] * 2, TOKENS_CAP)}
-                    continue
-                answer = {"error": "cut off twice", "gave_up": True}
-                logger.warning("reader_gave_up %s: cut off at %s tokens twice", name, body["max_tokens"])
-            break
+            if "error" in answer:
+                answer = {"error": f"cut off, then no answer when forced ({finish})", "gave_up": True}
+                logger.warning("reader_gave_up %s: cut off, forced answer unreadable", name)
         self.calls += 1
         self.seconds += time.monotonic() - started
         if "error" in answer and not answer.get("gave_up"):
@@ -139,7 +153,8 @@ class Reader:
 
 
     async def post(self, body, prompt, schema, name):
-        """One question: (answer, finish reason). Structured output when the
+        """One question: (answer, finish reason, generated tokens, reasoning
+        text). Structured output when the
         server takes it, else asked plainly with the schema in the prompt."""
         if self.structured:
             response = await self.client.post(
@@ -157,7 +172,7 @@ class Reader:
                 self.structured = False
             else:
                 response.raise_for_status()
-                return read(response), finish_reason(response), usage(response)
+                return read(response), finish_reason(response), usage(response), reasoning_of(response)
         response = await self.client.post(
             self.url + "/chat/completions",
             json=body
@@ -171,7 +186,22 @@ class Reader:
             },
         )
         response.raise_for_status()
-        return read(response), finish_reason(response), usage(response)
+        return read(response), finish_reason(response), usage(response), reasoning_of(response)
+
+
+def reasoning_of(response):
+    """The reasoning an answer carried: the reasoning field, or <think> text
+    in the content (servers differ)."""
+    try:
+        message = ((response.json().get("choices") or [{}])[0]).get("message") or {}
+    except ValueError:
+        return ""
+    for field in ("reasoning_content", "reasoning"):
+        if isinstance(message.get(field), str) and message[field].strip():
+            return message[field]
+    content = message.get("content") or ""
+    match = re.search(r"<think>(.*?)(</think>|$)", content, re.S)
+    return match[1] if match else content
 
 
 def usage(response):
