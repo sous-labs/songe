@@ -218,11 +218,20 @@ async def test_dream_says_what_is_missing_and_the_asked_model_goes_first(
     store.scoped("first").set("memory_wait", {"try": 1, "tries": 3, "available": 1, "total": 2})
     reply = await scheduler.dream("first")
     assert not reply["message"].startswith("A Deep Dream is already running")
+    # A request left after an interruption waits for a long quiet period with
+    # nothing running (live, Inkling on Modal: every press answered "already
+    # running"): a press re-arms it instead of being refused.
     store.set("requested_model", "first")
+    store.set("requested_sleep", False)
+    reply = await scheduler.dream("first")
+    assert not reply["message"].startswith("A Deep Dream is already running")
+    # An armed request is a Dream under way.
+    store.set("requested_sleep", True)
     reply = await scheduler.dream("first")
     assert reply == {"started": False, "message": reply["message"]} and reply["message"].startswith(
         "A Deep Dream is already running · ")
     store.set("requested_model", None)
+    store.set("requested_sleep", False)
     store.scoped("first").set("memory_wait", None)
     # Measuring is the first step of learning: nothing else is waited on.
     for model in ("first", "second"):

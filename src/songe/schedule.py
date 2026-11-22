@@ -1613,9 +1613,16 @@ class ModelScheduler(Scheduler):
             learner = self.installation_store.scoped(model)
             # A memory wait counts only through its pending request (live: a
             # leftover wait alone blocked every press).
+            # A request counts only while armed (requested_sleep): after an
+            # interruption it stays named but waits for a long quiet period
+            # with nothing running, and a press re-arms it below (live,
+            # Inkling on Modal: every press answered "already running").
             running = (
                 (self.process and self.active_model == model)
-                or self.installation_store.get("requested_model") == model
+                or (
+                    self.installation_store.get("requested_model") == model
+                    and self.installation_store.get("requested_sleep")
+                )
                 or any(n["status"] in {"running", "interrupted", "ready"} for n in learner.nights())
             )
             if running:
