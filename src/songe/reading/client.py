@@ -18,6 +18,9 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
+# Reasoning tokens allowed on vLLM: more for questions meant to think
+# (classify), little for the others.
+THINKING_BUDGET = {True: 2048, False: 1024}
 # A forced answer: the reasoning so far it is shown (its tail, where the
 # conclusions are) and the room it gets for the JSON alone.
 FORCE_CONTEXT = 6000
@@ -109,6 +112,11 @@ class Reader:
             body["reasoning_effort"] = "none"
         if self.template_switch:
             body["chat_template_kwargs"] = {"enable_thinking": think}
+            # vLLM's hard cap on reasoning tokens, after which the model still
+            # writes its answer (probed live on Inkling-2-Mini: 1,024 halved
+            # the generated tokens and the time, JSON complete). Effort "none"
+            # alone did not bound reasoning on long prompts (~8,100 tokens).
+            body["thinking_token_budget"] = THINKING_BUDGET[think]
         started = time.monotonic()
         # max_tokens caps the reasoning and the answer together: a model that
         # reasons too long (Inkling reasons even when asked not to) stops

@@ -59,6 +59,8 @@ async def test_a_cut_off_answer_is_forced_from_the_reasoning_so_far(store):
                                    client=httpx.AsyncClient(transport=httpx.MockTransport(server)))
     answer = await reader.ask("which step?", {"type": "object"}, "responsible")
     assert answer == {"steps": [4]} and reader.forced == 1 and reader.tokens_out == 6012
+    # On vLLM the reasoning is capped by the server; the answer still follows.
+    assert sent[0]["thinking_token_budget"] == reading_client.THINKING_BUDGET[False]
     forced = sent[1]
     # Only the reasoning was cut: the follow-up shows it, asks for the JSON
     # alone, with reasoning off and a small room (nothing thought twice).
@@ -86,6 +88,7 @@ async def test_a_moment_still_unreadable_when_forced_is_given_up_and_remembered(
     reader = reading_client.Reader(store, "http://model/v1", "m",
                                    client=httpx.AsyncClient(transport=httpx.MockTransport(server)))
     answer = await reader.ask("which step?", {"type": "object"}, "responsible")
+    # Not a vLLM server: no thinking budget is sent.
     assert answer.get("gave_up") and [m for m, _ in sent] == [6000, reading_client.FORCE_TOKENS]
     # Short reasoning is asked for, and generated tokens are counted.
     assert sent[0][1].endswith(reading_client.BRIEF) and reader.tokens_out == 6000 + reading_client.FORCE_TOKENS
