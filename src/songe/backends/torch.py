@@ -256,16 +256,14 @@ class TorchBackend:
         self.model.requires_grad_(False)
         self.model.config.use_cache = False
         if train:
-            if self.quantized:
-                # What prepare_model_for_kbit_training does, except that it
-                # upcasts every unquantized weight to fp32, the frozen
-                # vocabulary matrices included: 5 GB more than bf16 on a 27B
-                # with a 248k vocabulary (live, RTX 5090), and a load peak
-                # that fragments the allocator. Only norms and biases (1-D)
-                # are upcast here, for numerical stability, as peft does.
-                for param in self.model.parameters():
-                    if param.ndim == 1 and param.dtype in {torch.float16, torch.bfloat16}:
-                        param.data = param.data.float()
+            # 4-bit bases are not passed through peft's
+            # prepare_model_for_kbit_training: it upcasts every unquantized
+            # weight to fp32, the frozen vocabulary matrices included (5 GB more
+            # than bf16 on a 27B with a 248k vocabulary, live RTX 5090). Norms
+            # stay in the compute dtype too: an fp32 final norm feeds fp32 into
+            # the bf16 output head of models whose norm returns its own dtype
+            # (Qwen2.5: "expected mat1 and mat2 to have the same dtype", live
+            # A100). fp32 norms only matter for fp16 stability.
             self.embedding_on_host = self._auto(self.options.embedding_on_host) and (
                 self._embedding_to_host()
             )
