@@ -342,3 +342,30 @@ def measurement_text(progress):
     return f"measuring training size · {done} of ~{target} tokens" + (
         " · longer contexts" if longer else ""
     )
+
+
+def training_window(config, saved):
+    """What the dashboard says about a model's measured training window.
+
+    Songe measures only as far as the recorded conversations need (target
+    sequence), unless memory runs out first. So the measured window is either
+    the memory limit or "enough for the conversations so far"; which one is
+    decided by the same bracket the measurement itself uses. None before the
+    first measurement.
+    """
+    saved = saved or {}
+    rows = saved.get("rows", [])
+    if not config.calibration_available or not rows:
+        return None
+    failures = saved.get("capacity_limits", []) + [
+        h for h in saved.get("held", []) if h.get("kind") == "sequence"
+    ]
+    boundary, maximum = bracket(config, rows, failures)
+    limited = boundary is not None and close_enough(maximum, boundary)
+    step = config.calibrated_step_seconds or 0
+    return {
+        "window": int(config.max_sequence),
+        "limit": "memory" if limited else "conversations",
+        "served": int(config.context_window) if config.context_window else None,
+        "example_seconds": round(step / max(1, config.accumulation), 1) if step else None,
+    }

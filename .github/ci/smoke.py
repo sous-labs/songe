@@ -124,6 +124,8 @@ def browser_check(url):
         page.goto(url, wait_until="networkidle")
         page.wait_for_timeout(3000)  # a few refreshes of /api/state
         text = page.inner_text("body")
+        if os.environ.get("SMOKE_SCREENSHOT"):  # for looking at the page locally
+            page.screenshot(path=os.environ["SMOKE_SCREENSHOT"], full_page=True)
         browser.close()
     if problems:
         raise SystemExit("dashboard errors:\n" + "\n".join(problems))

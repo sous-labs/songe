@@ -254,7 +254,7 @@
   "done": "Done",
   "view_all": "View all",
   "quick_report_title": "Quick Dream",
-  "quick_nothing": "No changes to the prompt",
+  "quick_nothing": "Nothing new since your last Quick Dream ({when}) · talk to your agent first, then dream again",
   "now_line": "Now · {prefs} · {waiting} waiting for a Deep Dream",
   "loading_report": "Loading this Dream…",
   "how_it_went": "How it went",
@@ -297,7 +297,6 @@
   },
   "dream_stopped_retry": "Try again",
   "dream_stopped_kept": "{kept} practice scenes kept for next time.",
-  "quick_nothing": "Nothing new since your last Quick Dream ({when}) · talk to your agent first, then dream again",
   "collecting_next": "A Deep Dream needs {count} more test moment{s} to check its work · each conversation where you give feedback adds up to 3",
   "back_to_dreams": "← All Dreams",
   "view_progress": "View progress",
@@ -338,5 +337,17 @@
   "quick_example_same": "No visible change at the moment it came from",
   "catching_up": "Catching up on your earlier conversations. After this, Quick Dreams take a few minutes.",
   "next_after_quick": "Then the preferences in the prompt update",
-  "next_after_reading": "Then the preferences in the prompt update · a Deep Dream starts after a long quiet period"
+  "next_after_reading": "Then the preferences in the prompt update · a Deep Dream starts after a long quiet period",
+  "machine_line": "{name} · {memory} GB · trains models up to about {size}B",
+  "machine_gpus": "GPU {index} of {gpus}: ",
+  "machine_cannot": "{name} · no GPU for training (serves only)",
+  "machine_title": "A rough estimate for dense models trained in 4-bit; each model's real limit is measured before its first Deep Dream.",
+  "training_window": "trains on up to {window} tokens per conversation",
+  "training_served": "serves up to {served} · ",
+  "training_limit": {
+    "memory": "the memory limit here",
+    "conversations": "enough for your conversations so far"
+  },
+  "training_example": "about {time} per example",
+  "training_unmeasured": "Training window: measured before its first Deep Dream"
 }

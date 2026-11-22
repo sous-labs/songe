@@ -579,6 +579,9 @@ def model_learning(config, store, model, activity=None):
         # how it ended {at, support, reason} until the viewer closes it.
         "measuring_machine": measuring_machine,
         "machine_measured": store.get("machine_measured"),
+        # The measured training window: {window, limit (memory|conversations),
+        # served, example_seconds}, or None before the first measurement.
+        "training": training_window(config, store.get("calibration")),
         # A pressed Deep Dream that stopped before training: {kind, at, reason, detail}.
         "stopped": store.get("dream_stopped"),
         # Under Dreams, separate test conversations still needed before a Deep
@@ -587,6 +590,15 @@ def model_learning(config, store, model, activity=None):
         # A pressed Deep Dream between its runs (measuring, then training): its step.
         "deep_waiting": deep_waiting(store, model, current),
     }
+
+
+def training_window(config, saved):
+    from .sleep.calibration_state import training_window as window
+
+    try:
+        return window(config, saved)
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def collecting(config, store):

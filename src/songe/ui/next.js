@@ -578,6 +578,36 @@ async function loadFull(id) {
 
 // ---- a model ----
 const learns = (ml, inv) => Boolean(ml?.current || ml?.last) || (inv && inv.learning_level !== 'off' && inv.support !== 'unsupported');
+// 8192 -> "8k", 1536 -> "1.5k": token counts as people say them.
+function tokens(n) {
+  if (n < 1000) return String(n);
+  const k = n / 1024;
+  return `${Number.isInteger(k) ? k : k.toFixed(1)}k`;
+}
+function roughTime(seconds) {
+  return seconds < 90 ? `${Math.max(1, Math.round(seconds))} s` : `${Math.round(seconds / 60)} min`;
+}
+// The machine line: the training device and the rough model size it trains.
+function machineText(m) {
+  if (!m) return '';
+  if (m.trains_up_to_b == null) return fill(W.machine_cannot, {name: m.name});
+  const which = m.gpus > 1 ? fill(W.machine_gpus, {index: m.gpu_index + 1, gpus: m.gpus}) : '';
+  return which + fill(W.machine_line, {name: m.name, memory: m.memory_gb, size: m.trains_up_to_b});
+}
+// One line under a model's name: its measured training window, or when it
+// will be measured. Measured numbers only, never a prediction.
+function trainingLine(ml) {
+  const t = ml?.training;
+  if (!t) return el('p', {class: 'model-facts muted'}, W.training_unmeasured);
+  const parts = [
+    (t.served && t.served > t.window ? fill(W.training_served, {served: tokens(t.served)}) : '')
+      + fill(W.training_window, {window: tokens(t.window)}),
+    W.training_limit[t.limit],
+    t.example_seconds ? fill(W.training_example, {time: roughTime(t.example_seconds)}) : null,
+  ].filter(Boolean);
+  const line = parts.join(' · ');
+  return el('p', {class: 'model-facts muted'}, line[0].toUpperCase() + line.slice(1));
+}
 function quiet(ml, inv, text) {
   return el('section', {class: 'changed'}, el('div', {class: 'finished kept'},
     el('p', {class: 'finished-title'}, text[0]), text[1] ? el('p', {class: 'finished-outcome muted'}, text[1]) : null));
@@ -617,6 +647,7 @@ function modelView(id, ml, inv, paused = false) {
       el('h2', {class: 'model-name'}, inv?.name || id),
       el('span', {class: 'version'}, current ? `${current.label} in use` : ''),
       el('span', {class: 'spacer'}), unsupported ? null : autoSwitch, unsupported ? null : dream),
+    unsupported ? null : trainingLine(ml),
     noticeView(),
     // Measuring this machine (not a Dream), and how it ended.
     ml?.measuring_machine ? el('div', {class: 'notice', role: 'status', 'data-failure': 'false'},
@@ -842,6 +873,12 @@ function render() {
   $('paused').textContent = status?.paused ? 'Yes' : 'No';
   // One line while a Dream trains or measures: how busy the GPU is.
   const gpu = status?.gpu;
+  const machine = status?.machine;
+  $('machine-line').hidden = !machine;
+  if (machine) {
+    $('machine').textContent = machineText(machine);
+    $('machine-line').title = W.machine_title;
+  }
   $('gpu-line').hidden = !gpu;
   if (gpu) $('gpu').textContent = fill(gpu.memory != null ? W.gpu_line : W.gpu_busy,
     {busy: gpu.busy, memory: `${(gpu.memory / 2 ** 30).toFixed(1)} GB`});

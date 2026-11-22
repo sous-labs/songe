@@ -80,6 +80,7 @@ main { min-width: 0; max-width: 52rem; }
 .model-head { display: flex; flex-wrap: wrap; align-items: center; gap: .75rem 1rem; }
 .model-name { font-size: 1.75rem; font-weight: 450; letter-spacing: -.03em; line-height: 1.2; }
 .model-head .version { color: var(--muted); font-size: .875rem; }
+.model-facts { margin: .25rem 0 0; font-size: .875rem; }
 .model-head .spacer { flex: 1; }
 .dream { padding: .5rem 1.125rem; border: 0; border-radius: 999px; background: var(--p); color: #fff; font-size: .875rem; font-weight: 500; box-shadow: 0 6px 18px #452bb033; transition: transform 320ms var(--ease), box-shadow 320ms var(--ease); }
 .dream:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 9px 22px #452bb052; }

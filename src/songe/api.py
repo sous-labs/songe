@@ -283,6 +283,8 @@ def snapshot(config, store, scheduler=None, *, live=False, release=None, lean=Fa
         "activity": status,
         # While a Dream trains or measures: how busy the GPU is (one line).
         "gpu": gpu_line(scheduler) if live else None,
+        # The training device and, roughly, the largest model it can train.
+        "machine": machine_line(config),
         "restoring": restoring(store),
         "slice": active_slice,
         "data_progress": training["data_progress"]
@@ -322,6 +324,16 @@ def gpu_line(scheduler):
     from .platform.common import gpu_usage
 
     return gpu_usage()
+
+
+def machine_line(config):
+    from .capacity import machine
+    from .platform import current
+
+    try:
+        return machine(current(), config)
+    except Exception:  # noqa: BLE001 - optional information only
+        return None
 
 
 def cycle_section(config, store, models, scheduler=None):
