@@ -95,6 +95,10 @@ jobs:
     name: smoke / ${{ matrix.server }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      # SmolLM2-135M-Instruct Q8_0 at a fixed commit, checked by sha256.
+      MODEL_URL: https://huggingface.co/bartowski/SmolLM2-135M-Instruct-GGUF/resolve/09816acd5d99df7be770d85ea30822623dab342c/SmolLM2-135M-Instruct-Q8_0.gguf
+      MODEL_SHA256: 5a1395716f7913741cc51d98581b9b1228d80987a9f7d3664106742eb06bba83
     strategy:
       fail-fast: false
       matrix:
@@ -104,7 +108,9 @@ jobs:
             # shows that the served context was read (#28).
             args: --upstream llamacpp --upstream-url http://127.0.0.1:8080/v1 --context 4096
           - server: ollama
-            args: --upstream ollama --upstream-url http://127.0.0.1:11434/v1
+            # Given by its root URL, as users do (#45); 4096 is Ollama's
+            # default context (#47).
+            args: --upstream ollama --upstream-url http://127.0.0.1:11434 --context 4096
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v7
@@ -114,12 +120,14 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/models
-          key: smollm2-135m-instruct-q8_0
+          key: smollm2-135m-instruct-q8_0-${{ env.MODEL_SHA256 }}
       - name: Tiny model
         run: |
+          m="$RUNNER_TEMP/models/smol.gguf"
           mkdir -p "$RUNNER_TEMP/models"
-          test -s "$RUNNER_TEMP/models/smol.gguf" || curl -fsSL --retry 3 -o "$RUNNER_TEMP/models/smol.gguf" \
-            https://huggingface.co/bartowski/SmolLM2-135M-Instruct-GGUF/resolve/main/SmolLM2-135M-Instruct-Q8_0.gguf
+          # A cached copy is checked too; one that does not match is fetched again.
+          echo "$MODEL_SHA256  $m" | sha256sum --check --status || curl -fsSL --retry 3 -o "$m" "$MODEL_URL"
+          echo "$MODEL_SHA256  $m" | sha256sum --check
       # The model is mounted at the same path inside the container, so Songe
       # reads the weights the server reports, as on a user's machine.
       - name: Start llama.cpp
