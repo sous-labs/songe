@@ -99,3 +99,45 @@ def test_only_modelopt_inkling_checkpoints_are_packed():
     assert not packed_experts.supports(SimpleNamespace(model_type="inkling2_loop", quantization_config=None))
     assert not packed_experts.supports(SimpleNamespace(
         model_type="qwen3_5", quantization_config={"quant_method": "modelopt"}))
+
+
+def tiny_inkling(seed=3):
+    torch.manual_seed(seed)
+    config = m.Inkling2LoopTextConfig(
+        hidden_size=64, moe_intermediate_size=32, n_routed_experts=4, num_experts_per_tok=2,
+        vocab_size=97, unpadded_vocab_size=97, num_hidden_layers=4, num_attention_heads=4,
+        num_key_value_heads=2, head_dim=16, swa_num_attention_heads=4, swa_num_key_value_heads=2,
+        swa_head_dim=16, sliding_window_size=24, rel_extent=32, d_rel=8, n_layers_per_attn_res_block=1,
+        loop_config={"core_start": 1, "core_end": 3, "num_passes": 2, "gate_rank": 8, "is_varloop": False},
+    )
+    config._attn_implementation = "eager"
+    model = m.Inkling2LoopForCausalLM(config).float().eval()
+    return model
+
+
+def test_block_attention_matches_eager_outputs_and_gradients():
+    from songe.backends import block_attention
+
+    model = tiny_inkling()
+    ids = torch.randint(0, 97, (1, 90))
+
+    def run():
+        model.zero_grad(set_to_none=True)
+        logits = model(input_ids=ids, use_cache=False).logits
+        logits.float().logsumexp(-1).mean().backward()
+        grads = {n: p.grad.clone() for n, p in model.named_parameters() if p.grad is not None}
+        return logits.detach(), grads
+
+    reference, reference_grads = run()
+    block_attention.install(model)
+    elements = block_attention.BLOCK_ELEMENTS
+    block_attention.BLOCK_ELEMENTS = 4 * 90 * 64  # force 64-query blocks... and the 64 floor
+    try:
+        model.train()  # checkpointed blocks
+        blocks, block_grads = run()
+    finally:
+        block_attention.BLOCK_ELEMENTS = elements
+    torch.testing.assert_close(blocks, reference, atol=1e-4, rtol=1e-4)
+    assert reference_grads.keys() == block_grads.keys()
+    for name in reference_grads:
+        torch.testing.assert_close(block_grads[name], reference_grads[name], atol=1e-4, rtol=1e-3)

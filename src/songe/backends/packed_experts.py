@@ -59,7 +59,12 @@ def _classes():
             self.register_buffer("down_proj", torch.empty(0), persistent=False)
             self.packed = False
 
-        def load_packed(self, tensors, device):
+        def load_packed(self, tensors, device, host=False):
+            """host: keep the packed bytes in pinned host RAM and copy each
+            expert in only when it is used (frees ~16 GB of GPU memory on
+            Inkling-2-Mini for PCIe traffic)."""
+            self.device, self.host = device, host
+            storage = "cpu" if host else device
             rows = tensors["w13_weight"].shape[1]
             # transformers deinterleaves gate/up rows after dequantizing
             # (Interleave(dim=1)); rows are packed independently, so the packed
@@ -77,8 +82,11 @@ def _classes():
                 else:
                     fmt, factor = "mxfp8", torch.ones(weight.shape[0])
                 setattr(self, f"{name}_format", fmt)
-                self.register_buffer(f"{name}_codes", weight.contiguous().to(device), persistent=False)
-                self.register_buffer(f"{name}_scale", scale.contiguous().to(device), persistent=False)
+                codes, scale = weight.contiguous().to(storage), scale.contiguous().to(storage)
+                if host and device.type == "cuda":
+                    codes, scale = codes.pin_memory(), scale.pin_memory()
+                self.register_buffer(f"{name}_codes", codes, persistent=False)
+                self.register_buffer(f"{name}_scale", scale, persistent=False)
                 self.register_buffer(f"{name}_factor", factor.to(device), persistent=False)
             table = torch.tensor(E2M1, device=device)
             byte = torch.arange(256, device=device)
@@ -89,7 +97,11 @@ def _classes():
 
         def weight(self, name, index, dtype):
             codes = getattr(self, f"{name}_codes")[index]
-            scale = getattr(self, f"{name}_scale")[index].float()
+            scale = getattr(self, f"{name}_scale")[index]
+            if self.host:
+                codes = codes.to(self.device, non_blocking=True)
+                scale = scale.to(self.device, non_blocking=True)
+            scale = scale.float()
             if getattr(self, f"{name}_format") == "mxfp8":
                 values = codes.float().view(*scale.shape, 32) * torch.exp2(scale - 127)[..., None]
                 return values.reshape(codes.shape).to(dtype)
@@ -118,7 +130,7 @@ def _classes():
     return m, PackedExperts
 
 
-def load(path, device, dtype):
+def load(path, device, dtype, experts_on_host=False):
     """The checkpoint's model with PackedExperts filled from its safetensors."""
     import transformers.conversion_mapping as cm
     from safetensors import safe_open
@@ -153,7 +165,11 @@ def load(path, device, dtype):
                         tensors[key[len(prefix):]] = handle.get_tensor(key)
         if not tensors:
             raise ValueError(f"Checkpoint has no experts for layer {index}")
-        module.load_packed(tensors, device)
+        module.load_packed(tensors, device, host=experts_on_host)
+    from . import block_attention
+
+    # Eager-only attention would be quadratic in memory; same math in blocks.
+    block_attention.install(model)
     return model
 
 

@@ -40,6 +40,9 @@ class TorchOptions:
     embedding_on_host: str = "auto"
     # Activations saved for backward go to host RAM (pinned) during training.
     offload_activations: str = "auto"
+    # Packed experts (Inkling-2) in pinned host RAM, copied in per use:
+    # ~16 GB more GPU memory for longer windows, at the cost of PCIe traffic.
+    experts_on_host: str = "off"
 
 
 @dataclass(frozen=True)
@@ -240,7 +243,12 @@ class TorchBackend:
             config.model, local_files_only=True, trust_remote_code=False
         )
         if self.packed_experts:
-            self.model = packed_experts.load(config.model, self.device, dtype)
+            self.model = packed_experts.load(
+                config.model,
+                self.device,
+                dtype,
+                experts_on_host=self._auto(self._option("experts_on_host")),
+            )
         else:
             self.model = AutoModelForCausalLM.from_pretrained(config.model, **kwargs)
         if not self.quantized:
@@ -401,6 +409,12 @@ class TorchBackend:
                 self.torch.cuda.synchronize(device)
             self.model.train(was_training)
 
+    @staticmethod
+    def _cache(output):
+        """The model cache of an output: past_key_values, or cache (Inkling-2)."""
+        cache = getattr(output, "past_key_values", None)
+        return cache if cache is not None else getattr(output, "cache", None)
+
     def prefix_state(self, ids):
         """Read ids with no gradient in chunks; keep only the model cache."""
         if not ids:
@@ -418,7 +432,7 @@ class TorchBackend:
                     use_cache=True,
                     return_dict=True,
                 )
-                past = out.past_key_values
+                past = self._cache(out)
         return past
 
     def hidden(self, ids):
@@ -484,6 +498,12 @@ class TorchBackend:
         was_training = self.model.training
         self.model.eval()
         started = time.monotonic()
+        if len(prompt_ids) > self.config.teacher_chunk:
+            # A long prompt is read in chunks, as the teacher reads it: one
+            # pass over the whole prompt can need far more memory than the
+            # training step (quadratic attention, Inkling-2).
+            past = self.prefix_state(prompt_ids[:-1])
+            inputs = torch.tensor([prompt_ids[-1:]], device=self.device)
         prompt_seconds = 0.0
         eos = self._causal().generation_config.eos_token_id
         eos = {eos} if isinstance(eos, int) else set(eos or [])
@@ -514,7 +534,7 @@ class TorchBackend:
                     if not tokens:
                         prompt_seconds = time.monotonic() - started
                     tokens.append(value)
-                    past, inputs = out.past_key_values, token
+                    past, inputs = self._cache(out), token
                     if value in eos:
                         break
         finally:
@@ -559,7 +579,7 @@ class TorchBackend:
                     use_cache=True,
                     return_dict=True,
                 )
-                past = out.past_key_values
+                past = self._cache(out)
                 if end > positions.start:
                     parts.append(
                         out.last_hidden_state[
