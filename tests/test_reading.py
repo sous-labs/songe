@@ -800,3 +800,45 @@ async def test_nothing_launches_while_a_dream_is_still_reading(config, store, mo
     assert not scheduler.reading_busy()
     await scheduler.tick()
     assert launched == [True]
+
+
+async def test_a_dream_carried_on_after_a_restart_reads_with_auto_dream_off(config, store, monkeypatch):
+    """A pressed Deep Dream that a restart interrupted mid-read keeps its armed
+    request; its background reading is gone, so the scheduler's own reading
+    step must read that model even with auto-dream off (live, Inkling on
+    Modal: 7 of 12 conversations skipped, no practice, straight to measuring)."""
+    from songe.platform import Accel
+    from songe.reading import store as reading
+    from songe.schedule import Scheduler
+
+    config.learning = "dreams"
+    registry.migrate(config, store)
+    registry.observe(config, store, "learner")
+    registry.set_learning(store, "learner", "all")
+    registry.set_auto_dream(store, "learner", False)
+    record_session(store)
+    learner = store.scoped("learner")
+    assert reading.pending(learner)
+    scheduler, asked = scheduler_for(config, store, monkeypatch, loaded=["learner"])
+    launched = []
+
+    async def launch(self):
+        launched.append(len(reading.pending(learner)))
+
+    async def chosen():
+        return "learner"
+
+    async def nothing():
+        return None
+
+    monkeypatch.setattr(Scheduler, "tick", launch)
+    monkeypatch.setattr(scheduler, "next_model", chosen)
+    monkeypatch.setattr(scheduler, "discover_models", nothing)
+    scheduler.platform.accelerators = lambda: [Accel("metal", "stand-in")]
+    # The restart left the request armed and the Dream preparing.
+    store.set("requested_model", "learner")
+    store.set("requested_sleep", True)
+    learner.set("dream_preparing", True)
+    await scheduler.tick()
+    # It read the conversation itself first, then went on (nothing unread).
+    assert asked and launched == [0]

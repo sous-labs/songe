@@ -2850,7 +2850,12 @@ class ModelScheduler(Scheduler):
         # left and writes practice; training may then start.
         deep = requested or quiet >= self.installation_config.deep_quiet_seconds
         if deep:
-            await self.read_sessions(practice=True)
+            # A requested Deep Dream reads its own model even with auto-dream
+            # off ("a Dream already started finishes"): after a restart its
+            # background reading is gone and this is the only reader (live,
+            # Inkling on Modal: 7 of 12 conversations skipped, no practice,
+            # straight to measuring).
+            await self.read_sessions(practice=True, only=asked if requested else None)
         elif quiet >= self.installation_config.quick_quiet_seconds:
             await self.read_sessions(
                 quick=True, seconds=self.installation_config.quick_read_seconds
