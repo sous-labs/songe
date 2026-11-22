@@ -160,8 +160,10 @@ def exit_reason(code, err_path, tail=600):
     import signal as signals
 
     if code < 0:
+        # Unix signal numbers (Windows' signal module lacks most of them).
+        known = {2: "SIGINT", 6: "SIGABRT", 9: "SIGKILL", 11: "SIGSEGV", 15: "SIGTERM"}
         try:
-            name = signals.Signals(-code).name
+            name = known.get(-code) or signals.Signals(-code).name
         except ValueError:
             name = f"signal {-code}"
         why = f"killed by {name}" + (" (out of memory?)" if name == "SIGKILL" else "")
