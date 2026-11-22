@@ -145,6 +145,10 @@ class TorchBackend:
     kind = "torch"
 
     def __init__(self, config, check=lambda: None, train=True):
+        # Before CUDA initialises: expandable segments return the space that
+        # varying sequence lengths fragment (5.9 GB on a 4k-window Inkling-2
+        # step, the difference between running out of memory and training).
+        os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
         import torch
         from peft import LoraConfig, get_peft_model
         from transformers import (
@@ -185,16 +189,25 @@ class TorchBackend:
         model_config = AutoConfig.from_pretrained(
             config.model, local_files_only=True, trust_remote_code=False
         )
-        with torch.device("meta"):
-            skeleton = AutoModelForCausalLM.from_config(
-                model_config, trust_remote_code=False
-            )
-        parameters = sum(p.numel() for p in skeleton.parameters())
-        del skeleton
-        self.available_bytes = free_memory(torch, self.device)
-        self.quantized = needs_4bit(
-            parameters, self.available_bytes, config.memory_fraction
+        from . import packed_experts
+
+        # Experts that ship quantized stay packed (compact base, like 4-bit).
+        self.packed_experts = packed_experts.supports(model_config) and (
+            self.device.type == "cuda"
         )
+        self.available_bytes = free_memory(torch, self.device)
+        if self.packed_experts:
+            self.quantized = True  # the base is compact; the memory savers apply
+        else:
+            with torch.device("meta"):
+                skeleton = AutoModelForCausalLM.from_config(
+                    model_config, trust_remote_code=False
+                )
+            parameters = sum(p.numel() for p in skeleton.parameters())
+            del skeleton
+            self.quantized = needs_4bit(
+                parameters, self.available_bytes, config.memory_fraction
+            )
         dtype = torch.float32 if self.device.type == "cpu" else torch.bfloat16
         if (
             self.device.type == "cpu"
@@ -206,7 +219,7 @@ class TorchBackend:
         if self.device.type == "cuda" and not torch.cuda.is_bf16_supported():
             dtype = torch.float16  # Capability probe, not a GPU-name table.
         kwargs = {"dtype": dtype, "local_files_only": True, "trust_remote_code": False}
-        if self.quantized:
+        if self.quantized and not self.packed_experts:
             if (
                 self.device.type not in {"cuda", "xpu"}
                 or importlib.util.find_spec("bitsandbytes") is None
@@ -226,7 +239,10 @@ class TorchBackend:
         self.tokenizer = AutoTokenizer.from_pretrained(
             config.model, local_files_only=True, trust_remote_code=False
         )
-        self.model = AutoModelForCausalLM.from_pretrained(config.model, **kwargs)
+        if self.packed_experts:
+            self.model = packed_experts.load(config.model, self.device, dtype)
+        else:
+            self.model = AutoModelForCausalLM.from_pretrained(config.model, **kwargs)
         if not self.quantized:
             self.model.to(self.device)
         self.model.requires_grad_(False)
@@ -252,6 +268,9 @@ class TorchBackend:
                     lora_alpha=config.rank * config.lora_scale,
                     lora_dropout=0.0,
                     target_modules="all-linear",
+                    exclude_modules=(
+                        packed_experts.LORA_EXCLUDE if self.packed_experts else None
+                    ),
                     bias="none",
                     task_type="CAUSAL_LM",
                 ),
@@ -416,7 +435,13 @@ class TorchBackend:
         scaling = getattr(model, "logits_scaling", None)
         if scaling:
             logits = logits / scaling
-        cap = getattr(model.config, "final_logit_softcapping", None)
+        softcap = getattr(model, "logit_softcap", None)
+        if callable(softcap):  # Inkling-2: its own softcap, on fp32 logits
+            return softcap(logits.float())
+        config = model.config
+        cap = getattr(config, "final_logit_softcapping", None) or getattr(
+            getattr(config, "text_config", None), "final_logit_softcapping", None
+        )
         if cap:
             logits = self.torch.tanh(logits / cap) * cap
         return logits
