@@ -417,7 +417,7 @@ status lines.
 - **Recorded values only.** Unknown values are `null`, never `0`. A value that
   is an estimate says so with `"estimated": true` next to it.
 - **Names.** User-facing words: **Dream** (the button that starts a cycle now),
-  **Reading your replies**, **Practice**, **Training**, **Checking**, **Result**.
+  **Rewind**, **Practice**, **Training**, **Evaluation**, **Result**.
   In code, "dream" means a generated practice scene; it is never shown.
 - **Signals.** Exactly six types, by source. From the user: `correction`,
   `retry`, `approval`. From a tool: `tool_error` (call rejected),
