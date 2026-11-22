@@ -199,9 +199,18 @@ def rule_sentence(text):
 
 
 def stated_rules(items):
-    """(item index, sentence) for each user message holding a standing rule."""
+    """(item index, sentence) for each user message holding a standing rule.
+
+    Only messages after the agent has done something (an action, or a
+    checkpoint standing for earlier work): the opening message is the task
+    statement, and its constraints ("Don't change the Bevy version") belong to
+    that task, not feedback on the agent's work (live: one task prompt reused
+    in 11 runs became the same "correction" six times)."""
     out = []
+    started = False
     for i, it in enumerate(items):
-        if it.get("kind") == "user" and (sentence := rule_sentence(it.get("content"))):
+        if it.get("kind") in ("action", "checkpoint"):
+            started = True
+        elif started and it.get("kind") == "user" and (sentence := rule_sentence(it.get("content"))):
             out.append((i, sentence))
     return out

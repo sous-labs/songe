@@ -39,10 +39,57 @@ class PracticeFailed(RuntimeError):
 LESSON_TYPES = ("correction", "retry", "tool_error", "failed_result", "outcome")
 
 
-def wanted(store, per_signal):
-    """[(signal, variants still to write)] for this learner, oldest first."""
+def clusters(signals, have=None):
+    """Signals that teach the same thing, as lists (the one practised first).
+
+    A rule the user stated groups only with the same sentence of theirs;
+    other lessons group by word overlap, as Quick Dream's candidates do. The
+    signal practised for a cluster is the one that already has the most
+    scenes (so a newer look-alike does not start over), else the newest."""
+    from ..quick import normal, similar
+    from ..reading.rules import rule_sentence
+
+    have = have or {}
+    groups = []
+    for s in sorted(signals, key=lambda s: s.get("revision") or 0, reverse=True):
+        rule = rule_sentence(s.get("text")) if s.get("from") == "rules" and s.get("source") == "user" else None
+        text = rule or s["lesson"].strip()
+        if rule:
+            home = next((g for g in groups if g["rule"] and normal(g["text"]) == normal(rule)), None)
+        else:
+            home = next((g for g in groups if not g["rule"] and similar(text, g["text"])), None)
+        if home:
+            home["members"].append(s)
+        else:
+            groups.append({"text": text, "rule": bool(rule), "members": [s]})
+    out = []
+    for g in groups:
+        first = max(g["members"], key=lambda s: (have.get(s["id"], 0), s.get("revision") or 0))
+        out.append([first] + [s for s in g["members"] if s is not first])
+    return out
+
+
+def lesson_signals(store):
     from ..reading.store import signals
 
+    return [s for s in signals(store, types=LESSON_TYPES) if s.get("lesson") and s.get("exchanges")]
+
+
+def cluster_of(store):
+    """{signal id: ids of every signal in its cluster}: training one
+    cluster's scenes covers all of them (quick.absorb, trained bookkeeping)."""
+    out = {}
+    for group in clusters(lesson_signals(store)):
+        ids = [s["id"] for s in group]
+        for i in ids:
+            out[i] = ids
+    return out
+
+
+def wanted(store, per_signal):
+    """[(signal, variants still to write)] for this learner, oldest first:
+    one set of scenes per cluster of signals that teach the same thing (live:
+    six identical corrections wrote up to 18 scenes on one rule)."""
     with store.connect() as db:
         have = {}
         for signal_id, n in db.execute(
@@ -51,10 +98,10 @@ def wanted(store, per_signal):
         ):
             have[signal_id] = n
     out = []
-    for s in signals(store, types=LESSON_TYPES):
-        if not (s.get("lesson") and s.get("exchanges")):
-            continue
-        missing = [v for v in range(1, per_signal + 1) if v > have.get(s["id"], 0)]
+    for group in clusters(lesson_signals(store), have):
+        s = group[0]
+        written = max(have.get(m["id"], 0) for m in group)
+        missing = [v for v in range(1, per_signal + 1) if v > written]
         if missing:
             out.append((s, missing))
     # The user's own rules first: a capped Dream must not leave them out.

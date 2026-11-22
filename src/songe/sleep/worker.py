@@ -729,8 +729,14 @@ def run(config, store, slice_seconds=None, sizing=None):
         }
         # The signals whose practice this Dream trained: once it is adopted,
         # their Quick Dream lessons leave the prompt (quick.absorb).
+        # A cluster's scenes stand for every signal that teaches the same
+        # thing (practice.store.clusters), so all of them count as trained.
+        from ..practice.store import cluster_of
+
+        practised = {s["signal_id"] for s in pool if s.get("practice") and s.get("signal_id")}
+        same = cluster_of(store)
         record["trained_signals"] = sorted(
-            {s["signal_id"] for s in pool if s.get("practice") and s.get("signal_id")}
+            {member for signal in practised for member in same.get(signal, [signal])}
         )
         data_progress("train", samples, samples, sample_seconds)
         if "trained_revisions" in result:
