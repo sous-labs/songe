@@ -232,6 +232,10 @@ def initialize(args, root):
     if agent_url and not local_host(urlparse(agent_url).hostname):
         agent_url = ""
     if getattr(args, "upstream_url", None):
+        # Every supported server takes the OpenAI API under /v1, and the proxy
+        # appends to this URL: Ollama is usually given as http://localhost:11434.
+        url = args.upstream_url.rstrip("/")
+        args.upstream_url = url if url.endswith("/v1") else url + "/v1"
         replace(config, upstream_url=args.upstream_url).validate()
     platform = Rooted(current(), root)
     kinds = {a.kind for a in platform.accelerators()}

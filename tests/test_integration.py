@@ -292,6 +292,43 @@ def test_init_selects_agents_upstream_and_asks_once(
     assert Store(root).version()["artifact"] == str(base)
 
 
+@pytest.mark.parametrize("given", ["http://127.0.0.1:11434", "http://127.0.0.1:11434/"])
+def test_init_keeps_v1_on_a_server_given_by_its_root(tmp_path, monkeypatch, given):
+    # Ollama is usually given by its root; the proxy appends the request path
+    # to upstream_url, so without /v1 every chat came back 404.
+    from songe import agents, cli, launchd
+    from songe.models import ModelRef, discovery
+    from songe.platform import Memory
+
+    base = tmp_path / "model.gguf"
+    base.write_bytes(b"")
+    platform = SimpleNamespace(
+        accelerators=lambda: [Accel("cpu", "test")],
+        service=lambda: SimpleNamespace(target=tmp_path / "service", available=lambda: True),
+        memory=lambda: Memory(2**30, 2**29),
+    )
+    import songe.platform
+
+    monkeypatch.setattr(songe.platform, "current", lambda: platform)
+    monkeypatch.setattr(cli, "detect_agent_binding", lambda: ("", ""))
+    monkeypatch.setattr(
+        discovery,
+        "ollama",
+        lambda **kw: [ModelRef("ollama", "smollm2:135m", "gguf", base, "llama")],
+    )
+    monkeypatch.setattr(cli.shutil, "which", lambda name: None)
+    monkeypatch.setattr(agents, "proposed", lambda *a, **kw: [])
+    monkeypatch.setattr(agents, "apply", lambda *args: None)
+    monkeypatch.setattr(launchd, "install", lambda *a, **kw: None)
+    monkeypatch.setattr(cli.LocalClient, "snapshot", lambda self: {"service_running": True})
+    root = tmp_path / "data"
+    args = cli.parser().parse_args(
+        ["--data-dir", str(root), "init", "--yes", "--upstream", "ollama", "--upstream-url", given]
+    )
+    cli.initialize(args, root)
+    assert Config.load(root).upstream_url == "http://127.0.0.1:11434/v1"
+
+
 async def test_supervisor_registers_candidate_slots_and_vllm_runtime_controls(
     tmp_path, config, monkeypatch
 ):
