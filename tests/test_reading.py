@@ -749,3 +749,54 @@ def test_opencode_1_19_titles_compactions_and_continue_are_not_the_user():
         "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed."}]}
     items = timeline.build([(1, resumed, reply({"role": "assistant", "content": "Nothing left."}), 200)])
     assert [i["kind"] for i in items if i["kind"] in {"user", "harness"}] == ["harness"]
+
+
+async def test_nothing_launches_while_a_dream_is_still_reading(config, store, monkeypatch):
+    """Measuring, training and swapping park or replace the model server, so
+    none starts while reading or practice still talks to it (live, Inkling on
+    Modal: the measuring child started beside a pressed Dream's background
+    reading, which then timed out: "stopped while reading · ReadTimeout")."""
+    import asyncio
+
+    from songe.platform import Accel
+    from songe.schedule import Scheduler
+
+    config.learning = "dreams"
+    registry.migrate(config, store)
+    registry.observe(config, store, "learner")
+    registry.set_learning(store, "learner", "all")
+    record_session(store)
+    scheduler, _ = scheduler_for(config, store, monkeypatch, loaded=["learner"])
+    launched = []
+
+    async def launch(self):
+        launched.append(True)
+
+    monkeypatch.setattr(Scheduler, "tick", launch)
+
+    async def nothing():
+        return None
+
+    async def chosen():
+        return "learner"
+
+    # Past reading, the Dream would measure and train this model.
+    monkeypatch.setattr(scheduler, "discover_models", nothing)
+    monkeypatch.setattr(scheduler, "next_model", chosen)
+    scheduler.platform.accelerators = lambda: [Accel("metal", "stand-in")]
+    store.set("requested_sleep", True)
+    store.set("requested_model", "learner")
+    # A pressed Deep Dream reads in the background.
+    reading = asyncio.get_running_loop().create_future()
+    scheduler.reading_task = reading
+    try:
+        await scheduler.tick()
+        assert launched == []
+        assert scheduler.reason == "Reading your conversations"
+    finally:
+        reading.cancel()
+        scheduler.reading_task = None
+    # Once reading is done, the Dream goes on to measure and train.
+    assert not scheduler.reading_busy()
+    await scheduler.tick()
+    assert launched == [True]

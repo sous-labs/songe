@@ -1683,6 +1683,13 @@ class ModelScheduler(Scheduler):
         self.dream_task = asyncio.create_task(read_all())
         return waiting, ""
 
+    def reading_busy(self):
+        """Reading or practice under way (in this tick or in the background)."""
+        if getattr(self, "reading_task", None) is not None:
+            return True
+        task = getattr(self, "dream_task", None)
+        return task is not None and not task.done()
+
     async def read_sessions_now(self, model=None):
         """Dream under learning = "dreams": read sessions and write practice
         now instead of after the quiet time."""
@@ -2747,6 +2754,15 @@ class ModelScheduler(Scheduler):
             await self.read_sessions(
                 quick=True, seconds=self.installation_config.quick_read_seconds
             )
+        if self.reading_busy():
+            # Reading and practice talk to the model server; measuring,
+            # training and swapping park or replace it. A pressed Deep Dream
+            # reads in the background (read_sessions_now), so the step here
+            # returns at once: without this wait the measuring child started
+            # beside it and the reader timed out (live, Inkling on Modal:
+            # "stopped while reading · ReadTimeout").
+            self.reason = "Reading your conversations"
+            return
         await self.discover_models()
         for row in registry.entries(self.installation_store):
             scoped = self.installation_store.scoped(row["id"])

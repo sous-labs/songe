@@ -283,7 +283,7 @@
   },
   "dream_stopped": {
     "practice": "Your Deep Dream stopped while writing practice: the model kept failing to answer. Nothing was changed.",
-    "reading": "Your Deep Dream stopped while reading your conversations. Nothing was changed.",
+    "reading": "Your Deep Dream stopped while reading your conversations: {detail}. Nothing was changed.",
     "training": "Your Deep Dream stopped before training: {detail}. Nothing was changed.",
     "restart": "Your Deep Dream was interrupted when Songe restarted. Nothing was changed."
   },
@@ -293,7 +293,11 @@
     "Waiting for usable held-out conversations": "it needs a few more of your conversations to check its work",
     "Waiting for learnable experience": "none of the practice fit what this machine can train",
     "Waiting for new learnable experience": "there was no new practice to train on",
-    "Waiting for experience": "there was no practice to train on yet (practice is written from your conversations' lessons)"
+    "Waiting for experience": "there was no practice to train on yet (practice is written from your conversations' lessons)",
+    "ReadTimeout": "the model did not answer in time (it may have been busy or unloaded)",
+    "ConnectTimeout": "the model server did not answer (it may have been busy or unloaded)",
+    "ConnectError": "the model server could not be reached (is it running?)",
+    "RemoteProtocolError": "the model server closed the connection"
   },
   "dream_stopped_retry": "Try again",
   "dream_stopped_kept": "{kept} practice scenes kept for next time.",
