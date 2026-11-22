@@ -11,8 +11,11 @@ memory needed ~= 0.7 GB per billion parameters + 8 GB working memory.
 - NVIDIA/AMD: the GPU's own memory, 90% usable.
 - Apple Silicon: memory is shared with macOS and apps and the GPU may use only
   part of it, so about half is usable and the working memory is smaller.
-Measured anchors: Qwen3.8-27B trains at 4k on a 32 GB RTX 5090 (23.7 GB peak);
-3-8B models train on a 24 GB M4 Mac.
+Measured anchors (4k window, 4-bit, LoRA rank 64, peak incl. the allocator's
+cache; A100 80 GB grid and an RTX 5090, 2026-11-22): Qwen3.5-4B 6.7 GB,
+Qwen3.5-9B 10.1 GB, Qwen2.5-14B 14.2 GB, Qwen3.8-27B 24.6 GB, Qwen2.5-32B
+27.7 GB, Qwen2.5-72B 54.1 GB: about 0.7 GB per billion + 5 GB, so the rule
+above is slightly conservative. Macs: 3-8B models train on a 24 GB M4.
 """
 
 import time
