@@ -962,9 +962,19 @@ class TorchBackend:
             qr, rr = torch.linalg.qr(right)
             u, singular, vh = torch.linalg.svd(rl @ rr.T, full_matrices=False)
             rank = a1.shape[0]
-            root = singular[:rank].sqrt()
-            weights[key] = ((qr @ vh.T[:, :rank]) * root).T.to(a1.dtype)
-            weights[bkey] = ((ql @ u[:, :rank]) * root).to(b1.dtype)
+            kept = min(rank, singular.shape[0])
+            root = singular[:kept].sqrt()
+            a = ((qr @ vh.T[:, :kept]) * root).T
+            b = (ql @ u[:, :kept]) * root
+            # Narrow layers (Qwen3.5 in_proj_a/b: 32 outputs at rank 64)
+            # compress below the configured rank. Zero rows and columns keep
+            # every factor its parameter's shape; the product is unchanged
+            # (as in the MLX backend).
+            if kept < rank:
+                a = torch.cat((a, a.new_zeros(rank - kept, a.shape[1])))
+                b = torch.cat((b, b.new_zeros(b.shape[0], rank - kept)), dim=1)
+            weights[key] = a.to(a1.dtype)
+            weights[bkey] = b.to(b1.dtype)
         with torch.no_grad():
             for name, param in self.model.named_parameters():
                 if name in weights:

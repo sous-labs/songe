@@ -407,6 +407,31 @@ def test_effective_delta_scaling_and_per_cycle_norm(backend):
         )
 
 
+def test_half_strength_keeps_narrow_layer_shapes():
+    # Qwen3.5's in_proj_a/b have 32 outputs at rank 64: the merged delta has
+    # fewer components than the rank, and the factors must keep their shapes.
+    torch.manual_seed(0)
+    rank, outputs, inputs = 8, 4, 16
+    model = torch.nn.Module()
+    model.layer = torch.nn.Module()
+    model.layer.lora_A = torch.nn.ModuleDict(
+        {"default": torch.nn.Linear(inputs, rank, bias=False)}
+    )
+    model.layer.lora_B = torch.nn.ModuleDict(
+        {"default": torch.nn.Linear(rank, outputs, bias=False)}
+    )
+    a, b = "layer.lora_A.default.weight", "layer.lora_B.default.weight"
+    baseline = {a: torch.randn(rank, inputs), b: torch.randn(outputs, rank)}
+    trained = {a: torch.randn(rank, inputs), b: torch.randn(outputs, rank)}
+    fake = SimpleNamespace(torch=torch, model=model)
+    TorchBackend.scale_delta(fake, baseline, trained, 0.5)
+    params = dict(model.named_parameters())
+    assert params[a].shape == (rank, inputs)
+    assert params[b].shape == (outputs, rank)
+    desired = 0.5 * (baseline[b] @ baseline[a] + trained[b] @ trained[a])
+    torch.testing.assert_close(params[b] @ params[a], desired, atol=1e-5, rtol=1e-4)
+
+
 def test_train_resume_preserves_optimizer_units(
     backend, step, tmp_path, writable_file_fsync
 ):
