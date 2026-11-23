@@ -102,13 +102,20 @@ def jaccard(a, b):
     return len(a & b) / len(a | b) if a | b else 0.0
 
 
+# A definition, not prose: the keyword as a word, then the name, then what
+# follows a name in code. Tool output also holds English ("the function the
+# agent called"), and "the" was then a shared identifier for every scene.
+DEFINITION = re.compile(
+    r"\b(?:def|function|fn|class|struct)\s+([A-Za-z_]\w*)"
+    r"\s*(?:[(:{<;]|(?:extends|implements)\b)"
+)
+
+
 def identifiers(texts):
     """Function and class names defined in some code."""
     names = set()
     for text in texts:
-        names.update(
-            re.findall(r"(?:def|function|fn|class|struct)\s+([A-Za-z_]\w*)", text or "")
-        )
+        names.update(DEFINITION.findall(text or ""))
     return names - GENERIC_NAMES
 
 

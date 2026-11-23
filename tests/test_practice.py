@@ -175,3 +175,35 @@ def test_not_copy_catches_non_latin_verbatim_requests():
     # Different Arabic request should not trigger copy overlap.
     ar_other = "أنشئ جدول بيانات جديد لإدارة المخزون الشهري"
     assert checks.copy_evidence({"request": ar_other}, {}, [ar_req], []) == []
+
+
+def test_not_copy_ignores_definition_keywords_in_prose():
+    from songe.practice import checks
+
+    # Tool output in English: "function the", "class is" are not definitions.
+    code = ["Done: the function the agent called is fine; this class is the base."]
+    scene = {"request": "add the missing check to the parser"}
+    assert checks.copy_evidence(scene, {}, ["fix it"], code) == []
+
+
+def test_not_copy_still_catches_copied_definitions():
+    from songe.practice import checks
+
+    code = [
+        "def compute_vat(amount):\n    return amount * 0.2\n",
+        "function renderInvoice(rows) {",
+        "class InvoiceStore extends Base {",
+        "fn parse_line(s: &str) -> Line {",
+        "struct LineItem {",
+        "class Ledger:",
+    ]
+    assert checks.identifiers(code) == {
+        "compute_vat",
+        "renderInvoice",
+        "InvoiceStore",
+        "parse_line",
+        "LineItem",
+        "Ledger",
+    }
+    files = {"vat.py": "def compute_vat(total):\n    return total\n"}
+    assert checks.copy_evidence({"request": "x"}, files, ["y"], code) == ["compute_vat"]
