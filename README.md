@@ -46,6 +46,16 @@ uv tool install songe        # or: pipx install songe
 songe init
 ```
 
+No uv or pipx yet? Either installs in one line:
+
+```sh
+curl -LsSf https://astral.sh/uv/install.sh | sh    # uv (or: brew install uv)
+brew install pipx                                  # pipx on macOS (Debian/Ubuntu: sudo apt install pipx)
+```
+
+Both give Songe its own environment in a lasting place, which its
+background service needs.
+
 macOS with Homebrew:
 
 ```sh
