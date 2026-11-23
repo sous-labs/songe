@@ -9,23 +9,42 @@ import pytest
 from songe.platform import common
 
 
-def fake_nvml(free=8 * 2**30, fail=False):
+def fake_nvml(free=8 * 2**30, fail=False, memory_error=None):
     class NVMLError(Exception):
-        pass
+        def __init__(self, value):
+            super().__init__(value)
+            self.value = value
 
     def init():
         if fail:
             raise NVMLError("driver not loaded")
 
+    def memory_info(handle):
+        if memory_error is not None:
+            raise NVMLError(memory_error)
+        return SimpleNamespace(total=24 * 2**30, free=free)
+
     return SimpleNamespace(
         NVMLError=NVMLError,
+        NVML_ERROR_NOT_SUPPORTED=3,
         nvmlInit=init,
         nvmlDeviceGetCount=lambda: 1,
         nvmlDeviceGetHandleByIndex=lambda i: i,
-        nvmlDeviceGetMemoryInfo=lambda h: SimpleNamespace(total=24 * 2**30, free=free),
+        nvmlDeviceGetMemoryInfo=memory_info,
         nvmlDeviceGetName=lambda h: b"NVIDIA GeForce RTX 4090",
         nvmlDeviceGetUUID=lambda h: "GPU-1",
     )
+
+
+MEMINFO = "MemTotal:       125000000 kB\nMemFree:  9000000 kB\nMemAvailable:   80000000 kB\n"
+
+
+@pytest.fixture
+def meminfo(tmp_path, monkeypatch):
+    path = tmp_path / "meminfo"
+    path.write_text(MEMINFO, encoding="utf-8")
+    monkeypatch.setattr(common.unified_memory, "__defaults__", (path,))
+    return path
 
 
 @pytest.fixture(autouse=True)
@@ -71,6 +90,57 @@ def test_unavailable_telemetry_still_fails_closed(monkeypatch):
         raise subprocess.TimeoutExpired(command, timeout)
 
     monkeypatch.setattr(common.subprocess, "check_output", always_slow)
+    with pytest.raises(OSError, match="NVIDIA memory telemetry unavailable"):
+        common.discrete_accelerators()
+
+
+def test_integrated_gpu_uses_system_memory_through_nvml(monkeypatch, meminfo):
+    # GB10 / DGX Spark: NVML answers "not supported" for device memory.
+    monkeypatch.setitem(sys.modules, "pynvml", fake_nvml(memory_error=3))
+    [gpu] = common.discrete_accelerators()
+    assert (gpu.kind, gpu.memory_total, gpu.memory_free) == (
+        "cuda",
+        125000000 * 1024,
+        80000000 * 1024,
+    )
+
+
+def test_integrated_gpu_uses_system_memory_through_nvidia_smi(monkeypatch, meminfo):
+    monkeypatch.setitem(sys.modules, "pynvml", fake_nvml(fail=True))
+    monkeypatch.setattr(common.shutil, "which", lambda name: name == "nvidia-smi")
+    monkeypatch.setattr(
+        common.subprocess,
+        "check_output",
+        lambda *a, **k: b"GPU-1f86, NVIDIA GB10, [N/A], [N/A]\n",
+    )
+    [gpu] = common.discrete_accelerators()
+    assert (gpu.name, gpu.memory_free) == ("NVIDIA GB10", 80000000 * 1024)
+
+
+def test_other_nvml_memory_errors_still_fail_closed(monkeypatch, meminfo):
+    # Only "not supported" means unified memory; any other error is unknown.
+    monkeypatch.setitem(sys.modules, "pynvml", fake_nvml(memory_error=999))
+    monkeypatch.setattr(common.shutil, "which", lambda name: name == "nvidia-smi")
+    monkeypatch.setattr(
+        common.subprocess,
+        "check_output",
+        lambda *a, **k: b"GPU-1, NVIDIA A100, [N/A], 40960\n",
+    )
+    with pytest.raises(OSError, match="NVIDIA memory telemetry unavailable"):
+        common.discrete_accelerators()
+
+
+def test_integrated_gpu_without_meminfo_fails_closed(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        common.unified_memory, "__defaults__", (tmp_path / "missing",)
+    )
+    monkeypatch.setitem(sys.modules, "pynvml", fake_nvml(memory_error=3))
+    monkeypatch.setattr(common.shutil, "which", lambda name: name == "nvidia-smi")
+    monkeypatch.setattr(
+        common.subprocess,
+        "check_output",
+        lambda *a, **k: b"GPU-1, NVIDIA GB10, [N/A], [N/A]\n",
+    )
     with pytest.raises(OSError, match="NVIDIA memory telemetry unavailable"):
         common.discrete_accelerators()
 
