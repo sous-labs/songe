@@ -9,6 +9,7 @@
   <a href="#-how-it-works">How it works</a> •
   <a href="#-commands">Commands</a> •
   <a href="ROADMAP.md">Roadmap</a> •
+  <a href="https://discord.gg/cBEywVkXjY">Discord</a> •
   <a href="https://souslabs.ai">Website</a>
 </p>
 
@@ -184,7 +185,8 @@ service moves to the new version by itself in a quiet moment.
 ## 🧭 Roadmap and contributing
 
 Where Songe is going: [ROADMAP.md](ROADMAP.md). Ideas and bugs are welcome as
-[issues](https://github.com/sous-labs/songe/issues); to contribute, see
+[issues](https://github.com/sous-labs/songe/issues). Questions and results from your nights go in
+[Discord](https://discord.gg/cBEywVkXjY). To contribute, see
 [CONTRIBUTING.md](CONTRIBUTING.md). Security reports: [SECURITY.md](SECURITY.md).
 
 Licensed under [Apache-2.0](LICENSE).
