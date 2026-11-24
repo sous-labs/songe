@@ -171,10 +171,45 @@ def test_services_injected_targets_do_not_touch_user_services(tmp_path, kind, su
         ns = {"t": "http://schemas.microsoft.com/windows/2004/02/mit/task"}
         assert document.find(".//t:LogonType", ns).text == "InteractiveToken"
         script = target.with_suffix(".py").read_text(encoding="utf-8")
-        assert "os.execvpe" in script and repr(env) in script
+        assert "subprocess.call" in script and repr(env) in script
     service.uninstall()
     assert not target.exists()
     assert not calls
+
+
+def test_windows_task_launcher_preserves_spaced_arguments_and_exit_code(tmp_path):
+    import json
+
+    spaced = tmp_path / "user with spaces" / "songe data"
+    spaced.mkdir(parents=True)
+    probe = spaced / "probe.py"
+    output = spaced / "received.json"
+    probe.write_text(
+        "import json, os, pathlib, sys\n"
+        f"pathlib.Path({str(output)!r}).write_text(\n"
+        '    json.dumps({"argv": sys.argv[1:], "value": os.environ["VALUE"]}),\n'
+        '    encoding="utf-8",\n'
+        ")\n"
+        "raise SystemExit(3)\n",
+        encoding="utf-8",
+    )
+    service = TaskScheduler(tmp_path / "songe-task.xml", activate=False)
+    argv = [sys.executable, str(probe), "--data-dir", str(spaced), "serve"]
+    env = {"VALUE": 'space "quote" & % $PATH'}
+    target = service.install(argv, env)
+    assert service.definition() == (argv, env)
+    result = subprocess.run(
+        [sys.executable, str(target.with_suffix(".py"))],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    assert result.returncode == 3, result.stderr
+    assert json.loads(output.read_text(encoding="utf-8")) == {
+        "argv": ["--data-dir", str(spaced), "serve"],
+        "value": env["VALUE"],
+    }
 
 
 def test_service_activation_uses_user_scope(tmp_path):

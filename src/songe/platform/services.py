@@ -292,16 +292,17 @@ class TaskScheduler(OwnedService):
     def write_definition(self, argv, env):
         self.check_owner(env)
         # Task Scheduler has no per-action environment. A stdlib launcher applies
-        # exactly this task's environment then execs argv without shell parsing.
+        # exactly this task's environment, quotes argv for CreateProcess, and stays
+        # in the task's job so /End and RestartOnFailure track the service.
         import json
         import sys
 
         launcher = self.target.with_suffix(".py")
         script = (
-            "import os\n"
+            "import os, subprocess\n"
             + f"os.environ.update({dict(env)!r})\n"
             + f"argv = {list(argv)!r}\n"
-            + "os.execvpe(argv[0], argv, os.environ)\n"
+            + "raise SystemExit(subprocess.call(argv, env=os.environ))\n"
         )
         atomic_write(launcher, script.encode())
         task = ET.Element(
