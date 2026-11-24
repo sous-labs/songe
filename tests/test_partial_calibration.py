@@ -1159,3 +1159,30 @@ def test_the_unload_wait_asks_for_the_missing_teacher_measurement(
     assert wait == "Measuring memory for longer conversations"
     assert teacher_wanted(store.get("calibration")) == [8613]
     assert scheduler.last_fit is None
+
+
+def test_a_length_that_failed_every_try_is_a_ceiling_to_bisect_below(config):
+    """#140 re-review: a failed measurement adds no row, so the same longest
+    length was asked again, its tries ran out and nothing shorter was tried.
+    Only a failure or a guard stop counts a try, not an interruption."""
+    from songe.sleep.calibrate import count_teacher_try
+    from songe.sleep.calibration_state import teacher_to_ask, teacher_wanted
+
+    samples = [
+        {"id": f"s{i}", "revision": "r", "required_sequence": 4000, "teacher_sequence": t}
+        for i, t in enumerate((5000, 6000, 8000, 9400))
+    ]
+    saved = {"samples": samples, "teacher_rows": [
+        {"teacher_sequence": 13179, "host_peak_bytes": 1, "device_peak_bytes": 1}]}
+    sizing = {"max_teacher_sequence": 4500}
+    asked = teacher_to_ask(config, saved, None, sizing)
+    assert teacher_wanted(asked) == [9400]
+    # Measuring a window size is not a try of the asked teacher.
+    asked["in_progress"] = {"sequence": 4096, "kind": "sequence"}
+    assert not count_teacher_try(asked)
+    asked["in_progress"] = {"teacher_sequence": 9400, "kind": "teacher"}
+    assert count_teacher_try(asked) and count_teacher_try(asked)
+    assert teacher_wanted(asked) == []
+    # 9400 does not fit either: bisect below it.
+    again = teacher_to_ask(config, asked, None, sizing)
+    assert teacher_wanted(again) == [6000]

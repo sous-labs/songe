@@ -289,11 +289,17 @@ def teacher_to_ask(config, saved, store, sizing):
     deferred = sorted(t for t in pending_teachers(config, saved, store) if t > admitted)
     if not deferred:
         return None
+    tries = saved.get("teacher_tries", {})
     measured = [
         r.get("teacher_sequence", 0)
         for r in saved.get("teacher_rows", [])
         + saved.get("teacher_limits", [])
         + [h for h in saved.get("held", []) if h.get("kind") == "teacher"]
+    ] + [
+        # Asked and failed every try: it does not fit either; look below it.
+        w
+        for w in saved.get("teacher_wanted", [])
+        if tries.get(str(w), 0) >= TEACHER_TRIES
     ]
     ceiling = min((t for t in measured if t >= deferred[0]), default=None)
     # Within a tenth of a length that does not fit, it would not fit either.
