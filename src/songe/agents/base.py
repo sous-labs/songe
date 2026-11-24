@@ -25,6 +25,8 @@ class JSONCodec:
         # config; an empty file or one with a BOM is left alone too.
         try:
             return json.loads(raw.decode("utf-8"))
+        except UnicodeDecodeError:
+            raise NotEditable("it is not UTF-8") from None
         except json.JSONDecodeError:
             raise NotEditable("it has comments or trailing commas") from None
 
@@ -43,19 +45,29 @@ class YAMLListCodec:
     def load(self, raw):
         import yaml
 
-        text = raw.decode("utf-8") if isinstance(raw, bytes) else (raw or "")
+        try:
+            text = raw.decode("utf-8") if isinstance(raw, bytes) else (raw or "")
+        except UnicodeDecodeError:
+            raise NotEditable("it is not UTF-8") from None
         # A comment is the user's own writing; dumping would drop it.
         if re.search(r"(^|\s)#", text):
             raise NotEditable("it has comments")
         try:
-            items = yaml.safe_load(text) or []
+            items = yaml.safe_load(text)
         except yaml.YAMLError:
             raise NotEditable("it is not valid YAML") from None
+        # An empty file is an empty list; `{}`, `0` or `false` is not one.
+        items = [] if items is None else items
         if not isinstance(items, list) or not all(
             isinstance(item, dict) and isinstance(item.get(self.key), str)
             for item in items
         ):
             raise NotEditable(f"it is not a list of entries with a {self.key}")
+        names = [item[self.key] for item in items]
+        repeated = next((n for n in names if names.count(n) > 1), None)
+        if repeated is not None:
+            # Keyed by name, one of them would be lost for good.
+            raise NotEditable(f"it has two entries named {repeated}")
         return {item[self.key]: item for item in items}
 
     def dump(self, data):
@@ -76,7 +88,8 @@ def codec_named(name):
         return JSON
     if name.startswith("yaml-list:"):
         return YAMLListCodec(name.split(":", 1)[1])
-    raise ValueError(f"Unknown agent file codec: {name}")
+    # Written by a later Songe: kept as a conflict, never guessed at.
+    raise NotEditable(f"it was written with a codec this Songe does not know ({name})")
 
 
 class Agent:
@@ -110,6 +123,11 @@ class Agent:
 
     def on_songe(self, home):
         """Its default model is a songe/ one."""
+        return False
+
+    def stale(self, key, config):
+        """A top-level entry Songe wrote for a model it no longer serves
+        (for files keyed by model name; opencode and pi use legacy_models)."""
         return False
 
     # How the user picks a Songe model there ("choose one with <pick>").

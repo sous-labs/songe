@@ -8,6 +8,7 @@ Instead each Songe model gets its own entry: `extra_params` in
 models. The user picks one with `aider --model openai/songe/<name>`.
 """
 
+import os
 from pathlib import Path
 
 from .. import NAME
@@ -66,6 +67,25 @@ class Aider(Agent):
                     "output_cost_per_token": 0,
                 }
         return data
+
+    def stale(self, key, config):
+        return str(key).startswith(PREFIX) and key not in {
+            model_name(public) for public in exposed(config)
+        }
+
+    def on_songe(self, home):
+        # Aider's own default: AIDER_MODEL, else `model:` in ~/.aider.conf.yml
+        # (a --model on the command line is not something init can see).
+        import yaml
+
+        model = os.environ.get("AIDER_MODEL")
+        if model is None:
+            try:
+                conf = yaml.safe_load((home / ".aider.conf.yml").read_text(encoding="utf-8"))
+            except (OSError, ValueError, yaml.YAMLError):
+                conf = None
+            model = conf.get("model") if isinstance(conf, dict) else None
+        return isinstance(model, str) and model.startswith(PREFIX)
 
     def owns(self, path, data):
         return any(str(key).startswith(PREFIX) for key in data)
