@@ -86,6 +86,40 @@ def model_config(config, store, model):
     )
 
 
+def training_settings(config, store, model):
+    """The training settings a Dream resolves for MODEL, and where each comes from.
+
+    Returns ``(settings, ignored)``: ``(key, value, source)`` rows in
+    ``TRAINING_KEYS`` order, and the per-model keys that a Dream drops because
+    only ``MODEL_FIELDS`` vary between learners.
+    """
+    from ..config import TRAINING_KEYS, installation_keys
+
+    row = find(store, model)
+    if row is None:
+        raise ValueError(f"Unknown model: {model}")
+    resolved = model_config(config, store, model)
+    installed = installation_keys(store.root)
+    applied = [key for key in row["config"] if key in MODEL_FIELDS]
+    settings = [
+        (
+            key,
+            getattr(resolved, key),
+            "per model"
+            if key in applied
+            else "installation" if key in installed else "default",
+        )
+        for key in TRAINING_KEYS
+        if not isinstance(getattr(resolved, key), dict)
+    ]
+    ignored = [
+        key
+        for key in row["config"]
+        if key in TRAINING_KEYS and key not in MODEL_FIELDS
+    ]
+    return settings, ignored
+
+
 def save_config(config, store):
     values = {k: v for k, v in asdict(config).items() if k in MODEL_FIELDS}
     with store.connect() as db:

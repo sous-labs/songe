@@ -105,6 +105,16 @@ def models_table(models, *, data=None):
         console().print(Padding(table, (0, 0, 0, 2), expand=False))
 
 
+def training_table(settings):
+    """What a Dream resolves, setting by setting, and the layer each came from."""
+    table = Table(box=None, padding=(0, 2), pad_edge=False, header_style="dim")
+    for label in ("Training", "Value", "From"):
+        table.add_column(label, no_wrap=True)
+    for key, value, source in settings:
+        table.add_row(key, str(value), Text(source, style="dim") if source == "default" else source)
+    console().print(Padding(table, (0, 0, 0, 2), expand=False))
+
+
 def status(data):
     output = console()
     if data.get("upgrade_notice") and not os.environ.get("SONGE_NOTICE_SHOWN"):

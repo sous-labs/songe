@@ -395,6 +395,14 @@ TRAINING_KEYS = (
 )
 
 
+def installation_keys(root: Path | None = None) -> set[str]:
+    """The keys written to the installation's config.toml; the rest are defaults."""
+    path = data_dir(root) / "config.toml"
+    if not path.exists():
+        return set()
+    return set(tomllib.loads(path.read_text(encoding="utf-8")))
+
+
 def training_fingerprint(config):
     """What a night trains with (TRAINING_KEYS). Measured sizes and served
     context limits change while it runs and must not discard it."""

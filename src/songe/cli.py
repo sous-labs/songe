@@ -22,7 +22,16 @@ from .config import Config
 from .log import Store
 from .platform.locking import acquire as acquire_lock
 from .storage import private_dir
-from .terminal import console, error, facts, models_table, result, status, step
+from .terminal import (
+    console,
+    error,
+    facts,
+    models_table,
+    result,
+    status,
+    step,
+    training_table,
+)
 from .upgrade import catch_up
 
 PROVIDER = NAME
@@ -1135,7 +1144,7 @@ def main(argv=None):
                     ]
                 )
         else:
-            print_status(local.snapshot())
+            print_status(local.snapshot(), local.root, local.config)
     except (
         OSError,
         sqlite3.Error,
@@ -1153,8 +1162,34 @@ def print_models(models, *, data=None):
     models_table(models, data=data)
 
 
-def print_status(data):
+def print_status(data, root=None, config=None):
     status(data)
+    if root is None:
+        return
+    from .log import Store
+    from .models import registry
+
+    models = data.get("models") or []
+    model = next((m for m in models if m.get("enabled")), None) or (
+        models[0] if models else None
+    )
+    if model is None:
+        return
+    settings, ignored = registry.training_settings(
+        config or Config.load(root), Store(root), model["id"]
+    )
+    console().print()
+    training_table(settings)
+    if ignored:
+        facts(
+            [
+                (
+                    "Ignored",
+                    ", ".join(ignored)
+                    + " · kept per model only for sizes, backend and context",
+                )
+            ]
+        )
 
 
 def measured_hardware():
