@@ -335,3 +335,87 @@ def test_a_new_backup_never_overwrites_a_kept_one(tmp_path):
     assert kept.read_bytes() == b'{"original": "pi"}'
     manifest = json.loads((root / "agent-backups.json").read_text(encoding="utf-8"))
     assert Path(manifest[str(path)]["backup"]).read_bytes() == original
+
+
+def installed(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.delenv("PI_CODING_AGENT_DIR", raising=False)
+    (home / ".config/opencode").mkdir(parents=True)
+    (home / ".pi/agent").mkdir(parents=True)
+    root = tmp_path / "songe"
+    root.mkdir()
+    return home, root
+
+
+def test_restore_undoes_every_agent_when_a_backup_is_gone(tmp_path, config, monkeypatch):
+    # Uninstall must not stop at the first missing backup and leave the other
+    # agents pointed at a stopped service.
+    home, root = installed(tmp_path, monkeypatch)
+    oc = home / ".config/opencode/opencode.json"
+    pi = home / ".pi/agent/models.json"
+    oc.write_text('{"theme": "dark"}', encoding="utf-8")
+    pi.write_text('{"providers": {"mine": {}}}', encoding="utf-8")
+    agents.apply(agents.proposed(config, home), root)
+    for backup in (root / "backups").iterdir():
+        backup.unlink()
+    assert agents.restore(root) == []
+    assert json.loads(oc.read_text(encoding="utf-8")) == {"theme": "dark"}
+    assert json.loads(pi.read_text(encoding="utf-8")) == {"providers": {"mine": {}}}
+
+
+def test_empty_or_bom_opencode_config_is_left_alone(tmp_path, config, monkeypatch, capsys):
+    home, _ = installed(tmp_path, monkeypatch)
+    oc = home / ".config/opencode/opencode.json"
+    for raw in (b"", b'\xef\xbb\xbf{"theme": "dark"}'):
+        oc.write_bytes(raw)
+        assert [c[0] for c in agents.proposed(config, home)] == [home / ".pi/agent/models.json"]
+        assert f"Skipped {oc}" in capsys.readouterr().err
+        assert oc.read_bytes() == raw
+
+
+def test_routing_reads_a_plain_opencode_jsonc(tmp_path, monkeypatch):
+    home, _ = installed(tmp_path, monkeypatch)
+    (home / ".config/opencode/opencode.jsonc").write_text(
+        '{"model": "songe/songe/qwen"}', encoding="utf-8"
+    )
+    assert agents.routing(home)["opencode"] is True
+
+
+def test_restore_after_user_edits_keeps_their_fields_byte_for_byte(
+    tmp_path, config, monkeypatch
+):
+    # What uninstall writes back, pinned for opencode and pi after the user
+    # edited both files since init (non-ASCII stays escaped, as before).
+    home, root = installed(tmp_path, monkeypatch)
+    oc = home / ".config/opencode/opencode.json"
+    pi = home / ".pi/agent/models.json"
+    oc.write_text(
+        '{"model": "lmstudio/qwen", "theme": "café",'
+        ' "provider": {"lmstudio": {"options": {"baseURL": "http://127.0.0.1:1234/v1"}}}}',
+        encoding="utf-8",
+    )
+    pi.write_text('{"providers": {"mine": {"baseUrl": "http://x/v1"}}}', encoding="utf-8")
+    agents.apply(agents.proposed(config, home), root)
+    data = json.loads(oc.read_text(encoding="utf-8"))
+    data["keybinds"] = {"leader": "ctrl+x"}
+    data["provider"]["lmstudio"]["name"] = "Mon LM Studio"
+    oc.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    data = json.loads(pi.read_text(encoding="utf-8"))
+    data["providers"]["other"] = {"baseUrl": "http://y/v1"}
+    pi.write_text(json.dumps(data), encoding="utf-8")
+    assert agents.restore(root) == []
+    assert oc.read_bytes() == OC_RESTORED
+    assert pi.read_bytes() == PI_RESTORED
+
+
+OC_RESTORED = (
+    b'{\n  "model": "lmstudio/qwen",\n  "theme": "caf\\u00e9",\n  "provider": {\n'
+    b'    "lmstudio": {\n      "options": {\n        "baseURL": "http://127.0.0.1:1234/v1"\n'
+    b'      },\n      "name": "Mon LM Studio"\n    }\n  },\n  "keybinds": {\n'
+    b'    "leader": "ctrl+x"\n  }\n}\n'
+)
+PI_RESTORED = (
+    b'{\n  "providers": {\n    "mine": {\n      "baseUrl": "http://x/v1"\n    },\n'
+    b'    "other": {\n      "baseUrl": "http://y/v1"\n    }\n  }\n}\n'
+)

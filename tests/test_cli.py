@@ -374,6 +374,8 @@ def test_doctor_recognizes_agent_v2_and_live_service(tmp_path, monkeypatch, caps
             {"provider": {"songe": {"options": {"baseURL": "http://127.0.0.1:9/v1"}}}},
             "opencode: provider URL differs",
         ),
+        # The folder exists but the file does not (opencode not started yet).
+        (None, "opencode: unreadable configuration"),
     ],
 )
 def test_doctor_tells_a_missing_provider_from_a_wrong_url(
@@ -387,7 +389,8 @@ def test_doctor_tells_a_missing_provider_from_a_wrong_url(
 
     path = tmp_path / "home/.config/opencode/opencode.json"
     path.parent.mkdir(parents=True)
-    path.write_text(json.dumps(data), encoding="utf-8")
+    if data is not None:
+        path.write_text(json.dumps(data), encoding="utf-8")
     monkeypatch.setattr(cli, "measured_hardware", lambda: ("linux", 1, 1, "cpu"))
 
     def down(*args, **kwargs):

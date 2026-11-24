@@ -46,7 +46,7 @@ def load(path, raw=None):
     """An agent file as a tree, through its adapter's codec."""
     raw = path.read_bytes() if raw is None and path.exists() else raw
     try:
-        return codec_for(path).load(raw or b"")
+        return codec_for(path).load(raw)
     except NotEditable as exc:
         raise NotEditable(
             f"{path}: {exc} · remove them, or add Songe's entries by hand "
@@ -82,7 +82,7 @@ def proposed(config, home=None, default=None, opencode_v2=False, root=None):
             try:
                 if path.suffix == ".jsonc":
                     raise NotEditable(path)
-                data = codec.load(original or b"")
+                data = codec.load(original)
             except NotEditable:
                 # One commented config must not block the other agents.
                 skip_note(adapter, path, config, default, opencode_v2)
@@ -290,7 +290,7 @@ def apply(changes, root):
         if "edits" not in entry:
             # Migrate the original manifest using its first backup, not the
             # newly reviewed document (which may include later user changes).
-            first = codec.load(Path(entry["backup"]).read_bytes()) if entry["backup"] else {}
+            first = read_backup(entry, codec)
             entry["edits"] = edits(first, codec.load(entry["written"].encode()))
         owned = {tuple(e["path"]): e for e in entry["edits"]}
         for edit in edits(old, new):
@@ -304,7 +304,7 @@ def apply(changes, root):
                 continue
             descendants = [p for p in owned if p[: len(key)] == key]
             if descendants:
-                first = codec.load(Path(entry["backup"]).read_bytes()) if entry["backup"] else {}
+                first = read_backup(entry, codec)
                 for part in key[:-1]:
                     first = first.get(part, {}) if isinstance(first, dict) else {}
                 edit = edit | {"had": key[-1] in first, "old": first.get(key[-1])}
@@ -321,6 +321,15 @@ def apply(changes, root):
         atomic_write(path, result)
 
 
+def read_backup(entry, codec):
+    """The file as it was before Songe; {} when there was none, or when its
+    backup is gone (uninstall still undoes Songe's edits in every file)."""
+    backup = Path(entry["backup"]) if entry["backup"] else None
+    if backup is None or not backup.exists():
+        return {}
+    return codec.load(backup.read_bytes())
+
+
 def restore(root):
     manifest_path = root / "agent-backups.json"
     manifest = read_json(manifest_path)
@@ -333,7 +342,7 @@ def restore(root):
         except NotEditable:
             conflicts.append(name)
             continue
-        original = codec.load(Path(entry["backup"]).read_bytes()) if entry["backup"] else {}
+        original = read_backup(entry, codec)
         owned = entry.get("edits", edits(original, codec.load(entry["written"].encode())))
         unresolved = []
         for edit in owned:
@@ -366,13 +375,14 @@ def restore(root):
                 part = edit["path"][length - 1]
                 if cursor.get(part) == {} and part not in previous:
                     cursor.pop(part)
-        if current == original and not unresolved:
-            if entry["backup"]:
-                atomic_write(path, Path(entry["backup"]).read_bytes())
+        backup = Path(entry["backup"]) if entry["backup"] else None
+        if current == original and not unresolved and not (backup and not backup.exists()):
+            if backup:
+                atomic_write(path, backup.read_bytes())
             else:
                 path.unlink(missing_ok=True)
         else:
-            atomic_write(path, codec.dump(current))
+            write_json(path, current)
         if unresolved:
             conflicts.append(name)
             entry["edits"] = unresolved

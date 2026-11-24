@@ -17,9 +17,13 @@ class JSONCodec:
     name = "json"
 
     def load(self, raw):
-        # Never rewrite JSONC as JSON or silently discard an unparseable config.
+        """`raw` is None for a file that does not exist yet."""
+        if raw is None:
+            return {}
+        # Never rewrite JSONC as JSON or silently discard an unparseable
+        # config; an empty file or one with a BOM is left alone too.
         try:
-            return json.loads(raw) if raw else {}
+            return json.loads(raw.decode("utf-8"))
         except json.JSONDecodeError:
             raise NotEditable("it has comments or trailing commas") from None
 

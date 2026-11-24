@@ -158,8 +158,8 @@ class OpenCode(Agent):
 
     def on_songe(self, home):
         try:
-            data = JSON.load((self.folder(home) / "opencode.json").read_bytes())
-        except (OSError, NotEditable):
+            data = JSON.load(self.files(home)[0][0].read_bytes())
+        except (IndexError, OSError, NotEditable):
             return False
         model = data.get("model")
         return isinstance(model, str) and model.startswith(f"{NAME}/")

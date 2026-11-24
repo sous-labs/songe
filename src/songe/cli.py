@@ -1282,7 +1282,7 @@ def doctor(config, root, local):
         for kind, path in agents.targets():
             adapter = agents.adapter_for(path)
             try:
-                found = adapter.status(path, agents.load(path), config)
+                found = adapter.status(path, agents.load(path, path.read_bytes()), config)
             except (OSError, ValueError, AttributeError):
                 invalid.append(f"{kind}: unreadable configuration")
                 continue
