@@ -63,10 +63,28 @@ class LlamaCPP:
             discovery.llamaswap_running, root, self.transport
         )
         for entry in running or []:
+            if not isinstance(entry, dict):
+                continue
             context = discovery.command_flag(entry.get("cmd"), "-c", "--ctx-size")
             if entry.get("model") and context and context.isdigit() and int(context):
                 served.setdefault(entry["model"], int(context))
         return served
+
+    async def listing(self):
+        """llama-swap's loaded models, from /running; None for a plain
+        llama-server, whose one model is always loaded. Background work for a
+        model llama-swap has not loaded would swap out the user's."""
+        url = (getattr(self.config, "server_source_url", "") or self.url).rstrip("/")
+        running = await asyncio.to_thread(
+            discovery.llamaswap_running, url.removesuffix("/v1"), self.transport
+        )
+        if running is None:
+            return None
+        return [
+            {"identifier": entry["model"], "type": "llm"}
+            for entry in running
+            if isinstance(entry, dict) and isinstance(entry.get("model"), str)
+        ]
 
     async def _request(self, method, path, **kwargs):
         async with httpx.AsyncClient(

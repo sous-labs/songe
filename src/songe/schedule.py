@@ -2404,6 +2404,16 @@ class ModelScheduler(Scheduler):
             refs = await asyncio.to_thread(
                 registry.discover, self.installation_config, self.upstream
             )
+            waiting = set()
+            if self.installation_config.upstream == "llamacpp":
+                from .models import discovery
+
+                config = self.installation_config
+                waiting = await asyncio.to_thread(
+                    discovery.llamaswap_waiting,
+                    config.server_source_url or config.upstream_url,
+                    getattr(self.upstream, "transport", None),
+                )
         except (OSError, ValueError, RuntimeError, KeyError, httpx.HTTPError) as exc:
             # A server that is down or answers oddly leaves the models pending
             # for a later tick; it must never end the tick (issue #8).
@@ -2411,7 +2421,13 @@ class ModelScheduler(Scheduler):
             return
         for row in unknown:
             ref = next((r for r in refs if r.serving_id == row["id"]), None)
-            if ref is None:
+            if ref is None and row["id"] in waiting:
+                # Its weights are named once llama-swap runs it (the user
+                # switched models, or its ttl unloaded it): not given up on.
+                registry.support(
+                    self.installation_store, row["id"], "pending", "waiting until llama-swap runs it"
+                )
+            elif ref is None:
                 registry.support(
                     self.installation_store,
                     row["id"],
@@ -2460,10 +2476,11 @@ class ModelScheduler(Scheduler):
         from .models import registry
 
         listing = getattr(self.upstream, "listing", None)
-        if listing is None:
+        items = await listing() if listing else None
+        if items is None:
             return self.installation_config.base_identifier or None
         ids = {r["id"] for r in registry.entries(self.installation_store)}
-        for item in await listing():
+        for item in items:
             identifier = item.get("identifier")
             if item.get("type", "llm") == "llm" and (
                 identifier in ids or str(identifier).startswith("songe/")
@@ -2534,13 +2551,25 @@ class ModelScheduler(Scheduler):
         """Identifiers of the models loaded on the server right now; None when
         the server cannot list them (then the configured one is assumed)."""
         listing = getattr(self.upstream, "listing", None)
-        if listing is None:
+        items = await listing() if listing else None
+        if items is None:
             return None
-        return {
-            item.get("identifier")
-            for item in await listing()
-            if item.get("type", "llm") == "llm"
-        }
+        loaded = {item.get("identifier") for item in items if item.get("type", "llm") == "llm"}
+        if getattr(self.upstream, "name", "") == "llamacpp":
+            # llama-swap lists the user's models only; a learned version runs
+            # on Songe's own llama-server and never swaps theirs out.
+            loaded |= await asyncio.to_thread(self.learned_identifiers)
+        return loaded
+
+    def learned_identifiers(self):
+        from .models import registry
+
+        found = set()
+        for row in registry.entries(self.installation_store):
+            version = self.installation_store.scoped(row["id"]).version()
+            if version and not (version["id"] == "base" or version["id"].startswith("base-")):
+                found.add(version.get("identifier"))
+        return found
 
     async def read_sessions(
         self, *, force=False, only=None, practice=False, seconds=None, quick=False

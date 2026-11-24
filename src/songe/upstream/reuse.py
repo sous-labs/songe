@@ -54,6 +54,8 @@ async def swapped_base(client, url, version, artifact):
     if response.status_code != 200 or not isinstance(response.json().get("running"), list):
         return None
     for entry in response.json()["running"]:
+        if not isinstance(entry, dict):
+            continue
         path = command_flag(entry.get("cmd"), "-m", "--model")
         if path and Path(path).resolve() == artifact:
             return {"model": entry["model"], "url": url}

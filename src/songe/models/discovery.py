@@ -295,6 +295,19 @@ def llamaswap_models(url, transport=None):
     return [m["id"] for m in data if isinstance(m.get("id"), str)]
 
 
+def llamaswap_waiting(url, transport=None):
+    """llama-swap's models that are not loaded now; empty for other servers."""
+    root = url.rstrip("/").removesuffix("/v1")
+    running = llamaswap_running(root, transport)
+    if running is None:
+        return set()
+    try:
+        listed = llamaswap_models(url, transport)
+    except (httpx.HTTPError, ValueError):
+        return set()
+    return set(listed) - {e.get("model") for e in running if isinstance(e, dict)}
+
+
 def llamacpp(url, transport=None):
     root = url.rstrip("/").removesuffix("/v1")
     try:
@@ -308,8 +321,13 @@ def llamacpp(url, transport=None):
             raise
         refs = []
         for entry in running:
+            if not isinstance(entry, dict):
+                continue
             path = command_flag(entry.get("cmd"), "-m", "--model")
-            if not path or not entry.get("model") or not Path(path).is_file():
+            # A relative path is relative to llama-swap's directory, not ours.
+            if not path or not entry.get("model") or not Path(path).is_absolute():
+                continue
+            if not Path(path).is_file():
                 continue
             info = readable(Path(path), lambda path=Path(path): read_gguf(path))
             if info:

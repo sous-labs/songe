@@ -1103,12 +1103,15 @@ def test_identify_tells_ollama_from_servers_that_only_share_api_version(
     assert discovery.identify("http://127.0.0.1:9292/v1") == expected
 
 
+@pytest.mark.parametrize("server", ["openai-only", "llama-swap"])
 @pytest.mark.parametrize("through", ["agent", "upstream-url"])
 def test_forwarding_init_uses_an_unrecognized_server_as_openai_compatible(
-    tmp_path, monkeypatch, capsys, through
+    tmp_path, monkeypatch, capsys, through, server
 ):
     # #61: the serve-only fallback never tried the agent's own server. #62:
     # with only --upstream-url it recorded the first built-in name, lmstudio.
+    # #60: an idle llama-swap names no weights, so it is forwarded the same
+    # way rather than set up as llama.cpp without Songe's own endpoint.
     from songe import agents, cli, launchd
     from songe.models import discovery
     from songe.platform import Memory
@@ -1122,7 +1125,7 @@ def test_forwarding_init_uses_an_unrecognized_server_as_openai_compatible(
     monkeypatch.setattr(
         cli, "detect_agent_binding", lambda: ("qwen", url) if through == "agent" else ("", "")
     )
-    serve(monkeypatch, SERVERS["openai-only"])
+    serve(monkeypatch, SERVERS[server])
     for name in ("ollama", "lmstudio", "llamacpp", "mlx", "vllm"):
         monkeypatch.setattr(discovery, name, lambda *a, **kw: [])
     monkeypatch.setattr(discovery, "loaded_lmstudio", lambda *a, **kw: [])
@@ -1138,7 +1141,9 @@ def test_forwarding_init_uses_an_unrecognized_server_as_openai_compatible(
     config = Config.load(root)
     assert (config.upstream, config.upstream_url) == ("vllm", url)
     assert config.exposed_models == ["songe/qwen"]
-    assert f"OpenAI-compatible · {url}" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert f"OpenAI-compatible · {url}" in out
+    assert ("llama-swap has no model loaded" in out) == (server == "llama-swap")
 
 
 async def test_an_automatic_run_stopped_for_memory_says_so_and_tries_again_later(
@@ -1390,3 +1395,100 @@ async def test_llama_swap_serves_its_bases_and_reports_their_context(tmp_path):
     upstream = LlamaCPP(config, transport=transport)
     assert await upstream.served_contexts() == {"qwen": 8192}
 
+
+
+def swap_scheduler(learners, running, models=None):
+    from songe.upstream.llamacpp import LlamaCPP
+
+    config, store = learners
+    config.upstream = "llamacpp"
+    config.upstream_url = "http://127.0.0.1:41001/v1"
+    config.server_source_url = "http://127.0.0.1:9292/v1"
+
+    def handler(request):
+        if request.url.path == "/running" and running is not None:
+            return httpx.Response(200, json={"running": running})
+        if request.url.path == "/v1/models" and models is not None:
+            return httpx.Response(200, json={"data": [{"id": m} for m in models]})
+        return httpx.Response(404)
+
+    upstream = LlamaCPP(config, transport=httpx.MockTransport(handler))
+    return ModelScheduler(config, store, upstream), store
+
+
+async def test_llama_swap_learner_not_running_gets_no_reader(learners):
+    # #60: a chat request for a model llama-swap has not loaded makes it swap
+    # out the one the user is working with; background work waits instead.
+    scheduler, store = swap_scheduler(learners, [{"model": "second", "cmd": "llama-server"}])
+    identifier = store.scoped("first").version()["identifier"]
+    assert identifier not in await scheduler.loaded_identifiers()
+    assert await scheduler.reader_for("first") is None
+    assert await scheduler.review_model() == "second"
+    scheduler, _ = swap_scheduler(learners, [{"model": identifier}, "not an entry"])
+    reader = await scheduler.reader_for("first")
+    try:
+        assert reader is not None
+    finally:
+        await reader.close()
+
+
+async def test_llama_swap_counts_learned_versions_on_songes_own_server(learners):
+    from tests.test_store import version
+
+    scheduler, store = swap_scheduler(learners, [])
+    second = store.scoped("second")
+    second.add_version(version("night-2", 2) | {"identifier": "second-learned"})
+    second.swap("night-2", second.get("current"))
+    assert "second-learned" in await scheduler.loaded_identifiers()
+    assert await scheduler.review_model() is None  # nothing of the user's loaded
+
+
+async def test_plain_llama_server_is_still_assumed_loaded(learners):
+    scheduler, _ = swap_scheduler(learners, None)  # no /running
+    assert await scheduler.loaded_identifiers() is None
+    assert await scheduler.review_model() == "first"
+
+
+async def test_llama_swap_model_not_running_stays_pending(learners, tmp_path):
+    # Not running at the first idle discovery (switched away, or its ttl
+    # unloaded it) is not "forwarding only" for good.
+    config, store = learners
+    for model in ("asleep", "gone"):
+        registry.register(config, store, model)
+    scheduler, _ = swap_scheduler(
+        learners, [{"model": "gone", "cmd": "llama-server -m /nowhere.gguf"}], ["asleep", "gone"]
+    )
+    await scheduler.discover_models()
+    rows = {r["id"]: r for r in registry.entries(store)}
+    assert (rows["asleep"]["support"], rows["asleep"]["reason"]) == (
+        "pending", "waiting until llama-swap runs it"
+    )
+    assert rows["gone"]["support"] == "unsupported"  # running, weights unreadable
+
+
+def test_llama_swap_skips_relative_model_paths(tmp_path, monkeypatch):
+    from songe.models import discovery
+
+    _, answers = swap_server(tmp_path, monkeypatch)
+    answers["/running"]["running"][0]["cmd"] = "llama-server -m models/qwen.gguf"
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "models").mkdir()
+    (tmp_path / "models/qwen.gguf").write_bytes(b"GGUF")
+    assert discovery.llamacpp("http://127.0.0.1:9292/v1") == []
+
+
+def test_llama_swap_init_offers_its_chat_models_from_the_source(monkeypatch):
+    # Re-init: upstream_url is Songe's own port, so llama-swap is listed at
+    # server_source_url; embedding models are never offered (#72).
+    from songe import cli
+    from songe.models import discovery
+
+    asked = []
+    monkeypatch.setattr(
+        discovery, "llamaswap_models",
+        lambda url: asked.append(url) or ["qwen", "nomic-embed-text-v1.5", "tiny"],
+    )
+    config = Config(upstream="llamacpp", upstream_url="http://127.0.0.1:41001/v1",
+                    server_source_url="http://127.0.0.1:9292/v1", server_owned=True)
+    assert cli.llamaswap_offered(config) == ["qwen", "tiny"]
+    assert asked == ["http://127.0.0.1:9292/v1"]
