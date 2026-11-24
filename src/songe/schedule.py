@@ -1452,7 +1452,10 @@ class Scheduler:
                 | set(record.get("trained_signals") or [])
             )
             self.store.set("trained_signals", trained)
-            quick.absorb(self.store, trained)
+            # A Dream that measured which lessons its version follows without
+            # the note (the worker's "absorbed_signals") takes only those
+            # notes out; a record without the measure, every trained one.
+            quick.absorb(self.store, record.get("absorbed_signals", trained))
             self.store.set(
                 "trained_base",
                 record.get("base_fingerprint", base_fingerprint(self.config)),

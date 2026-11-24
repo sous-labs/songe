@@ -710,6 +710,66 @@ def test_the_gate_judges_what_each_version_writes(monkeypatch):
     assert judged.outcome(backend, steps[0], before["s0"], before["s0"]) == ("tie", "same")
 
 
+def test_a_note_leaves_only_when_the_candidate_follows_its_lesson_without_it(store, monkeypatch):
+    """On held-out practice the candidate answers from the request alone. A
+    lesson is learned when every scene asked follows the note as well as the
+    teacher's stored answer does; one miss, or no held-out scene to ask, and
+    its note stays in the prompt."""
+    import contextlib
+
+    from songe import quick
+    from songe.sleep import judged
+
+    monkeypatch.setattr(judged, "paired_prompts", lambda tok, step, config: (step["id"], None))
+    monkeypatch.setattr(judged, "render", lambda tok, messages, tools, **kw: messages[0]["content"])
+    monkeypatch.setattr(judged, "answer", lambda text, tok, tools: {"text": text, "tool_calls": [], "valid": True})
+    monkeypatch.setattr(practice_pool, "held_out", lambda signal, extra=(), scene=None, trained=(): True)
+    wrote, asked = {}, []
+
+    def scene(signal, n, taught, candidate):
+        row = {"id": f"{signal}#{n}", "signal_id": signal, "tools": [], "teacher_note": f"Lesson: {signal}",
+               "messages": [{"role": "user", "content": f"request {signal} {n}"}],
+               "teacher_answer": {"content": taught, "finished": True}}
+        wrote["practice:" + row["id"]] = candidate
+        with store.connect() as db:
+            db.execute('INSERT INTO practice(id,model_id,signal_id,payload,kept,"drop",created)'
+                       " VALUES (?,?,?,?,1,NULL,0)", (row["id"], store.model_id, signal, json.dumps(row)))
+
+    for n in range(5):  # learned: every scene asked uses uv, in other words than the teacher's
+        scene("uv", n, f"Run `uv add package{n}` in the project folder.", f"uv add package{n}")
+    scene("pnpm", 0, "Use `pnpm add zod` here.", "pnpm add zod")  # one of two misses: the note stays
+    scene("pnpm", 1, "Use `pnpm add vite` here.", "npm install vite, as usual for JavaScript")
+    store.set(quick.KEY, {"version": 1, "updated_at": None, "removed": [], "lessons": [
+        {"id": "l1", "text": "Use uv.", "signals": ["uv"]},
+        {"id": "l2", "text": "Use pnpm.", "signals": ["pnpm"]},
+        {"id": "l3", "text": "Start with Yes, chef.", "signals": ["chef"]},  # never practised
+    ]})
+
+    class Fake:
+        tokenizer = config = None
+
+        def base(self):
+            return contextlib.nullcontext()
+
+        def sample(self, prompt, seed=None, *, deterministic=False, max_tokens=None):
+            if "Answer A:" not in prompt:  # the candidate, from the request alone
+                asked.append(prompt)
+                return [], wrote[prompt], None
+            a, b = prompt.split("Answer A:")[1].split("Answer B:")
+            follows = [any(w in x for w in ("uv add", "pnpm add")) for x in (a, b)]
+            return [], '{"follows": "%s"}' % {(1, 1): "both", (1, 0): "A", (0, 1): "B", (0, 0): "neither"}[
+                tuple(map(int, follows))], None
+
+    class Journal:
+        def unit(self, name, fn):
+            return fn()
+
+    rows = judged.learned_lessons(Fake(), Journal(), store, "scale-1.0", lambda: None)
+    assert [(r["id"], r["scenes"], r["follows"], r["learned"]) for r in rows] == [
+        ("l1", 3, 3, True), ("l2", 2, 1, False), ("l3", 0, 0, False)]
+    assert len(asked) == 5  # three of the five uv scenes, both pnpm ones
+
+
 def test_judged_units_decide_and_the_kl_is_only_a_diagnostic():
     from songe.sleep.gate import decide
 

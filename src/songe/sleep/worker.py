@@ -1393,6 +1393,30 @@ def run(
                 if scale is not None:
                     backend.scale_delta(baseline, trained, scale)
             store.night(night, record=record)
+        if config.learning == "dreams":
+            # Which notes leave the prompt when this version is adopted: only
+            # those of lessons it follows without the note, on held-out
+            # practice (judged.learned). A lesson not learned yet keeps its
+            # note beside the adapter, so adopting never takes away what the
+            # note alone gave the user. Nothing measured: every note stays.
+            record["absorbed_signals"] = []
+            if decision.accepted and scale is not None:
+                try:
+                    backend.scale_delta(baseline, trained, scale)
+                    record["learned"] = judged.learned_lessons(
+                        backend, journal, store, f"scale-{scale}", check
+                    )
+                    record["absorbed_signals"] = sorted(
+                        {sig for row in record["learned"] if row["learned"] for sig in row["signals"]}
+                    )
+                except (Interrupted, MemoryError):
+                    raise
+                except Exception as exc:  # noqa: BLE001 - unmeasured: the notes stay
+                    import logging
+
+                    logging.getLogger("songe").warning("learned_unavailable %s: %s", type(exc).__name__, exc)
+                    record["learned_error"] = type(exc).__name__
+                store.night(night, record=record)
         record.update(decision.dict())
         change = decision.heldout_change
         store.event(

@@ -128,10 +128,10 @@ def request_of(step):
     return ""
 
 
-def write(backend, step):
+def write(backend, step, max_tokens=ANSWER_TOKENS):
     """The loaded version's own answer at this moment (deterministic)."""
     student, _ = paired_prompts(backend.tokenizer, step, backend.config)
-    y, text, _ = backend.sample(student, deterministic=True, max_tokens=ANSWER_TOKENS)
+    y, text, _ = backend.sample(student, deterministic=True, max_tokens=max_tokens)
     return {"tokens": list(y), **answer(text, backend.tokenizer, step.get("tools"))}
 
 
@@ -230,6 +230,79 @@ def judge(backend, journal, steps, before, after, name, check):
         )
         rows.append({"id": step["id"], "conversation": step["conversation"], "outcome": result[0], "by": result[1]})
     return rows
+
+
+LEARNED_SCENES = 3    # held-out scenes asked per lesson
+LEARNED_TOKENS = 128  # the candidate's answer there: a habit shows early
+
+
+def follows(backend, step, answer):
+    """Does this answer, written without the lesson's note, do what the note
+    asks as well as the teacher's stored answer (written with it)? The
+    practice check's question (practice.prompts.CHANGES), asked of the
+    original base in both orders: yes when it names this answer or both,
+    both times. The same action as the teacher's is a yes without asking."""
+    from ..practice.prompts import CHANGES
+
+    taught = {"text": (step.get("teacher_answer") or {}).get("content") or "", "tool_calls": []}
+    if not visible(taught["text"]):
+        return False
+    if not differs(taught, answer):
+        return True
+    request, guide = request_of(step) or "(not shown)", guide_of(step) or "(none)"
+    for swap in (False, True):
+        a, b = (answer, taught) if swap else (taught, answer)
+        with backend.base():
+            text = ask(backend, CHANGES.format(request=request, guide=guide, a=shown(a), b=shown(b)))
+        if verdict_of(text, swap) not in ("after", "both"):
+            return False
+    return True
+
+
+def learned(backend, journal, lessons, scenes, name, check):
+    """Which of the prompt's lessons the loaded candidate follows without
+    their note: [{"id", "text", "signals", "scenes", "follows", "learned"}].
+
+    lessons: the lessons in the prompt (quick.active), each with the signals
+    it stands for. scenes: {signal id: its held-out practice scenes}, never
+    trained on. Up to LEARNED_SCENES of a lesson's scenes are answered by the
+    candidate from the request alone; the lesson is learned when every one
+    follows it as well as the teacher's answer does. A lesson with no
+    held-out scene cannot be shown learned, so its note stays."""
+    out = []
+    for lesson in lessons:
+        own = {
+            s["id"]: s
+            for signal in lesson.get("signals") or []
+            for s in scenes.get(signal, [])
+            if (s.get("teacher_answer") or {}).get("content")
+        }
+        own = [own[i] for i in sorted(own)][:LEARNED_SCENES]
+        passed = 0
+        for step in own:
+            check()
+            passed += bool(journal.unit(
+                f"learned-{name}-{step['id']}",
+                lambda step=step: follows(backend, step, write(backend, step, LEARNED_TOKENS)),
+            ))
+        out.append({"id": lesson.get("id"), "text": lesson.get("text"), "signals": list(lesson.get("signals") or []),
+                    "scenes": len(own), "follows": passed, "learned": bool(own) and passed == len(own)})
+    return out
+
+
+def learned_lessons(backend, journal, store, name, check):
+    """learned() for this store: the lessons in its prompt against their
+    held-out practice scenes. One cluster's scenes stand for every signal
+    that teaches the same thing (practice.store.cluster_of)."""
+    from .. import quick
+    from ..practice.pool import practice_steps
+    from ..practice.store import cluster_of
+
+    same, scenes = cluster_of(store), {}
+    for s in practice_steps(store, split="held_out"):
+        for member in same.get(s["signal_id"], [s["signal_id"]]):
+            scenes.setdefault(member, []).append(s)
+    return learned(backend, journal, quick.active(store), scenes, name, check)
 
 
 def examples(steps, before, after, rows, limit=3):
