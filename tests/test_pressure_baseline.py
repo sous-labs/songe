@@ -91,6 +91,7 @@ def run_guard(
     margin=0,
     events=False,
     policy=None,
+    accelerators=None,
     **kwargs,
 ):
     state = {"index": -1, "time": 0.0, "waits": 0}
@@ -101,6 +102,9 @@ def run_guard(
 
     p = platform(None)
     p.memory = sample
+    if accelerators is not None:
+        # Devices as seen alongside the current memory sample.
+        p.accelerators = lambda: accelerators(samples[state["index"]])
     if rss is not None:
         p.process_bytes = lambda pid: rss[state["index"]]
     monkeypatch.setattr(

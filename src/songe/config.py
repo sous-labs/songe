@@ -1,5 +1,6 @@
 import json
 import tomllib
+from copy import deepcopy
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from urllib.parse import urlparse
@@ -157,6 +158,11 @@ class Config:
 
     @classmethod
     def load(cls, root: Path | None = None):
+        return cls.load_with_keys(root)[0]
+
+    @classmethod
+    def load_with_keys(cls, root: Path | None = None):
+        """Resolve installation settings and return the keys used after migration."""
         path = data_dir(root) / "config.toml"
         data = tomllib.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
         # Retired in schema v2; older installations may still have saved it.
@@ -235,7 +241,7 @@ class Config:
                 data["wake_scales"] = cls.wake_scales
         config = cls(**data)
         config.validate()
-        return config
+        return config, frozenset(data)
 
     @classmethod
     def for_model(cls, root, model):
@@ -393,6 +399,23 @@ TRAINING_KEYS = (
     "min_heldout", "min_drift", "general_drift_limit", "gate_confidence",
     "repetition_ngram", "wake_scales",
 )
+
+
+def training_setting_sources(installation_keys, model_keys):
+    return (
+        dict.fromkeys(TRAINING_KEYS, "default")
+        | dict.fromkeys(installation_keys, "installation")
+        | dict.fromkeys(model_keys, "per-model")
+    )
+
+
+def training_settings_snapshot(config, sources=None):
+    """Capture the resolved policy and its origin when loaded from disk."""
+    sources = sources or {}
+    return {
+        key: {"value": deepcopy(getattr(config, key)), "source": sources.get(key)}
+        for key in TRAINING_KEYS
+    }
 
 
 def training_fingerprint(config):

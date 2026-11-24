@@ -18,6 +18,8 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
+# Servers whose chat template takes enable_thinking per request.
+TEMPLATE_SWITCH = {"vllm", "mlx", "llamacpp"}
 # Reasoning tokens allowed on vLLM: more for questions meant to think
 # (classify), little for the others.
 THINKING_BUDGET = {True: 2048, False: 1024}
@@ -53,19 +55,31 @@ class Reader:
         model,
         *,
         still_idle=None,
-        think=("classify",),
+        think=("classify", "turn"),
         max_tokens=6000,
         timeout=600,
         client=None,
         server="",
     ):
         self.store, self.url, self.model = store, url.rstrip("/"), model
-        # vLLM passes thinking on or off to the chat template, which reads
-        # enable_thinking (Qwen, Granite); reasoning_effort is not used there.
-        self.template_switch = server == "vllm"
+        # Per-request reasoning controls, probed per server with reasoning
+        # models (research/scripts/memory/probe_reasoning.py):
+        # - vLLM, mlx-lm and llama.cpp pass chat_template_kwargs.enable_thinking
+        #   to the chat template (mlx-lm, Granite 4.2 3B: 274 -> 44 tokens;
+        #   llama.cpp, Qwen3 0.6B: 332 -> 43), so questions not meant to
+        #   think get none;
+        # - only vLLM caps reasoning with thinking_token_budget;
+        # - reasoning_effort "none" (sent to every server) also stops
+        #   llama.cpp's; on Ollama it empties the reasoning field, but Qwen3
+        #   4B then rambled in the answer until the limit;
+        # - LM Studio ignored every field tried (identical output).
+        # Where nothing bounds it, a cut-off answer is forced (ask).
+        self.server = server
+        self.template_switch = server in TEMPLATE_SWITCH
         self.still_idle = still_idle
         # Which questions the model thinks about first: slower, steadier.
-        # Measured on the answer key: thinking helps classify only.
+        # Measured on the answer key: thinking helps classify only. The turn
+        # question (prompts.TURN) needs it too: see there.
         self.think = set(think)
         self.max_tokens = max_tokens
         self.client = client or httpx.AsyncClient(timeout=timeout, trust_env=False)
@@ -124,7 +138,8 @@ class Reader:
             # writes its answer (probed live on Inkling-2-Mini: 1,024 halved
             # the generated tokens and the time, JSON complete). Effort "none"
             # alone did not bound reasoning on long prompts (~8,100 tokens).
-            body["thinking_token_budget"] = THINKING_BUDGET[think]
+            if self.server == "vllm":
+                body["thinking_token_budget"] = THINKING_BUDGET[think]
         started = time.monotonic()
         # max_tokens caps the reasoning and the answer together: a model that
         # reasons too long (Inkling reasons even when asked not to) stops

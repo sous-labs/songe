@@ -313,6 +313,42 @@ def test_late_recording_is_reconstructed_incrementally(config, store):
         assert db.execute("SELECT COUNT(*) FROM scoreboard").fetchone()[0] == 1
 
 
+@pytest.mark.parametrize(
+    "messages",
+    [
+        None,  # {"messages": null}: the model server answers 400, it is recorded all the same
+        "hi",
+        ["hi"],
+        # A lone surrogate, as an agent leaves when it cuts tool output inside
+        # an emoji: valid JSON, but it cannot be encoded to hash it.
+        [{"role": "user", "content": json.loads('"cut \\ud83d"')}],
+    ],
+)
+def test_an_unreadable_recording_does_not_hold_back_the_ones_after_it(config, store, messages):
+    store.record(
+        "/v1/chat/completions",
+        {"model": config.public_model, "messages": messages},
+        {"error": {"message": "bad request"}},
+        status=400,
+        started=1,
+    )
+    context = [{"role": "user", "content": "Question"}]
+    action = {"role": "assistant", "content": "answer"}
+    store.record(
+        "/v1/chat/completions",
+        {"model": config.public_model, "messages": context},
+        {"choices": [{"message": action}]},
+        started=2,
+    )
+    # The unreadable one comes first in every batch until it is passed over.
+    assert store.reconstruct() == (1, 2)
+    assert [s["action"] for s in store.active_steps()] == [action]
+    with store.connect() as db:
+        marks = db.execute("SELECT resolved FROM reconstructed ORDER BY exchange_id").fetchall()
+    assert [m[0] for m in marks] == [1, 1]
+    assert store.reconstruct() == (0, 0)  # and it is not tried again
+
+
 def test_diagnostics_preserve_safe_exception_locations():
     import logging
 
@@ -696,6 +732,19 @@ def test_indivisible_export_finishes_past_deadline_but_honors_cancellation(store
     with pytest.raises(Interrupted):
         journal.indivisible("cancelled-export", interrupted)
     assert not (store.root / "cancelled-export.json").exists()
+
+
+def test_a_unit_named_after_a_practice_moment_resumes(store):
+    from songe.sleep.worker import Journal
+
+    journal = Journal(store.root, lambda: None, store, store.slice())
+    # The judged gate names its units after the moment: "practice:<scene>#v1".
+    name = "judged-before-practice:sig3#v1"
+    assert journal.unit(name, lambda: {"text": "answer"}) == {"text": "answer"}
+    # Saved under a file name every system allows, and found there again.
+    assert (store.root / "judged-before-practice_sig3#v1.json").exists()
+    assert journal.unit(name, lambda: pytest.fail("answered again")) == {"text": "answer"}
+    assert journal.load(name, None) == {"text": "answer"}
 
 
 def test_scoring_backlog_with_equal_revision_is_not_skipped(store):

@@ -493,3 +493,50 @@ def test_measuring_what_fits_is_not_stopped_by_a_projected_burst(monkeypatch):
     stopped = run_guard(monkeypatch, exhausted, baseline=baseline, rss=[3 * GB, 6 * GB, 7 * GB],
                         margin=int(2.4 * GB), events=True, projection=False)
     assert stopped and stopped[0][1].stop_reason["rule"] == "memory_margin"
+
+
+def unified_gpu(sample):
+    # GB10 / Jetson: NVML has no device memory; it is the system's.
+    return [Accel("cuda", "NVIDIA GB10", sample.total, sample.available, "GPU-1")]
+
+
+def discrete_gpu(sample):
+    return [Accel("cuda", "dGPU", 24 * GB, 20 * GB, "GPU-1")]
+
+
+def gb10_gate_slice(monkeypatch, accelerators, available):
+    """A live GB10 gate slice: the worker's ~51 GB of CUDA memory lowers
+    `available` but its tree RSS stays ~3 GB (calibration measured its peak,
+    24.2 GB, as the fall in free memory)."""
+    total = 128 * GB
+    start = memory.Snapshot(
+        total, 74 * GB, "normal", tuple(accelerators(Memory(total, 74 * GB)))
+    )
+    return run_guard(
+        monkeypatch,
+        [Memory(total, int(available))],
+        baseline=start,
+        rss=[3 * GB],
+        accelerators=accelerators,
+        predicted_peak_bytes=int(24.2 * GB),
+        predicted_device_bytes=int(72.6 * GB),
+        device_prediction_error_bytes=int(3.6 * GB),
+        margin=int(12.8 * GB),
+        events=True,
+    )
+
+
+def test_unified_memory_does_not_reserve_device_allocations_twice(monkeypatch):
+    # RSS alone: 23 - (24.2 - 3) = 1.8 GB < 12.8 GB margin, a false stop.
+    assert gb10_gate_slice(monkeypatch, unified_gpu, 23 * GB) == []
+
+
+def test_unified_memory_still_stops_below_the_margin(monkeypatch):
+    events = gb10_gate_slice(monkeypatch, unified_gpu, 12 * GB)
+    assert events and events[0][1].stop_reason["rule"] == "memory_margin"
+
+
+def test_discrete_gpu_keeps_counting_the_process_tree(monkeypatch):
+    # A discrete GPU's allocations never lower `available`; unchanged rule.
+    events = gb10_gate_slice(monkeypatch, discrete_gpu, 23 * GB)
+    assert events and events[0][1].stop_reason["rule"] == "predicted_margin"

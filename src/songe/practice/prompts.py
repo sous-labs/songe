@@ -102,7 +102,6 @@ Then the lead-up:
 A step has say (one short sentence, or empty), tool (read, grep, glob, write, shell or execute; the agent's own name for one of these, such as bash for shell, works too), args (path for read, write, grep and glob; pattern for grep and glob; command for shell; code for execute; content for write, the whole new file; leave unused fields empty), and output (only for shell and execute: exactly what was printed; empty for the other tools, whose results are computed from the files). To change a file, use write.
 The files and steps must lead to the moment. Never mention the lesson in the files, request or steps. Do not reuse the original's file names, function names, values or wording.
 
-The agent's tools (it also has others):
 {tools}
 
 The shape of the answer (placeholders only; fill in your own situation):
@@ -116,6 +115,18 @@ def teacher_note(signal):
     return ("Note from an earlier, different task (it may not apply here).\n"
             f"Feedback the agent got then: {clip(signal.get('text') or '', 400)}\n"
             f"Lesson: {signal['lesson']}")
+
+
+# A client that sends no tools (a plain chat): the scene is a conversation.
+NO_TOOLS = """The agent has no tools: it can only answer in text. Leave files and steps empty, and use a moment of kind "user_message": agent_said is the agent's previous answer and user_message the user's next question, where the lesson matters. mistake and right_action are answers, not tool calls."""
+
+
+def tools_section(request_tools, tools):
+    """What the scene writer is told about the agent's tools: the ones a
+    scene can use, or, for a client that sends none, that there are none."""
+    if not request_tools:
+        return NO_TOOLS
+    return "The agent's tools (it also has others):\n" + tool_lines(tools)
 
 
 def tool_lines(tools):

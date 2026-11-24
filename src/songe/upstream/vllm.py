@@ -34,6 +34,20 @@ class VLLM:
     def discover(self):
         return discovery.vllm(self.url, self.transport)
 
+    async def served_contexts(self):
+        """Context the user's vLLM serves each model with (its --max-model-len),
+        from /v1/models "max_model_len"."""
+        url = (getattr(self.config, "server_source_url", "") or self.url).rstrip("/")
+        if not url.endswith("/v1"):
+            url += "/v1"
+        async with httpx.AsyncClient(
+            transport=self.transport, timeout=self.timeout, trust_env=False
+        ) as client:
+            response = await client.get(url + "/models")
+            response.raise_for_status()
+            models = response.json().get("data", [])
+        return {m["id"]: int(m["max_model_len"]) for m in models if m.get("max_model_len")}
+
     async def _request(self, method, path, **kwargs):
         async with httpx.AsyncClient(
             transport=self.transport, timeout=self.timeout, trust_env=False
@@ -56,7 +70,8 @@ class VLLM:
         if version.get("id") == "base" or version.get("kind") == "base":
             from .reuse import served_base
 
-            self.routes.pop(version["identifier"], None)
+            # The route stays while the server is asked again: a request
+            # that arrives meanwhile must not fall back to the owned port.
             binding = await served_base(self.config, version, transport=self.transport)
             if not binding and getattr(self.config, "server_source_url", ""):
                 binding = await served_base(
@@ -65,6 +80,7 @@ class VLLM:
             if binding:
                 self.routes[version["identifier"]] = binding
                 return True
+            self.routes.pop(version["identifier"], None)
             return False
         existing = next(
             (m for m in await self._models() if m["id"] == version["identifier"]), None

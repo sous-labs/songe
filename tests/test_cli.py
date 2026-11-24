@@ -88,6 +88,62 @@ def test_status_reads_service_or_store_without_initializing(
     assert not root.exists()
 
 
+def test_training_status_shows_the_workers_values_and_their_sources(
+    store, monkeypatch, capsys
+):
+    import json
+
+    from songe import cli
+    from songe.config import TRAINING_KEYS
+    from songe.models import registry
+
+    root = store.root
+    path = root / "config.toml"
+    path.write_text("learning_rate = 6e-5\naccumulation = 8\n", encoding="utf-8")
+    installation = Config.load(root)
+    registry.register(installation, store, "first")
+    registry.register(installation, store, "second")
+    store.set("primary_model", "second")
+    for model, accumulation in (("first", 3), ("second", 2)):
+        row = registry.find(store, model)
+        settings = row["config"] | {"accumulation": accumulation}
+        if model == "second":
+            settings["vocab_clip"] = 0.0  # This key cannot override the installation.
+        with store.connect() as db:
+            db.execute(
+                "UPDATE models SET config=? WHERE id=?", (json.dumps(settings), model)
+            )
+    expected = Config.for_model(root, "second")
+    before = path.read_bytes(), registry.entries(store)
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("training status must only read saved settings")
+
+    monkeypatch.setattr(cli, "catch_up", unexpected)
+    monkeypatch.setattr(cli.LocalClient, "snapshot", unexpected)
+
+    command = ["--data-dir", str(root), "status", "--training"]
+    assert main(command) == 0
+    out = capsys.readouterr().out
+    assert "Training settings · songe/second" in out
+    lines = [line.split() for line in out.splitlines()]
+    assert ["learning_rate", "installation", json.dumps(expected.learning_rate)] in lines
+    assert ["accumulation", "per-model", str(expected.accumulation)] in lines
+    assert ["vocab_clip", "default", str(expected.vocab_clip)] in lines
+    assert {line[0] for line in lines if line and line[0] in TRAINING_KEYS} == set(
+        TRAINING_KEYS
+    )
+    assert "Ignored per-model settings · vocab_clip" in out
+
+    assert main(command + ["songe/first"]) == 0
+    out = capsys.readouterr().out
+    assert "Training settings · songe/first" in out
+    assert ["accumulation", "per-model", "3"] in [
+        line.split() for line in out.splitlines()
+    ]
+    assert (path.read_bytes(), registry.entries(store)) == before
+
+
 def test_doctor_measured_lines_and_no_writes(tmp_path, monkeypatch, capsys):
     import httpx
 

@@ -262,6 +262,20 @@ def resumable(night, store, config, *, configuration=None, base=None):
     )
 
 
+def pending_export(config, store):
+    nights = store.nights()
+    if any(night["status"] == "ready" for night in nights):
+        return None
+    return next(
+        (
+            night
+            for night in reversed(nights)
+            if night["record"].get("pending_export") and resumable(night, store, config)
+        ),
+        None,
+    )
+
+
 def base_fingerprint(config):
     from pathlib import Path
 
@@ -408,6 +422,7 @@ class Scheduler:
         self.state = "awake"
         self.traffic_revision = 0
         self.calibrating = False
+        self.exporting = False
         self.last_probe = None
         self.idle_threshold_seconds = self.idle_wait()
         from .sleep.sizing import PressureHistory
@@ -809,7 +824,7 @@ class Scheduler:
                 nights_before=self.memory_nights_before,
             )
             self.memory_stop_sample = None
-            if not self.calibrating:
+            if not self.calibrating and not self.exporting:
                 from .sleep.sizing import learn_peak
 
                 if learn_peak(self.store, self.store.get("last_memory_stop")):
@@ -818,6 +833,7 @@ class Scheduler:
                         "used more memory than measured · next run is sized for it",
                     )
         self.process = None
+        self.exporting = False
         if self.calibrating:
             from .config import Config
             from .sleep.calibrate import collect_calibration, derive_keys
@@ -926,30 +942,34 @@ class Scheduler:
         calibration = self.store.get("calibration") or {}
         from .sleep.calibration_state import needs_growth
 
+        pending = await asyncio.to_thread(pending_export, self.config, self.store)
+        exporting = pending is not None
         # Also when a pressed Deep Dream's training run found it needed
         # growth (see ModelScheduler.finish): measure, then train.
         # Off the event loop: the proxy and the status API answer meanwhile.
-        growing = await asyncio.to_thread(needs_growth, self.config, self.store) or bool(
-            self.store.get("growth_requested")
+        growing = not exporting and (
+            await asyncio.to_thread(needs_growth, self.config, self.store)
+            or bool(self.store.get("growth_requested"))
         )
         measured = any("host_peak_bytes" in r for r in calibration.get("rows", []))
-        upgrade_calibration = (
+        upgrade_calibration = not exporting and (
             (self.config.calibration_available and not measured)
             or (bool(self.config.model_key) and not self.config.calibration_available)
             or growing
         )
+        needs_sizing = not upgrade_calibration and not exporting
         self.reason = reason(
             replace(self.config, calibration_available=True)
-            if upgrade_calibration
+            if not needs_sizing
             else self.config,
             p,
             paused=self.store.get("paused", False),
             traffic_idle=time.monotonic() - self.last_traffic,
-            enough=upgrade_calibration or await self.enough(),
+            enough=not needs_sizing or await self.enough(),
             immediate=requested,
             threshold=threshold,
             reclaimable_bytes=reclaimable,
-            adaptive=measured or upgrade_calibration,
+            adaptive=measured or not needs_sizing,
             expected_seconds=seconds,
         )
         if (
@@ -992,6 +1012,7 @@ class Scheduler:
                 self.store,
                 self.platform,
                 calibration=upgrade_calibration,
+                pending_export=pending["record"]["pending_export"] if pending else None,
             )
         except StorageWait as exc:
             self.reason = str(exc)
@@ -1007,7 +1028,7 @@ class Scheduler:
                 # Keep the served model loaded when training fits at full size
                 # beside it; unloading costs the next request a reload.
                 roomy = False
-                if not upgrade_calibration:
+                if needs_sizing:
                     before = await asyncio.to_thread(
                         snapshot, TrainingPlatform(self.platform, self.config)
                     )
@@ -1020,7 +1041,7 @@ class Scheduler:
                 unloads = hasattr(self.upstream, "park") and not roomy
                 if self.store.get("unloads_model") != unloads:
                     self.store.set("unloads_model", unloads)
-                if unloads and not upgrade_calibration:
+                if unloads and needs_sizing:
                     # Unload the agent's model only when that makes training
                     # fit. Otherwise every tick would unload it, find no room
                     # and load it again.
@@ -1068,10 +1089,10 @@ class Scheduler:
                     choose_size(
                         self.config, calibration, sample, self.pressure_history.data
                     )
-                    if not upgrade_calibration
+                    if needs_sizing
                     else None
                 )
-                if not upgrade_calibration and sizing is None:
+                if needs_sizing and sizing is None:
                     needed = free_needed(
                         self.config, calibration, sample, self.pressure_history.data
                     )
@@ -1104,7 +1125,7 @@ class Scheduler:
                         self.unload_retry_at = time.monotonic() + RETRY_FIRST_SECONDS
                         await self.restore()
                         return
-                if upgrade_calibration:
+                if sizing is None:
                     host, device = 0, 0
                 else:
                     self.store.set("last_slice_size", sizing)
@@ -1148,13 +1169,13 @@ class Scheduler:
                 if self.config.model_key:
                     argv += ["--model-key", self.config.model_key]
                 if not upgrade_calibration:
-                    argv += [
-                        "--slice-seconds",
-                        str(seconds),
-                        "--sizing",
-                        json.dumps(sizing),
-                    ]
+                    argv += ["--slice-seconds", str(seconds)]
+                if exporting:
+                    argv += ["--export-only"]
+                if sizing:
+                    argv += ["--sizing", json.dumps(sizing)]
                 self.calibrating = upgrade_calibration
+                self.exporting = exporting
                 self.calibration_started = time.time()
                 self.store.event(
                     "start",
@@ -2303,7 +2324,12 @@ class ModelScheduler(Scheduler):
             self.installation_store.set("requested_model", model)
         elif calibrating:
             if failed or memory_stop:
-                stop("measuring what this machine can train did not finish")
+                from .wording import DEVICE_FULL
+
+                # The card was full: say so and what to do (live #135: "did
+                # not finish" did not point at the user's own server).
+                full = learner.get("child_error") == DEVICE_FULL
+                stop(DEVICE_FULL if full else "measuring what this machine can train did not finish")
             else:
                 again()
         else:

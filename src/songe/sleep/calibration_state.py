@@ -7,14 +7,34 @@ from ..steps import digest, revision_id
 from .sizing import dimensions
 
 
-def sample_pool(store):
+def dreams(store, config=None):
+    """Whether training reads kept practice scenes (learning = "dreams").
+
+    The store's own mark is written by the first training slice. The first
+    measurement runs before it, so the configuration is asked first."""
+    return (getattr(config, "learning", None) or store.get("learning_mode")) == "dreams"
+
+
+def sample_pool(store, config=None):
     # Include scored experience too: an interrupted selection may have consumed
     # its score revision without ever training it. Never lose that sizing need.
     steps = {s["id"]: s for s in store.active_steps() if s.get("hindsight")}
     for step in store.pool():
         if revision_id(step) >= revision_id(steps.get(step["id"], {})):
             steps[step["id"]] = step
-    return list(steps.values())
+    if not dreams(store, config):
+        return list(steps.values())
+    # Under dreams the examples trained on are practice scenes, and they can
+    # be longer than every real conversation: a scene adds turns, and its
+    # teacher reads the lesson's note too. Measuring only the conversations
+    # left every scene above the measured size, deferred in every slice.
+    from ..practice.pool import practice_steps
+
+    return (
+        list(steps.values())
+        + practice_steps(store)
+        + practice_steps(store, split="held_out")
+    )
 
 
 def policy_key(config):
@@ -49,16 +69,21 @@ def revisions_key(revisions):
     return digest(sorted(revisions.items()))
 
 
-def sample_revisions(store):
+def sample_revisions(store, config=None):
     """sample_pool's {id: revision} without decoding steps, where the store
     can count them in SQL (an offline/legacy store decodes)."""
-    if hasattr(store, "sample_revisions"):
-        return store.sample_revisions()
-    return {s["id"]: revision_id(s) for s in sample_pool(store)}
+    if not hasattr(store, "sample_revisions"):
+        return {s["id"]: revision_id(s) for s in sample_pool(store, config)}
+    found = store.sample_revisions()
+    if dreams(store, config):
+        from ..practice.pool import practice_revisions
+
+        found |= practice_revisions(store)
+    return found
 
 
-def pending_keys(store):
-    if store.get("learning_mode") == "dreams":
+def pending_keys(store, config=None):
+    if dreams(store, config):
         # Under dreams the training pool is kept practice; the step tables
         # and Store.pool belong to hindsight and would say nothing is pending,
         # letting a cycle's watermark skip practice it never trained.
@@ -183,9 +208,9 @@ def _needs_growth(config, store):
     if progress:
         if progress.get("policy") != policy_key(config):
             return True
-        if progress.get("pool") != revisions_key(sample_revisions(store)):
+        if progress.get("pool") != revisions_key(sample_revisions(store, config)):
             return True
-        pending = pending_keys(store)
+        pending = pending_keys(store, config)
         # Scoring is not evidence that an intact sample fitted a measured
         # slice. Legacy stores can have no pending revisions and an empty
         # pool after scoring everything under an interrupted first probe.
@@ -199,7 +224,7 @@ def _needs_growth(config, store):
         return not progress.get("complete", False)
     # Old installations recorded rows but no completion evidence. A small
     # measurement is usable evidence, never proof that calibration is finished.
-    return bool(sample_revisions(store)) or not coverage(
+    return bool(sample_revisions(store, config)) or not coverage(
         config, rows, config.max_sequence
     )
 
@@ -207,7 +232,7 @@ def _needs_growth(config, store):
 def measure_pool(config, store, tokenizer):
     from .prompts import UnusableStep, paired_prompts
 
-    steps = sample_pool(store)
+    steps = sample_pool(store, config)
     samples = []
     for step in steps:
         try:
@@ -224,7 +249,7 @@ def measure_pool(config, store, tokenizer):
                 "teacher_sequence": len(teacher) + config.response_tokens,
             }
         )
-    target = target_length(config, samples, pending_keys(store))
+    target = target_length(config, samples, pending_keys(store, config))
     return samples, target, pool_key(steps)
 
 
@@ -328,7 +353,7 @@ def smallest_pending(config, saved, store=None):
 
     The student backpropagates only its gradient window, so whether any
     example can train now depends on the teacher envelope, not the window."""
-    pending = pending_keys(store) if store else None
+    pending = pending_keys(store, config) if store else None
     return min(
         (
             s.get("teacher_sequence") or s["required_sequence"]

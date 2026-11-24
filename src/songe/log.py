@@ -1,6 +1,7 @@
 """Versioned SQLite store. Never stores transport headers or bearer tokens."""
 
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -1094,6 +1095,9 @@ class Store:
 
         Unresolved continuations remain retryable after a late parent commits.
         A restart repeats only unresolved/new rows, never the complete log.
+        A recording that cannot be read (a request the model server refused,
+        with messages that are not a list of messages; text that cannot be
+        encoded) is passed over for good, so the ones after it go on.
         """
         from .steps import Step, digest, extract, prefix_keys, unsummarised
 
@@ -1121,46 +1125,62 @@ class Store:
             ).fetchall()
             cache = {}
             for raw in rows:
-                row = dict(raw) | {
-                    "request": parts.request(db, raw, cache),
-                    "response": json.loads(raw["response"]),
-                }
-                messages = (
-                    row["request"].get("messages", [])
-                    if isinstance(row["request"], dict)
-                    else []
-                )
-                prefixes, parents = {}, {}
-                bare = unsummarised(messages) or []
-                for key in [k for n in range(1, len(messages) + 1) for k in prefix_keys(messages[:n])] + [
-                    k for n in range(1, len(bare) + 1) for k in prefix_keys(bare[:n])
-                ]:
-                    link = db.execute(
-                        "SELECT step_id,root FROM prefixes WHERE hash=?", (key,)
-                    ).fetchone()
-                    if link:
-                        saved = db.execute(
-                            "SELECT * FROM steps WHERE id=?", (link[0],)
-                        ).fetchone()
-                        if saved:
-                            prefixes[key] = (link[0], link[1])
-                            parents[link[0]] = Step.load(parts.payload(db, saved, cache))
-                items = extract([row], public_model, prefixes=prefixes, steps=parents)
-                resolved = bool(items) or not any(
-                    m.get("role") == "assistant" for m in messages
-                )
-                if resolved:
-                    for item in items:
-                        self._put_step(db, item.dict())
-                    db.executemany(
-                        "INSERT OR REPLACE INTO prefixes VALUES (?,?,?)",
-                        [(key, *link) for key, link in prefixes.items()],
+                turned = False
+                db.execute("SAVEPOINT recording")
+                try:
+                    row = dict(raw) | {
+                        "request": parts.request(db, raw, cache),
+                        "response": json.loads(raw["response"]),
+                    }
+                    messages = (
+                        row["request"].get("messages", [])
+                        if isinstance(row["request"], dict)
+                        else []
                     )
-                    changed += 1
-                db.execute(
-                    "INSERT OR REPLACE INTO reconstructed VALUES (?,?)",
-                    (row["id"], int(resolved)),
-                )
+                    prefixes, parents = {}, {}
+                    bare = unsummarised(messages) or []
+                    for key in [k for n in range(1, len(messages) + 1) for k in prefix_keys(messages[:n])] + [
+                        k for n in range(1, len(bare) + 1) for k in prefix_keys(bare[:n])
+                    ]:
+                        link = db.execute(
+                            "SELECT step_id,root FROM prefixes WHERE hash=?", (key,)
+                        ).fetchone()
+                        if link:
+                            saved = db.execute(
+                                "SELECT * FROM steps WHERE id=?", (link[0],)
+                            ).fetchone()
+                            if saved:
+                                prefixes[key] = (link[0], link[1])
+                                parents[link[0]] = Step.load(parts.payload(db, saved, cache))
+                    items = extract([row], public_model, prefixes=prefixes, steps=parents)
+                    resolved = bool(items) or not any(
+                        m.get("role") == "assistant" for m in messages
+                    )
+                    if resolved:
+                        for item in items:
+                            self._put_step(db, item.dict())
+                        db.executemany(
+                            "INSERT OR REPLACE INTO prefixes VALUES (?,?,?)",
+                            [(key, *link) for key, link in prefixes.items()],
+                        )
+                        turned = True
+                    db.execute(
+                        "INSERT OR REPLACE INTO reconstructed VALUES (?,?)",
+                        (row["id"], int(resolved)),
+                    )
+                except (TypeError, AttributeError, ValueError, KeyError, IndexError):
+                    # Left as recorded and never tried again: one recording
+                    # must not hold back every one made after it.
+                    db.execute("ROLLBACK TO recording")
+                    logging.getLogger("songe").warning(
+                        "reconstruct_unreadable %s", raw["id"], exc_info=True
+                    )
+                    db.execute(
+                        "INSERT OR REPLACE INTO reconstructed VALUES (?,1)", (raw["id"],)
+                    )
+                    turned = False
+                db.execute("RELEASE recording")
+                changed += turned
             if changed:
                 db.execute(
                     "INSERT OR REPLACE INTO state VALUES ('experience_revision',?)",

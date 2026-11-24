@@ -9,7 +9,8 @@ how its earlier actions went:
 - tool: tool results the rules flagged (tool_error, failed_result), with an
   unbroken run of the same result (e.g. 20x "game over: lost") as one event
 - review: per turn, the tool results the rules did not flag, as one event
-  ("did any of these tell the agent something it should have used?")
+  ("did any of these tell the agent something it should have used?"): command
+  output and the results of the agent's own tools, not file reads or edits
 
 Successes come from the rules alone and are not events for the model.
 """
@@ -21,7 +22,25 @@ from .rules import FAILURE
 from .rules import extract as rule_signals
 from .timeline import clip
 
-REVIEWED = {"shell", "execute", "bash", "webfetch"}
+# Results the review has always seen: a command's output and a fetched page.
+COMMAND_OUTPUT = {"shell", "execute", "bash", "webfetch"}
+# Tools whose results say nothing about how the work went: they read, list,
+# search or change files, or keep the agent's own plan (the names opencode, Pi,
+# Claude Code, Codex and Cline give them, compared without case or
+# punctuation). Every other tool's result is reviewed too: an agent given its
+# own function or MCP tools hears how its work went through their results
+# (live, Qwen3.5-9B playing a word game through a `guess` tool: 100 games,
+# no result ever read, nothing learned from a lost game or a refused word).
+QUIET = {
+    "read", "readfile", "view", "viewimage", "edit", "editfile", "write", "writefile", "writetofile",
+    "replaceinfile", "patch", "multiedit", "applypatch", "notebookedit", "grep", "glob", "list", "ls",
+    "find", "searchfiles", "listfiles", "listdirectory", "todowrite", "todoread", "updateplan", "task", "skill",
+}
+
+
+def reviewed(tool):
+    """Whether the results of a tool with this name go to the review."""
+    return bool(tool) and re.sub(r"[^a-z0-9]", "", str(tool).lower()) not in QUIET
 
 
 def normalized(text):
@@ -75,15 +94,17 @@ def events(items, rules=None):
         if "steps" in e:
             e["steps"] = sorted(set(e["steps"]))
     # One review per turn over the results the rules left alone.
-    # Only command output can carry a hidden signal; reads, edits, searches
-    # and listings cannot.
+    # Reads, edits, searches and listings cannot carry a hidden signal; the
+    # output of a command and the result of any other tool can.
     by_turn = {}
     for i, it in enumerate(items):
-        if it["kind"] == "tool_result" and i not in flagged and it.get("tool") in REVIEWED and not inspecting(items, i):
+        if it["kind"] == "tool_result" and i not in flagged and reviewed(it.get("tool")) and not inspecting(items, i):
             by_turn.setdefault(turn_of[i], []).append(i)
     for turn, idx in sorted(by_turn.items()):
         out.append({"kind": "review", "item": idx[-1], "turn": turn, "items": idx,
-                    "steps": sorted({items[i]["step"] for i in idx if items[i].get("step")})})
+                    "steps": sorted({items[i]["step"] for i in idx if items[i].get("step")}),
+                    # Only commands: the review question stays as it was checked.
+                    "commands": all(items[i].get("tool") in COMMAND_OUTPUT for i in idx)})
     return sorted(out, key=lambda e: e["item"])
 
 

@@ -5,8 +5,10 @@ scene) the version in use and the candidate answer from the context alone.
 The same action is a tie. A different one goes to the original base model,
 shown the user's request, what should guide the answer (their feedback, or
 the lesson) and the two answers in an order that hides which is new: a win,
-a loss or a tie. When it says "both" or "neither", the feedback-aware
-teacher's preference breaks the tie (a clear one only).
+a loss or a tie. When it says "both" or "neither", when its two readings
+disagree or cannot be read, the moment is a tie. The feedback-aware
+teacher's preference does not break it: training pulls the candidate
+towards that preference, so it would count the training itself as a win.
 
 The gate (gate.decide) scores each unit (conversation or lesson) as
 (wins - losses) / moments and resamples units. The KL to the teacher stays a
@@ -18,14 +20,13 @@ from __future__ import annotations
 import logging
 
 from ..quick import differs, verdict_of, visible
-from .examples import answer, contrast, plain_logprob, teacher_logprob
+from .examples import answer
 from .prompts import paired_prompts, render
 
 ANSWER_TOKENS = 384   # each version's answer: long enough for a tool call
 JUDGE_TOKENS = 48     # {"follows": "B"}, with room for a short preamble
 PER_UNIT = 3          # moments per conversation or lesson (its last ones)
 MOMENTS = 24          # moments per Dream at most
-TIE_MARGIN = 0.1      # nats/token the teacher must prefer one answer by
 
 logger = logging.getLogger("songe")
 
@@ -163,16 +164,8 @@ def outcome(backend, step, before, after):
         return "win", "judge"
     if verdict == "before":
         return "loss", "judge"
-    # Both or neither (or no answer): a clear teacher preference decides.
-    student, teacher = paired_prompts(backend.tokenizer, step, backend.config)
-    with backend.base():
-        scored = [{"logprob": teacher_logprob(backend, teacher, x["tokens"]),
-                   "plain": plain_logprob(backend, student, x["tokens"])} for x in (after, before)]
-    lean = contrast(scored[0], scored[1])
-    if lean > TIE_MARGIN:
-        return "win", "teacher"
-    if lean < -TIE_MARGIN:
-        return "loss", "teacher"
+    # Both, neither, two different picks or no readable answer: a tie. The
+    # teacher's preference is what training fits, so it is not asked here.
     return "tie", verdict or "unclear"
 
 

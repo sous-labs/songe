@@ -111,6 +111,99 @@ async def test_proxy_restart_recovers_incomplete_night(config, store):
     assert store.nights()[0]["status"] == "interrupted"
 
 
+async def test_pending_adapter_export_waits_for_disk_and_skips_training_sizing(
+    config, store, monkeypatch
+):
+    import asyncio
+    from types import SimpleNamespace
+
+    from songe import schedule
+    from songe.artifacts import storage
+    from songe.config import training_fingerprint
+    from songe.memory import Snapshot
+    from songe.sleep import sizing
+
+    config.upstream = "llamacpp"
+    config.calibrated_peak_gb = 90
+    config.calibration_available = True
+    store.set("growth_requested", True)
+    night = store.night(None)
+    work = store.root / "versions" / f"night-{night}"
+    adapter = work / "scale-0.5-adapter"
+    adapter.mkdir(parents=True)
+    weights = b"adapter weights" * 128
+    (adapter / "adapters.safetensors").write_bytes(weights)
+    artifact = work / "scale-0.5-artifact.gguf"
+    store.night(
+        night,
+        status="interrupted",
+        phase="fuse",
+        record={
+            "configuration": training_fingerprint(config),
+            "base_fingerprint": schedule.base_fingerprint(config),
+            "generation": store.get("candidate_generation"),
+            "pending_export": {
+                "kind": "gguf-lora",
+                "training_adapter": str(adapter),
+                "artifact": str(artifact),
+            },
+        },
+    )
+    sample = Snapshot(24 * 10**9, 4 * 10**9)
+    platform = SimpleNamespace(name="darwin", keep_awake=lambda pid: None)
+    parked, launched = [], []
+
+    async def park(on_snapshot):
+        parked.append(True)
+        on_snapshot([])
+
+    scheduler = Scheduler(config, store, SimpleNamespace(park=park), platform)
+    scheduler.last_traffic -= 3600
+    monkeypatch.setattr(schedule, "probe", lambda platform: replace(good(), free_gb=4))
+    monkeypatch.setattr(schedule, "snapshot", lambda platform: sample)
+    monkeypatch.setattr(
+        sizing, "choose_size", lambda *args: pytest.fail("sized a training worker")
+    )
+    monkeypatch.setattr(
+        storage,
+        "phase_requirements",
+        lambda *args, **kwargs: pytest.fail("sized training storage"),
+    )
+    reserve = 10**9
+    usage = SimpleNamespace(free=reserve + len(weights), total=100 * reserve)
+    monkeypatch.setattr(storage.shutil, "disk_usage", lambda path: usage)
+
+    def baseline(*args, required_bytes, required_device_bytes, **kwargs):
+        assert (required_bytes, required_device_bytes) == (0, 0)
+        return sample
+
+    monkeypatch.setattr(schedule, "capture_baseline", baseline)
+    monkeypatch.setattr(schedule, "guard", lambda *args, **kwargs: None)
+
+    async def spawn(*argv, **kwargs):
+        launched.append(argv)
+        assert "songe.sleep.worker" in argv
+        assert "--export-only" in argv
+        assert "--sizing" not in argv
+        return SimpleNamespace(pid=1, returncode=None)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    await scheduler.tick()
+    wait = store.get("disk_wait")
+    assert wait and scheduler.reason == wait
+    assert "Needs 1.0 GB free" in wait
+    assert not parked and not launched
+    assert store.nights()[0]["status"] == "interrupted"
+    assert not artifact.exists()
+
+    usage.free = reserve + 3 * len(weights)
+    await scheduler.tick()
+    assert scheduler.process
+    assert len(parked) == len(launched) == 1
+    assert store.get("disk_wait") is None
+    await scheduler.guard_task
+
+
 async def test_ready_swap_waits_for_inflight_and_observed_duration(
     config, store, monkeypatch
 ):

@@ -11,7 +11,9 @@ parsed.
   session it came from (a shared file name alone is not a copy)
 - matters: shown the scene, its own lesson and a distinct lesson from
   another session, the model picks its own. Asked about a single lesson,
-  the model said yes to every scene.
+  the model said yes to every scene. With no other session's lesson to
+  compare with (a first session), a stock lesson stands in, so the check
+  always runs.
 
 Drop codes are the first failed check, in this order (docs/CONTRACTS.md).
 """
@@ -20,6 +22,7 @@ import ast
 import hashlib
 import json
 import re
+import unicodedata
 
 from ..reading.timeline import clip
 
@@ -47,11 +50,21 @@ Answer with JSON: why (one sentence), then answer (A, B or neither)."""
 
 ORDER = ("built", "decision", "parses", "not_copy", "matters")
 
+# Stand-ins for "a lesson from another session" when there is none yet: plain
+# coding-agent advice on unrelated subjects.
+STOCK_LESSONS = (
+    "Write commit messages in the imperative mood, under 72 characters.",
+    "Pin dependency versions in the lockfile before a release.",
+    "Add a docstring to every public function.",
+    "Store timestamps in UTC and convert them only for display.",
+    "Give database migrations a matching rollback step.",
+)
+
 
 def render_text(messages, limit=4000):
     """The scene as the agent would see it, minus the system prompt."""
     out = []
-    for m in (messages or [])[1:]:
+    for m in messages or []:
         if m["role"] == "user":
             out.append(f"USER: {m['content']}")
         elif m["role"] == "assistant":
@@ -71,12 +84,17 @@ def render_text(messages, limit=4000):
     return clip("\n".join(out), limit)
 
 
+_TRIGRAM_TOKENS = re.compile(r"[\u3400-\u9fff\uf900-\ufaff\u3040-\u30ff]|\w+")
+
+
 def words(text):
     return set(re.findall(r"[a-z_][a-z0-9_]{2,}", (text or "").lower()))
 
 
 def trigrams(text):
-    w = re.findall(r"[a-z0-9_]+", (text or "").lower())
+    norm = unicodedata.normalize("NFKC", (text or "").lower())
+    cleaned = "".join(ch for ch in norm if unicodedata.category(ch) != "Mn" and ch != "\u0640")
+    w = _TRIGRAM_TOKENS.findall(cleaned)
     return {tuple(w[i : i + 3]) for i in range(len(w) - 2)}
 
 
@@ -84,13 +102,20 @@ def jaccard(a, b):
     return len(a & b) / len(a | b) if a | b else 0.0
 
 
+# A definition, not prose: the keyword as a word, then the name, then what
+# follows a name in code. Tool output also holds English ("the function the
+# agent called"), and "the" was then a shared identifier for every scene.
+DEFINITION = re.compile(
+    r"\b(?:def|function|fn|class|struct)\s+([A-Za-z_]\w*)"
+    r"\s*(?:[(:{<;]|(?:extends|implements)\b)"
+)
+
+
 def identifiers(texts):
     """Function and class names defined in some code."""
     names = set()
     for text in texts:
-        names.update(
-            re.findall(r"(?:def|function|fn|class|struct)\s+([A-Za-z_]\w*)", text or "")
-        )
+        names.update(DEFINITION.findall(text or ""))
     return names - GENERIC_NAMES
 
 
@@ -129,14 +154,15 @@ def copy_evidence(scene, files, requests, code):
 
 
 def placebo_for(practice_id, signal, lessons):
-    """A deterministic, distinct lesson from another session and the prompt order."""
+    """A deterministic, distinct lesson from another session (a stock lesson
+    when there is none) and the prompt order."""
     real = signal["lesson"].strip()
     others = sorted({
         text for session, lesson in lessons
         if session != signal["session"] and (text := lesson.strip()) and text != real
-    })
+    }) or [text for text in STOCK_LESSONS if text != real]
     h = int(hashlib.sha256(practice_id.encode()).hexdigest(), 16)
-    return (others[h % len(others)] if others else None), h % 2 == 0
+    return others[h % len(others)], h % 2 == 0
 
 
 async def check(row, signal, items, reader, lessons):
@@ -156,19 +182,18 @@ async def check(row, signal, items, reader, lessons):
     why = {"parse_errors": errors, "copy_evidence": evidence}
     if all(c[k] for k in ORDER[:4]):
         placebo, real_first = placebo_for(row["id"], signal, lessons)
-        if placebo:
-            real = signal["lesson"]
-            a, b = (real, placebo) if real_first else (placebo, real)
-            answer = await reader.ask(
-                MATTERS.format(dream=render_text(messages, limit=2500), a=a, b=b),
-                MATTERS_SCHEMA,
-                "matters",
-                max_tokens=600,
-            )
-            c["matters"] = answer.get("answer") == ("A" if real_first else "B")
-            why["matters_answer"] = (
-                "real" if c["matters"] else "neither" if answer.get("answer") == "neither" else "placebo"
-            )
-            why["matters_why"] = answer.get("why")
+        real = signal["lesson"]
+        a, b = (real, placebo) if real_first else (placebo, real)
+        answer = await reader.ask(
+            MATTERS.format(dream=render_text(messages, limit=2500), a=a, b=b),
+            MATTERS_SCHEMA,
+            "matters",
+            max_tokens=600,
+        )
+        c["matters"] = answer.get("answer") == ("A" if real_first else "B")
+        why["matters_answer"] = (
+            "real" if c["matters"] else "neither" if answer.get("answer") == "neither" else "placebo"
+        )
+        why["matters_why"] = answer.get("why")
     drop = next((k for k in ORDER if c[k] is False), None)
     return c, drop, why

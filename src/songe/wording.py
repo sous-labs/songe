@@ -4,6 +4,16 @@ import math
 import re
 from datetime import datetime
 
+TRAINING_SETTINGS = "Training settings"
+IGNORED_MODEL_SETTINGS = "Ignored per-model settings"
+# Measuring ran out of room on the graphics card (live #135: vLLM held most of
+# the card). Worded without "memory": those reasons read as waits that clear
+# by themselves, and this one needs the user.
+DEVICE_FULL = (
+    "the graphics card is too full to train beside your model server · stop the server "
+    "while the Dream runs, give it a smaller share of the card, or use a second card"
+)
+
 
 def readable(value):
     text = str(value or "")
@@ -344,6 +354,8 @@ def model_problem(model):
             return (
                 readable(reason) or "Learning is unavailable for this model"
             ) + " · Choose another model or run songe doctor."
+        if DEVICE_FULL in reason:
+            return capitalize(DEVICE_FULL) + "."  # it does not clear by itself
         if re.search(r"memory|free \d|needs \d.*GB", reason, re.I):
             return None  # resolves automatically; not a fix for the user
         if re.search(r"fail|doctor|error", reason, re.I):

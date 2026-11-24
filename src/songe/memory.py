@@ -478,6 +478,20 @@ def running(process):
     )
 
 
+def shares_system_memory(memory):
+    """An accelerator without memory of its own (GB10 / DGX Spark, Jetson).
+
+    Its memory is reported as the system's (platform.common.unified_memory),
+    so its allocations lower `available` but never appear in the process
+    tree's RSS. Counting RSS alone as what a slice has used would reserve its
+    device allocations twice: once as gone from `available` and again as
+    still to come.
+    """
+    return any(
+        a.memory_total == memory.total for a in getattr(memory, "vram", ()) or ()
+    )
+
+
 def guard(
     process,
     platform=None,
@@ -667,10 +681,15 @@ def guard(
                 else policy.max_interval
             )
             exhausted = remaining <= 0
+            drop = max(0, baseline.available - memory.available)
             consumed = (
-                rss
-                if rss is not None
-                else max(0, baseline.available - memory.available)
+                drop
+                if rss is None
+                # Measured like calibration's Meter (sleep/measurement.py):
+                # the larger of the tree's RSS and the fall in free memory.
+                else max(rss, drop)
+                if shares_system_memory(memory)
+                else rss
             )
             need = (
                 max(0, predicted_peak_bytes - consumed)

@@ -26,7 +26,9 @@ import re
 FAILURE = re.compile(
     r"\b[1-9]\d* failed\b|\bFAILED\b|^error(\[E\d+\])?:|Traceback \(most recent call last\)"
     r"|\bgame over\b|Out of guesses|\bnot ok \d+|\bpanicked at\b|\bAssertionError\b"
-    r"|\"error\":\s*\"",
+    r"|\"error\":\s*\""
+    # The shell's own errors: a missing command or Python module.
+    r"|: command not found$|^\S*python[\d.]*: No module named\b",
     re.M,
 )
 PASSED = re.compile(
@@ -42,6 +44,8 @@ CHECK = re.compile(
 )
 EXIT = re.compile(r"Exit code: (\d+)\s*$")
 EDITS = {"edit", "write", "patch", "multiedit", "apply_patch"}
+# Tools that run a command (opencode's and Pi's is bash).
+COMMANDS = {"shell", "execute", "bash"}
 GAME_MOVES = {"wordle.py", "guess.py"}
 
 
@@ -69,7 +73,7 @@ def classify(tool, body, call=None):
         return "tool_error", error.get("message", "")[:300]
     if tool == "execute" and body.startswith(("SyntaxError:", "Invalid arguments for tool")):
         return "tool_error", body.splitlines()[0][:300]
-    if tool not in ("shell", "execute"):
+    if tool not in COMMANDS:
         return None
     code = EXIT.search(body.strip())
     failure = FAILURE.search(body)
@@ -178,11 +182,22 @@ SENTENCES = re.compile(r"(?<=[.!?])\s+")
 CONDITIONAL = re.compile(r"^(please\s+)?(when|whenever|if)\b[^,.;]{3,80},\s*(please\s+)?(always|never|don't|do not)\b", re.I)
 
 
+def unquoted(text):
+    """A message without the quotes around the whole of it: `opencode run
+    "..."` sends its message wrapped in them."""
+    for left, right in (('"', '"'), ("'", "'"), ("\u201c", "\u201d")):
+        if len(text) > 1 and text.startswith(left) and text.endswith(right):
+            inner = text[1:-1]
+            if left not in inner and right not in inner:
+                return inner.strip()
+    return text
+
+
 def rule_sentence(text):
     """The first sentence of the user's that is a standing rule: it starts like
     one, says it is meant to last (LASTING_START or LASTING), has at least four
     words, and does not point back at the conversation. Or None."""
-    for sentence in SENTENCES.split(" ".join(str(text or "").split())):
+    for sentence in SENTENCES.split(unquoted(" ".join(str(text or "").split()))):
         if DEICTIC.search(sentence) or not 12 <= len(sentence) <= 160:
             continue
         if CONDITIONAL.search(sentence) and len(sentence.split()) >= 5:
@@ -214,3 +229,108 @@ def stated_rules(items):
         elif started and it.get("kind") == "user" and (sentence := rule_sentence(it.get("content"))):
             out.append((i, sentence))
     return out
+
+
+# A preference the user states about themself ("I avoid dairy.", "I'm allergic
+# to peanuts.", "我不吃辣。") holds in every later conversation, wherever it is
+# said: also in the opening message, which stated_rules leaves alone because a
+# task's own constraints live there. Rules only find the candidates: a sentence
+# in the first person with a word of taste, habit or need, that is not a
+# question and does not point at something just shown. The model then judges
+# each one where it stands (extract.stated_preferences): "I love the new
+# layout" and "I prefer the second one" look the same to a pattern.
+SELF = re.compile(
+    r"^(?:personally,?\s+)?(?:i|i['\u2019]m|i['\u2019]ve|i['\u2019]d|my|as an?|being|due to my|because of my)\b", re.I
+)
+TASTE = re.compile(
+    r"\b(?:prefer\w*|avoid\w*|dislike\w*|despise|detest|loathe|hate|love|enjoy|adore|like|fond of|fan of"
+    r"|into|interest(?:ed)? in|favou?rite|rather|disdain|priority|aversion|allerg\w+|intoleran\w+|phobia"
+    r"|afraid of|scared of|fear of|terrified|sensitive to|vegetarian|vegan|pescatarian|kosher|halal|gluten|lactose"
+    r"|diet|against|refuse|stay away|steer clear|strict\w*|never|always|only|usually|i find"
+    r"|can(?:['\u2019]t|not| not) (?:stand|eat|drink|tolerate|handle|bear)"
+    r"|(?:don['\u2019]t|do not) (?:eat|drink|use|like|watch|read|listen|wear|enjoy|do|buy|own|believe|want))\b",
+    re.I,
+)
+CJK = re.compile(r"[\u3400-\u9fff]")
+TASTE_ZH = re.compile(
+    r"喜欢|喜歡|讨厌|討厭|偏好|偏爱|爱吃|爱喝|爱看|爱用|不吃|不喝|不用|不看|不坐|过敏|過敏|受不了|忌口|吃素|素食"
+    r"|害怕|恐高|习惯|習慣|从不|從不|从来不|總是|总是|一向|反感|倾向|傾向|只吃|只喝|只用|只看|只买|只坐|只住|只穿"
+)
+# A pick among things just offered, or a remark on what was just shown.
+# How people say a habit of theirs has changed: "I've stopped taking the
+# train; I cycle to work now", "These days I only read e-books", "我现在只喝茶".
+# There may be no word of taste in it, and the sentence need not open with
+# "I". A candidate like the others: the model judges it.
+CHANGE = re.compile(
+    r"\b(?:no longer|any ?more|these days|nowadays|from now on"
+    r"|i(?:['\u2019]ve| have)? (?:switched|stopped|quit|given up|gave up|moved (?:on |over )?to|gone off|become|became|changed my mind|had enough of)"
+    r"|i(?:['\u2019]d| would) rather)\b"
+    r"|\bnow[.!]?$", re.I
+)
+CHANGE_ZH = re.compile(
+    r"不再|戒了|戒掉|改用|改吃|改喝|改坐|现在只|現在只|现在都|現在都|现在不|現在不|以后都|以後都|以后不|以後不|以后只|以後只"
+    r"|从现在起|從現在起|已经不|已經不"
+)
+SPEAKER = re.compile(r"(?<![.\w])i(?:['\u2019](?:m|ve|d|ll))?\b(?!\.)", re.I)
+CHOICE = re.compile(
+    r"\b(?:first|second|third|fourth|last|former|latter|previous|other)"
+    r" (?:one|two|option|version|choice|suggestion|answer|draft|design|approach|example|idea)\b"
+    r"|\boption [a-d1-9]\b|\b(?:this|that) (?:one|option|version|answer|draft|design|approach|way|idea|name|title)\b"
+    r"|第[一二三四五六七八九十\d]+[个個种種]|[这這那][个個种種]|上面|刚才|剛才",
+    re.I,
+)
+PARTS = re.compile(r"(?<=[.!?])\s+|(?<=[。！？；])\s*|\n+")
+# "Correct the grammar: I enjoy ...", 'Mira: "I never ...': what follows such a
+# colon is material handed over, or somebody's line, not the user speaking.
+HANDED = re.compile(r"\uff1a|:(?=\s|[\"'\u201c\u2018\u300c\u300e]|$)")
+
+
+def preference_sentences(text, limit=3):
+    """The user's sentences that may state a lasting preference of their own,
+    in their own words (at most `limit`, the first ones). Candidates only.
+
+    "I avoid dairy, what can I cook tonight?" is a statement and then a
+    question: the statement is the candidate. Chinese runs clauses together
+    with commas ("我对花生过敏，推荐点别的"), so there the clause is."""
+    out, whole, pos = [], unquoted(str(text or "").strip()), 0
+    for part in PARTS.split(whole):
+        at = whole.find(part, pos)
+        pos = at + len(part) if at >= 0 else pos
+        if HANDED.search(whole[: max(at, 0)]):
+            break
+        sentence = unquoted(" ".join(part.split()))
+        chinese = bool(CJK.search(sentence))
+        if chinese:
+            pieces = re.split(r"[，,]\s*", HANDED.split(sentence)[0].rstrip("。！；.!;"))
+        elif sentence.endswith("?"):
+            pieces = re.split(r",\s+|;\s+|\s+[\u2014-]\s+", sentence)[:1]
+        else:
+            pieces = [sentence]
+        for piece in pieces:
+            piece = piece.strip()
+            if not (3 if chinese else 12) <= len(piece) <= 200:
+                continue
+            if piece[0] in "\"'\u201c\u2018\u300c\u300e":
+                continue  # inside a quotation that goes on: somebody's line, not the user speaking
+            if piece.endswith(("?", "\uff1f", "吗", "呢")) or DEICTIC.search(piece) or CHOICE.search(piece):
+                continue
+            if chinese:
+                found = "我" in piece and (TASTE_ZH.search(piece) or CHANGE_ZH.search(piece))
+            else:
+                found = (SELF.search(piece) and TASTE.search(piece)) or (
+                    (SELF.search(piece) or SPEAKER.search(piece)) and CHANGE.search(piece)
+                )
+            if found:
+                out.append(piece)
+    return out[:limit]
+
+
+def stated_sentence(signal):
+    """The sentence of the user's that a signal keeps word for word: a
+    preference of their own (judged lasting by the model when it was read;
+    the pattern is checked again here, so a looser past capture does not
+    stay), else a standing rule. None when the signal holds neither."""
+    said = signal.get("preference")
+    if said:
+        return said if said in preference_sentences(said) else None
+    return rule_sentence(signal.get("text"))

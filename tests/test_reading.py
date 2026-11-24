@@ -5,6 +5,7 @@ import asyncio
 import json
 
 import httpx
+import pytest
 
 from songe.models import registry
 from songe.parts import request_of
@@ -123,6 +124,72 @@ def test_a_session_is_read_once_into_signals(store):
     assert found["success"]["contradicted_by"] == "the user's correction"
     assert reading.pending(store) == []
     assert read(store, FakeReader()) == 0  # nothing new to read
+
+
+class Judging(FakeReader):
+    """Reads every user message as new work, and judges the turn as told."""
+
+    def __init__(self, standing, kind, wish=""):
+        super().__init__()
+        self.judged = {"standing": standing, "kind": kind, "wish": wish}
+
+    async def ask(self, prompt, schema, name):
+        answer = await super().ask(prompt, schema, name)
+        if name == "classify":
+            text = answer["parts"][0]["text"]
+            return {"parts": [{"says_something_is_wrong": False, "kind": "new_task", "type": None, "text": text}]}
+        return self.judged if name == "turn" else answer
+
+
+def test_a_standing_wish_read_as_new_work_is_still_a_correction(store):
+    # "i want in russian" after an answer: the split into parts calls it a new
+    # task, the turn question calls it a wish that holds from now on.
+    record_session(store, reply_text="i want in russian")
+    reader = Judging("yes", "task", "Answer in Russian.")
+    read(store, reader)
+    assert reader.asked.count("turn") == 1  # once per user turn after an answer
+    wish = next(s for s in reading.signals(store) if s["type"] == "correction")
+    assert (wish["text"], wish["turn_kind"], wish["source"]) == ("i want in russian", "lasting", "user")
+    # The wish as the turn question worded it is the note, not the lesson
+    # written about the work at hand.
+    assert wish["lesson"] == wish["short"] == "Answer in Russian." and wish["generality"] == "always"
+
+
+@pytest.mark.parametrize("kind", ["once", "task", "reaction"])
+def test_a_turn_that_is_no_standing_wish_adds_nothing(store, kind):
+    record_session(store, reply_text="could you add a paragraph on costs?")
+    read(store, Judging("no", kind))
+    assert [s for s in reading.signals(store) if s["type"] == "correction"] == []
+
+
+def test_a_long_message_is_work_and_is_not_asked_about(store):
+    record_session(store, reply_text="Rewrite this report for the board. " + "It has many paragraphs. " * 20)
+    reader = Judging("yes", "task")
+    read(store, reader)
+    assert "turn" not in reader.asked
+    assert [s for s in reading.signals(store) if s["type"] == "correction"] == []
+
+
+def test_an_example_of_the_question_pasted_back_is_not_the_users_wish():
+    from songe.reading import prompts as P
+
+    pasted = {"standing": "yes", "kind": "task", "wish": "Answer in Chinese."}
+    assert P.turn_verdict(pasted, "restart the duel") == ("task", "")
+    assert P.turn_verdict(pasted, "reply me in chinese") == ("lasting", "Answer in Chinese.")
+    assert P.turn_verdict(pasted, "请用中文回答") == ("lasting", "Answer in Chinese.")
+    assert P.turn_verdict({"standing": "yes", "kind": "once", "wish": "Use metric units."}, "everything in metric")[0] == "lasting"
+
+
+def test_what_the_turn_was_is_kept_with_its_signals(store):
+    record_session(store, reply_text="make it shorter")
+
+    class Once(FakeReader):
+        async def ask(self, prompt, schema, name):
+            return {"standing": "no", "kind": "once"} if name == "turn" else await super().ask(prompt, schema, name)
+
+    read(store, Once())
+    correction = next(s for s in reading.signals(store) if s["type"] == "correction")
+    assert correction["turn_kind"] == "once"
 
 
 def test_a_rule_the_user_states_is_captured_even_if_the_model_misses_it(store):
@@ -246,6 +313,7 @@ def test_the_client_stops_when_the_user_returns(store):
 ANSWERS = {
     "classify": {"parts": [{"says_something_is_wrong": True, "kind": "feedback",
                             "type": "correction", "text": "No, you changed the wrong file."}]},
+    "turn": {"standing": "no", "kind": "once"},
     "responsible": {"steps": [2], "reason": "wrong file"},
     "lesson": {"lesson": "Check the file first.", "instance": "x.py", "generality": "kind",
                "verifiable": None},
@@ -725,6 +793,54 @@ def test_a_copied_example_is_no_lesson_and_conditional_rules_are_rules():
     assert rule_sentence("Use the feedback from each guess.") is None
 
 
+def test_the_lesson_question_for_the_users_own_words_keeps_what_they_named(store):
+    """Live (Qwen3.5-4B on vLLM, 24 chats corrected in everyday words): "I use
+    uv, not pip." was stored as "Verify the user's preferred package manager
+    before providing instructions.", "In metric please." as "Check the user's
+    preferred units before providing the final answer." read as fitting one
+    kind of task, and no answer changed. The question now says that a wish in
+    the user's own words is the lesson; a tool's result is asked about as before."""
+    from songe.reading import prompts as P
+
+    class Recording(FakeReader):
+        def __init__(self):
+            super().__init__()
+            self.questions = []
+
+        async def ask(self, prompt, schema, name):
+            if name == "lesson":
+                self.questions.append(prompt)
+            return await super().ask(prompt, schema, name)
+
+    record_session(store, reply_text="pnpm please.")
+    reader = Recording()
+    assert read(store, reader) == 1
+    (question,) = [q for q in reader.questions if "pnpm please." in q]
+    assert P.USER_WISH in question
+    assert "user's key words" in P.USER_WISH and '"always"' in P.USER_WISH
+    # Feedback from a tool is not the user's words: that question is unchanged.
+    plain = P.LESSON.format(task="t", steps="s", feedback="Exit code: 1", reason="r", after="a", wish="")
+    assert P.USER_WISH not in plain and "{wish}" not in plain
+    assert all(P.USER_WISH not in q for q in reader.questions if "pnpm please." not in q)
+    # A shape pasted back with its placeholders is no lesson; a real wish is one.
+    assert P.copied_example("Use <THING>, not <OTHER>.")
+    assert not P.copied_example("Use uv, not pip.")
+
+
+def test_a_rule_in_a_message_wrapped_in_quotes_keeps_no_quote():
+    """Live (opencode 1.19.6, `opencode run "..."`): the message arrives inside
+    quotes; the first rule was missed and the last became the preference
+    `Always add dependencies with uv add."`."""
+    from songe.reading.rules import rule_sentence
+
+    wrapped = '"Never use pip in this repo. Always add dependencies with uv add."'
+    assert rule_sentence(wrapped) == "Never use pip in this repo."
+    assert rule_sentence('"Always add dependencies with uv add."') == "Always add dependencies with uv add."
+    assert rule_sentence("\u201cAlways run tests with uv run pytest.\u201d") == "Always run tests with uv run pytest."
+    # Quotes that belong to the sentence stay.
+    assert rule_sentence('Always name the branch "main".') == 'Always name the branch "main".'
+
+
 def test_opencode_1_19_titles_compactions_and_continue_are_not_the_user():
     # Recorded from opencode 1.19.6 (#15): its title and summary requests and
     # the message it sends after a compaction were read as the user's own, and
@@ -843,3 +959,328 @@ async def test_a_dream_carried_on_after_a_restart_reads_with_auto_dream_off(conf
     await scheduler.tick()
     # It read the conversation itself first, then went on (nothing unread).
     assert asked and launched == [0]
+
+
+def test_a_failed_bash_command_is_a_failed_result():
+    """#132: opencode's and Pi's tool is bash, and its output has no exit code.
+    A missing command or module must count as a failure without a review."""
+    from songe.reading.rules import classify
+
+    def run(command):
+        return {"arguments": json.dumps({"command": command})}
+
+    failures = [
+        ("pytest", "/bin/bash: line 1: pytest: command not found\n"),
+        ("python -m pytest", "/usr/local/bin/python: No module named pytest\n"),
+        ("pip install pytest", "error: externally-managed-environment\n\n× This environment is externally managed\n"),
+        ("python scripts/run.py", "Traceback (most recent call last):\n  ...\nModuleNotFoundError: No module named 'kitchen'\n"),
+    ]
+    for command, body in failures:
+        assert classify("bash", body, run(command))[0] == "failed_result", body
+    assert classify("bash", "12 passed in 0.4s\n", run("uv run pytest -q")) == ("success", "12 passed")
+    assert classify("bash", "README.md\nsrc\n", run("ls")) is None
+    # Mentioning the phrase is not hitting it.
+    assert classify("bash", "No module named in this repo is missing\n", run("cat notes.md")) is None
+
+
+def record_chat(store, *turns):
+    """A plain chat, no tools and no system message: (user, answer) pairs."""
+    history = []
+    for said, answer in turns:
+        history = history + [{"role": "user", "content": said}]
+        store.record("/v1/chat/completions", {"messages": history}, reply({"role": "assistant", "content": answer}))
+        history = history + [{"role": "assistant", "content": answer}]
+    store.reconstruct()
+
+
+class Judge(FakeReader):
+    """The model asked what a candidate sentence is: "about_me" for the ones
+    named, "reaction" for the rest. Keeps the questions."""
+
+    def __init__(self, about_me=()):
+        super().__init__()
+        self.about_me, self.questions = set(about_me), []
+
+    async def ask(self, prompt, schema, name):
+        if name != "preference":
+            return await super().ask(prompt, schema, name)
+        self.questions.append(prompt)
+        sentence = prompt.rsplit("One sentence of that message:\n", 1)[1].split("\n")[0]
+        return {"kind": "about_me" if sentence in self.about_me else "reaction"}
+
+
+def test_a_preference_the_user_states_about_themself_becomes_a_note_in_their_words(config, store):
+    """Live (Qwen3.5-4B on vLLM, preferences said the way people say them: "I
+    avoid ...", "I'm not a fan of ..."): said as the opening message of a
+    conversation, none was read at all (the opening message is the task, and
+    it does not start like a rule); said after an answer, one became "Verify
+    user constraints before recommending content.", read as fitting one kind
+    of task, and never reached the prompt."""
+    from songe import quick
+    from songe.practice.store import wanted
+
+    said = "I avoid dairy because it upsets my stomach."
+    record_chat(store, (f"{said} What can I cook tonight?", "Try a lentil curry."))
+    reader = Judge(about_me={said})
+    assert read(store, reader) == 1
+    # The model saw the sentence in its message, and that nothing came before.
+    (question,) = reader.questions
+    assert "What can I cook tonight?" in question and "(nothing: this is the first message)" in question
+    (signal,) = [s for s in reading.signals(store) if s.get("preference")]
+    assert (signal["text"], signal["lesson"], signal["short"], signal["generality"]) == (said, said, said, "always")
+    # It points at the answer it got, so a Deep Dream practises it too.
+    assert signal["exchanges"] and signal["id"] in {s["id"] for s, _ in wanted(store, 1)}
+    # In the prompt at once, word for word, and it stays there.
+    for _ in range(2):
+        quick.quick_dream(store, config)
+        assert [lesson["text"] for lesson in quick.active(store)] == [said]
+    # A capture today's pattern would not make again leaves the prompt.
+    assert not quick.suitable(signal | {"preference": "Fix it now."})
+
+
+def test_a_preference_said_after_an_answer_is_published_as_the_user_said_it(config, store):
+    from songe import quick
+
+    said = "I'm allergic to peanuts."
+    record_chat(store, ("Suggest a snack.", "Peanut butter on toast."), (f"{said} Anything else works.", "Apple slices."))
+    assert read(store, Judge(about_me={said})) == 1
+    # One signal: the model's reading of the message, which now carries the sentence.
+    (signal,) = [s for s in reading.signals(store) if s["source"] == "user"]
+    assert signal["preference"] == said and signal["lesson"].startswith("Check which file")
+    quick.quick_dream(store, config)
+    assert [lesson["text"] for lesson in quick.active(store)] == [said]
+
+
+def test_not_every_sentence_in_the_first_person_is_a_preference(config, store):
+    from songe import quick
+    from songe.reading.rules import preference_sentences
+
+    # Candidates, in the user's words. A statement that runs into a question,
+    # or into a request (Chinese joins clauses with commas), is cut from it.
+    assert preference_sentences("I'm vegetarian, what should I cook tonight?") == ["I'm vegetarian"]
+    assert preference_sentences("As a vegan, I skip honey too.") == ["As a vegan, I skip honey too."]
+    assert preference_sentences("我不吃辣。") == ["我不吃辣"]
+    assert preference_sentences("我对花生过敏，推荐点别的") == ["我对花生过敏"]
+    assert preference_sentences("我吃素，不吃肉也不吃鱼。") == ["我吃素"]
+    assert preference_sentences("I avoid three things: gluten, dairy and soy.") == ["I avoid three things: gluten, dairy and soy."]
+    # Never candidates: a pick among things just offered, a wish about this
+    # answer, a fact of the task, a question, a text handed over to be worked
+    # on, somebody's line.
+    for text in (
+        "I prefer the second one.", "I like this version better.", "我喜欢第二个", "我更喜欢这个",
+        "Shorter please.", "I'm using Python 3.9 here.", "Do I always need a virtual environment?",
+        "我总是需要虚拟环境吗？",
+        "Correct the grammar: I enjoy listening to jazz. I never miss a concert in my town.",
+        "帮我润色：我从小喜欢画画，我总是随身带着速写本。",
+        'Mira: "Oh, I never eat before a show. I love the quiet of an empty hall."',
+    ):
+        assert preference_sentences(text) == [], text
+    # What a pattern cannot tell apart, the model judges where it stands: a
+    # word on the last answer and a line about the job are not kept.
+    record_chat(
+        store,
+        ("Draw me a landing page.", "Here is a page with a wide hero image."),
+        ("I love the new layout. I only get a blank page on my phone though.", "Fixed."),
+    )
+    reader = Judge()
+    assert read(store, reader) == 1
+    assert len(reader.questions) == 2 and all("wide hero image" in q for q in reader.questions)
+    assert not [s for s in reading.signals(store) if s.get("preference")]
+    quick.quick_dream(store, config)
+    assert quick.active(store) == []
+
+
+def test_a_sentence_that_says_a_habit_changed_is_a_candidate(config, store):
+    """Live (Qwen3.5-4B on vLLM; 20 people each state a preference and, in a
+    later conversation, say it has changed): 10 of the 20 later statements
+    were never looked at, so the note kept the old habit only. The patterns
+    that pick candidate sentences wanted a word of taste ("prefer", "avoid",
+    "only") in a sentence that opens with "I", and "I've stopped taking the
+    train; I cycle to work now." has no such word. The words people use for a
+    change now make a candidate too; the model still judges each one. All 20
+    became notes, and 15 of 20 more cases written afterwards (2 before); in
+    5,000 real chat turns 6 more sentences are candidates, and none is kept."""
+    from songe import quick
+    from songe.reading.rules import preference_sentences
+
+    for text in (
+        "I've stopped taking the train; I cycle to work now.",
+        "I no longer drink coffee.",
+        "These days I cook without butter.",
+        "Actually I'd rather get there by bike.",
+        "I've become a morning person.",
+        "Meetings before ten don't work for me anymore; I start at eleven now.",
+        "我戒了咖啡。", "我不再坐飞机了。", "我改用左手鼠标了。",
+    ):
+        assert preference_sentences(text) == [text.rstrip("。")], text
+    # Nobody speaking of themself, a request, a question: still not candidates.
+    for text in (
+        "The build doesn't work anymore.", "Make it no longer depend on my config.", "It works now.",
+        "Is it any faster now?", "现在只剩两个测试失败。",
+    ):
+        assert preference_sentences(text) == [], text
+    # A candidate only: the model is asked, and a line about the job is not kept.
+    said = "I've stopped taking the train; I cycle to work now."
+    record_chat(store, (f"{said} Plan my morning.", "Leave at 8."))
+    record_chat(store, ("I no longer get the error. What next?", "Run the tests."))
+    reader = Judge(about_me={said})
+    assert read(store, reader) == 2 and len(reader.questions) == 2
+    assert [s["preference"] for s in reading.signals(store) if s.get("preference")] == [said]
+    quick.quick_dream(store, config)
+    assert [lesson["text"] for lesson in quick.active(store)] == [said]
+
+
+class Changing(Judge):
+    """Also asked which earlier sentences a sentence replaces (answers with
+    the numbers given for it), and whether an earlier and a later sentence
+    can both be true (not for the pairs given). Keeps those questions."""
+
+    def __init__(self, about_me=(), replaces=None, not_both=()):
+        super().__init__(about_me)
+        self.replaces, self.not_both, self.compared, self.checked = replaces or {}, set(not_both), [], []
+
+    async def ask(self, prompt, schema, name):
+        if name == "replaces":
+            self.compared.append(prompt)
+            said = prompt.rsplit("What the user said after all of them:\n", 1)[1].split("\n")[0]
+            return {"replaces": self.replaces.get(said, [])}
+        if name == "both_true":
+            pair = (prompt.split("Earlier: ", 1)[1].split("\n")[0], prompt.split("Later: ", 1)[1].split("\n")[0])
+            self.checked.append(pair)
+            return {"kind": "later_only" if pair in self.not_both else "both"}
+        return await super().ask(prompt, schema, name)
+
+
+def test_a_new_preference_retires_the_one_it_replaces(config, store):
+    """Live (Qwen3.5-4B on vLLM; 20 people each state a preference and, in a
+    later conversation, say it has changed): the old sentence stayed in the
+    prompt every time, next to the new one where the new one was kept, and
+    nothing ever took it out. Now the model is asked, once for each
+    preference, which of the ones stated before it it replaces, then of each
+    one it names whether both can be true, and those that cannot are
+    retired. Live again: the old sentence left the prompt in 17 of the 18
+    cases; of 40 pairs of sentences that do not conflict all 80 stayed, and
+    so did all 200 sentences of 20 users who stated ten preferences each."""
+    from songe import quick
+    from songe.practice.store import wanted
+    from songe.reading import prompts as P
+
+    old, new, other = "I prefer window seats when I fly.", "I prefer aisle seats now.", "I avoid dairy."
+    first = [{"role": "user", "content": f"{old} Find me a flight to Oslo."}]
+    store.record("/v1/chat/completions", {"messages": first}, reply({"role": "assistant", "content": "The 9:40 has window seats."}))
+    store.reconstruct()
+    record_chat(store, (f"{other} What can I cook tonight?", "A lentil curry."))
+    # The model names a note that the sentence does not replace: asked again
+    # about that pair alone, it says both can be true, and both stay.
+    reader = Changing(about_me={old, new, other}, replaces={other: [1]})
+    assert read(store, reader) == 2
+    assert reader.compared == [P.REPLACES.format(notes=f"1. {old}", sentence=other)] and reader.checked == [(old, other)]
+    quick.quick_dream(store, config)
+    assert {lesson["text"] for lesson in quick.active(store)} == {old, other}
+
+    record_chat(store, (f"{new} Find me a flight to Rome.", "The 7:15 has aisle seats."))
+    reader = Changing(about_me={old, new, other}, replaces={new: [1, 2, 9, "2", True]}, not_both={(old, new)})
+    assert read(store, reader) == 1
+    asked = reader.compared
+    assert asked[-1] == P.REPLACES.format(notes=f"1. {old}\n2. {other}", sentence=new)
+    assert reader.checked == [(old, new), (other, new)]  # an answer that names no note is ignored
+    # The old sentence is retired: out of reading, out of practice, out of
+    # the prompt. The other one stays.
+    assert [s["preference"] for s in reading.signals(store)] == [other, new]
+    assert len(wanted(store, 1)) == 2
+    quick.quick_dream(store, config)
+    assert {lesson["text"] for lesson in quick.active(store)} == {other, new}
+    # Its conversation goes on and is read again: it stays retired, and the
+    # questions are the same ones (a real reader answers them from its cache).
+    more = first + [{"role": "assistant", "content": "The 9:40 has window seats."}, {"role": "user", "content": "Book it."}]
+    store.record("/v1/chat/completions", {"messages": more}, reply({"role": "assistant", "content": "Booked."}))
+    store.reconstruct()
+    reader = Changing(about_me={old, new, other})
+    assert read(store, reader) == 1 and reader.compared == asked
+    assert [s["preference"] for s in reading.signals(store) if s.get("preference")] == [other, new]
+    quick.quick_dream(store, config)
+    assert {lesson["text"] for lesson in quick.active(store)} == {other, new}
+
+
+def test_the_order_conversations_are_read_in_does_not_decide_which_preference_stays(config, store):
+    from songe import quick
+    from songe.reading import prompts as P
+
+    old, new = "I love coffee in the morning.", "I've given up coffee; I only drink tea now."
+    record_chat(store, (f"{old} Plan my breakfast.", "Coffee and toast."))
+    record_chat(store, (f"{new} Plan my breakfast.", "Tea and toast."))
+    # A backlog is read newest first. The sentences are compared in the order
+    # they were said: the later one is asked about the earlier one.
+    reader = Changing(about_me={old, new}, replaces={new: [1]}, not_both={(old, new)})
+    assert asyncio.run(reading.read(store, reader, newest=True)) == 2
+    assert reader.compared == [P.REPLACES.format(notes=f"1. {old}", sentence=new)]
+    assert [s["preference"] for s in reading.signals(store)] == [new]
+    quick.quick_dream(store, config)
+    assert [lesson["text"] for lesson in quick.active(store)] == [new]
+
+
+def test_the_results_of_an_agents_own_tools_are_reviewed(store):
+    """Live (Qwen3.5-9B on vLLM, a word game played through a function tool
+    named guess, 100 games): reading asked no review question and kept no
+    signal from any result. Only results of tools named shell, execute, bash
+    or webfetch were looked at, so a refused word and a lost game taught
+    nothing. Now every tool's result is reviewed except those of tools that
+    read, list, search or change files, and a turn of shell commands is asked
+    exactly as before."""
+    from songe.reading import prompts as P
+    from songe.reading import views
+
+    assert all(views.reviewed(name) for name in ("bash", "shell", "webfetch", "guess", "mcp__tracker__create_issue"))
+    assert not any(views.reviewed(name) for name in ("read", "Read", "edit", "apply_patch", "TodoWrite", "list_files", None))
+
+    tools = [tool("guess", word="string"), tool("read", filePath="string")]
+    refused = "You attempted an invalid move. Reason: 'zzzzz' is not an English word."
+    turns = [
+        ({"role": "assistant", "content": "", "tool_calls": [call("a", "guess", word="crane")]},
+         {"role": "tool", "tool_call_id": "a", "content": "C R A N E\nX X X X G\nYou have 5 guesses left."}),
+        ({"role": "assistant", "content": "", "tool_calls": [call("b", "read", filePath="words.txt")]},
+         {"role": "tool", "tool_call_id": "b", "content": "aback\nabase\nabate"}),
+        ({"role": "assistant", "content": "", "tool_calls": [call("c", "guess", word="zzzzz")]},
+         {"role": "tool", "tool_call_id": "c", "content": refused}),
+    ]
+    history = [SYSTEM, {"role": "user", "content": "Game 1. Enter your guess to begin."}]
+    for action, result in turns:
+        store.record("/v1/chat/completions", {"messages": history, "tools": tools}, reply(action))
+        history = history + [action, result]
+    store.record("/v1/chat/completions", {"messages": history, "tools": tools},
+                 reply({"role": "assistant", "content": "I ran out of ideas."}))
+    store.reconstruct()
+
+    class Reviewing(FakeReader):
+        def __init__(self):
+            super().__init__()
+            self.reviews = []
+
+        async def ask(self, prompt, schema, name):
+            if name == "review":
+                self.asked.append(name)
+                self.reviews.append(prompt)
+                return {"signals": [{"step": 3, "type": "failed_result",
+                                     "quote": "'zzzzz' is not an English word", "why": "the word was refused"}]}
+            return await super().ask(prompt, schema, name)
+
+    reader = Reviewing()
+    assert read(store, reader) == 1
+    (question,) = reader.reviews
+    assert P.REVIEW_TOOLS["ran"] in question and P.REVIEW_TOOLS["errors"] in question
+    assert "X X X X G" in question and refused in question
+    assert "aback" not in question  # a file read is not a result to review
+    (signal,) = [s for s in reading.signals(store) if s["source"] == "tool"]
+    assert signal["type"] == "failed_result" and "not an English word" in signal["text"]
+    # Shell commands: the question that was checked against the answer key.
+    shell = [
+        {"kind": "user", "content": "run it"},
+        {"kind": "action", "step": 1, "text": "", "tool_calls": [{"id": "x", "name": "bash", "arguments": '{"command": "python3 guess.py 500"}'}]},
+        {"kind": "tool_result", "call": "x", "step": 1, "tool": "bash", "content": "500: higher"},
+    ]
+    (event,) = [e for e in views.events(shell, rules=[]) if e["kind"] == "review"]
+    assert event["commands"]
+    asked = P.REVIEW.format(task="t", steps="s", **P.REVIEW_COMMANDS)
+    assert "These are the commands the agent ran in one turn, with their output:\ns\n" in asked
+    assert 'compile checks like "syntax OK", or any error message (those are handled elsewhere).\n' in asked
+    assert "{" not in asked.replace("JSON", "")

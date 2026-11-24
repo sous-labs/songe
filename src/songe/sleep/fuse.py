@@ -137,7 +137,11 @@ def export_candidate(
     from ..artifacts.runtime import guarded_run, owned_marker
 
     destination.parent.mkdir(parents=True, exist_ok=True)
-    from ..artifacts.storage import artifact_root, require_publish_volume
+    from ..artifacts.storage import (
+        artifact_root,
+        mlx_gguf_lora_bytes,
+        require_publish_volume,
+    )
     from ..log import Store
     from ..models.convert import require_disk
     from ..platform import Rooted
@@ -163,7 +167,13 @@ def export_candidate(
                 return destination
         raise RuntimeError("Candidate destination belongs to another run")
 
-    require_disk(destination.parent, weight_bytes(config.model) + weight_bytes(adapter))
+    mlx_adapter = (adapter / "adapters.safetensors").is_file()
+    required = (
+        mlx_gguf_lora_bytes(adapter)
+        if kind == "gguf-lora" and mlx_adapter
+        else weight_bytes(config.model) + weight_bytes(adapter)
+    )
+    require_disk(scratch, required)
 
     if kind == "mlx-fused":
         return fuse(
@@ -178,7 +188,7 @@ def export_candidate(
     def runner(argv, **kwargs):
         return guarded_run(argv, check=check, **kwargs)
 
-    if (adapter / "adapters.safetensors").is_file():
+    if mlx_adapter:
         import tempfile
         from pathlib import Path
 

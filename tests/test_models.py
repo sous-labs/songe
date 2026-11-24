@@ -1244,3 +1244,50 @@ def test_status_names_a_model_that_dreams_on_its_own(learners):
     models = registry.summaries(config, store)
     status = activity(config, store, scheduler, None, models, live=True)
     assert status["next"] == "Auto-dream is off · press Dream to run one"
+
+
+def test_a_full_graphics_card_says_what_to_do(learners, monkeypatch):
+    """#135: with the user's model server holding most of the card, measuring
+    ran out of room and said only "calibration failed". It now says the card
+    is full beside the server and what to do, and the model shows it as
+    needing the user, not as a wait that clears by itself."""
+    import sys
+
+    from songe import wording
+    from songe.sleep import calibrate
+
+    _, store = learners
+
+    class OutOfMemoryError(RuntimeError):  # torch.OutOfMemoryError's name
+        pass
+
+    def full(*a):
+        raise OutOfMemoryError("CUDA out of memory. Tried to allocate 2.00 GiB")
+
+    monkeypatch.setattr(calibrate, "_calibrate", full)
+    monkeypatch.setattr(
+        sys, "argv", ["calibrate", "--child", "--data-dir", str(store.root), "--model-key", "second"]
+    )
+    with pytest.raises(OutOfMemoryError):
+        calibrate.main()
+    reason = store.scoped("second").get("child_error")
+    assert reason == wording.DEVICE_FULL and "model server" in reason
+    assert registry.find(store, "second")["support"] != "unsupported"  # it can train once there is room
+    assert wording.model_problem({"reason": reason}).startswith("The graphics card is too full")
+    # Any other failure keeps the short hint.
+    monkeypatch.setattr(calibrate, "_calibrate", lambda *a: (_ for _ in ()).throw(OSError("disk")))
+    with pytest.raises(OSError):
+        calibrate.main()
+    assert store.scoped("second").get("child_error") == "calibration failed · songe doctor"
+    assert not calibrate.device_full(MemoryError())  # the host memory guard's stop is not this
+    # A pressed Deep Dream that stopped there says the same in its note.
+    from types import SimpleNamespace
+
+    from songe.schedule import ModelScheduler
+
+    learner = store.scoped("second")
+    learner.set("child_error", wording.DEVICE_FULL)
+    owner = SimpleNamespace(installation_store=store)
+    ModelScheduler.carry_on(owner, "second", {"nights": len(learner.nights()), "at": 0}, calibrating=True,
+                            failed=True, interrupted=False, stopped_by=None, memory_stop=False)
+    assert learner.get("dream_stopped")["detail"] == wording.DEVICE_FULL

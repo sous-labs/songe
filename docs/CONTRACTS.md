@@ -88,7 +88,10 @@ or by auto-dream:
   tokens. Quick Dream waits when the learner's model is not loaded. The proxy
   adds them to the end of the system message of each new session; a session
   keeps the lessons it started with (`LessonPins`), and the recorded request
-  stays the agent's own. Removed lessons (`remove_lesson`) never return.
+  stays the agent's own. Removed lessons (`remove_lesson`) never return. The
+  block ends with a line of its own (`quick.EXCEPTIONS`): the request at hand
+  wins over a lesson when it asks for an exception, this time only, and every
+  other request follows the lessons.
 - Quick Dream before/after: every new preference (stated rule or not; up to
   6 tried) is replayed at the moment it came from (the logged request at the
   step its signal points to; for a stated rule, the tool call before it that
@@ -107,6 +110,33 @@ or by auto-dream:
   only means the user's own words: kept verbatim and ranked first. A stated
   rule points at the step it is about, so a Deep Dream practises it like any
   other lesson and, once adopted, it leaves the prompt.
+- A preference the user states about themself ("I avoid dairy.", "我不吃辣")
+  is kept the same way: their sentence, word for word, in the prompt at once.
+  It counts wherever it stands, the opening message included. Rules find the
+  candidates (`rules.preference_sentences`: first person, a word of taste,
+  habit or need, or the words of a change of habit ("no longer", "these
+  days", "I've stopped ...", "不再"), not a question, not a pick among things
+  just offered); the
+  served model is asked one question per candidate (`preference`) and only
+  "about_me" is kept, not a reaction to the last answer, a line about the job,
+  or a line of a text handed over to be worked on. It points at the step it is
+  about, or at the answer it got when nothing came before.
+- People change. After reading, each such preference is shown to the served
+  model with the ones the user stated before it, oldest first (`replaces`:
+  which of them does it replace?), and each one it names again on its own
+  (`both_true`: can both be true now?). A sentence that cannot be true
+  together with the newer one ("I prefer window seats." after "I've switched
+  to aisle seats.") is retired (`signals.retired_at`): reading, the prompt and
+  practice no longer see it, and it stays retired when its conversation is
+  read again. The order conversations are read in does not matter; answers
+  come from the reader's cache unless the list of earlier sentences changed.
+- Every user message that follows an answer is judged once by the served
+  model (`turn`, with thinking): a standing wish about how this user wants
+  things, a change wanted for this answer only, new work, or a reaction. Only
+  a standing wish becomes a note in the prompt at once, also when the split
+  into parts read it as a new task. A change wanted once becomes a note when
+  the same wish comes up in a second conversation. New work and reactions do
+  not become notes. A sentence shaped like a rule stays a rule.
 - Deep Dream (2–3 hours, skills): reads what is left, writes practice, trains,
   checks. When one is adopted, the lessons whose signals it trained leave the
   prompt (`quick.absorb`); an undo lets them come back.
@@ -495,6 +525,10 @@ status lines.
   the summary shape.
 - `GET /api/cycles/<cycle id>` returns one full cycle record: every signal,
   every practice line, every example, all losses and checks.
+- `GET /api/nights/<night id>` includes `record.training_settings` for new
+  runs. It captures the resolved training policy and each setting's source at
+  cycle start. Resumed slices retain this snapshot and record their adaptive
+  sizing in `record.slice_sizes`.
 
 ```jsonc
 // ModelLearning
@@ -699,6 +733,12 @@ most a one-line label on an example.
   whether the set is precise enough to be the reference). Until both hold,
   the general anchors stay the "not broken" reference, as today. The check
   records which one gated and why (`drift_checks` in the cycle record).
+  Beside the mean drift, `gate_values` keeps for each version what that mean
+  does not show, on the set that gated: `base_entropy` and `entropy`
+  (nats/token, the base's and the version's), `entropy_change` (relative)
+  and `agreement` (the share of tokens where both prefer the same one), from
+  the same logits as the KL. Recorded only: they gate nothing. `None` where
+  not measured (the first Dream's incumbent is the base itself).
 
 - Under Dreams, "did it get better?" is judged on what each version writes
   (`sleep/judged.py`), not on the KL to the teacher along the original
@@ -709,7 +749,9 @@ most a one-line label on an example.
   the version in use and the candidate answer deterministically (384 tokens);
   the same action is a tie; a different one goes to the original base model
   (blind A/B: request, the user's feedback or the lesson, both answers):
-  win, loss or tie, with a clear teacher preference breaking "both/neither".
+  win, loss or tie. "Both", "neither", a pick that changes with the order
+  or a reply that cannot be read is a tie; the teacher's preference, which
+  training fits, never breaks it.
   Each moment is one unit (win +1, loss −1, tie 0), resampled per moment
   (user decision: per conversation, 5 units left the lower bound at 0); at
   least `min_heldout` conversations must be present. Adopt only if wins >

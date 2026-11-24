@@ -947,3 +947,51 @@ def test_measuring_text_follows_the_teacher_once_the_window_is_covered():
     assert measuring_tokens(done) == (6833, 6833, False)
     first = {"measured_sequence": 256, "target_sequence": 2048}
     assert measurement_text(first) == "measuring training size · 256 of ~2048 tokens"
+
+
+def test_measuring_covers_the_practice_scenes_a_dream_trains_on(config, store):
+    """Live (RTX 5090, a chat client without tools): measuring read only the
+    recorded conversations (teacher up to 219 tokens). The practice scenes a
+    Deep Dream trains on needed 278 to 305, so every slice deferred all of
+    them and the Dream never finished."""
+    import json
+
+    from songe.sleep.calibration_state import (
+        revisions_key,
+        sample_revisions,
+        smallest_pending,
+    )
+
+    store.sync_steps([step(200, 1)])
+    with store.connect() as db:
+        for i in range(3):
+            row = {
+                "id": f"sig{i}#v1",
+                "signal_id": f"sig{i}",
+                "messages": [
+                    {"role": "system", "content": "s" * 400},
+                    {"role": "user", "content": f"scene {i}"},
+                ],
+                "tools": [],
+                "teacher_note": "Note from an earlier, different task.",
+            }
+            db.execute(
+                'INSERT INTO practice(id,model_id,signal_id,payload,kept,"drop",created)'
+                " VALUES (?,?,?,?,1,NULL,0)",
+                (row["id"], store.model_id, row["signal_id"], json.dumps(row)),
+            )
+    # Real steps only where real steps are trained on.
+    assert [s["id"] for s in measure_pool(config, store, Tokenizer())[0]] == ["sample-1"]
+    # Under dreams, before any training slice has marked the store.
+    dreams = replace(config, learning="dreams")
+    samples, _, key = measure_pool(dreams, store, Tokenizer())
+    lengths = {s["id"]: s["teacher_sequence"] for s in samples}
+    assert set(lengths) == {"sample-1"} | {f"practice:sig{i}#v1" for i in range(3)}
+    assert lengths["practice:sig0#v1"] == 38 + 400 + dreams.response_tokens
+    assert lengths["practice:sig0#v1"] > lengths["sample-1"]
+    # The check that runs on every refresh counts the same pool without
+    # decoding it; a different key would ask for measuring again, for ever.
+    assert key == revisions_key(sample_revisions(store, dreams))
+    # The scheduler can now see that nothing pending fits a small slice,
+    # instead of loading the model to find out.
+    assert smallest_pending(dreams, {"samples": samples}, store) == 566

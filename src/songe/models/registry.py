@@ -76,13 +76,20 @@ def find(store, model):
 
 
 def model_config(config, store, model):
+    return model_config_with_keys(config, store, model)[0]
+
+
+def model_config_with_keys(config, store, model):
+    """Resolve the model config and report which saved keys were used or ignored."""
     row = find(store, model)
     if row is None:
         raise ValueError(f"Unknown model: {model}")
-    return replace(
-        config,
-        **{k: v for k, v in row["config"].items() if k in MODEL_FIELDS},
-        model_key=row["id"],
+    saved = row["config"]
+    overrides = {key: value for key, value in saved.items() if key in MODEL_FIELDS}
+    return (
+        replace(config, **overrides, model_key=row["id"]),
+        frozenset(overrides),
+        saved.keys() - MODEL_FIELDS,
     )
 
 

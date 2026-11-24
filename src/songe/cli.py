@@ -77,7 +77,14 @@ def parser():
     undo = commands.add_parser("undo", help="Return a model to its previous version")
     undo.add_argument("model", nargs="?")
     undo.add_argument("--version")
-    commands.add_parser("status", help="What Songe is doing")
+    current_status = commands.add_parser("status", help="What Songe is doing")
+    current_status.add_argument(
+        "--training",
+        nargs="?",
+        const="",
+        metavar="MODEL",
+        help="Show the resolved training settings for a model (default: primary model)",
+    )
     models = commands.add_parser(
         "models", help="List models · auto-dream on|off"
     )
@@ -911,6 +918,9 @@ def main(argv=None):
     args = parser().parse_args(argv)
     root = args.data_dir.expanduser().resolve()
     try:
+        if args.command == "status" and args.training is not None:
+            print_training_status(root, args.training)
+            return 0
         config = Config.load(root)
         command = args.command
         local = LocalClient(root, config)
@@ -1155,6 +1165,33 @@ def print_models(models, *, data=None):
 
 def print_status(data):
     status(data)
+
+
+def print_training_status(root, model):
+    from .api import ReadOnlyStore
+    from .config import training_setting_sources, training_settings_snapshot
+    from .models.registry import entries, model_config_with_keys
+    from .terminal import training_settings
+
+    config, installation_keys = Config.load_with_keys(root)
+    store = ReadOnlyStore(root)
+    registered = [row["id"] for row in entries(store)]
+    model_keys, ignored = (), ()
+    if registered:
+        primary = store.get("primary_model")
+        model = model or (primary if primary in registered else registered[0])
+        config, model_keys, ignored = model_config_with_keys(config, store, model)
+    elif model:
+        raise ValueError(f"Unknown model: {model}")
+
+    settings = training_settings_snapshot(
+        config, training_setting_sources(installation_keys, model_keys)
+    )
+    training_settings(
+        config.public_model if config.model_key or config.model else None,
+        ((key, setting["value"], setting["source"]) for key, setting in settings.items()),
+        ignored,
+    )
 
 
 def measured_hardware():

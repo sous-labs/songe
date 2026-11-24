@@ -253,6 +253,19 @@ def edits(before, after, prefix=()):
     return result
 
 
+def new_backup(root, manifest):
+    """A backup file no manifest entry uses and nothing occupies. Numbering by
+    the manifest's size reused a kept entry's backup after a restore with a
+    conflict, overwriting that agent's original configuration."""
+    used = {Path(e["backup"]).name for e in manifest.values() if e.get("backup")}
+    number = len(manifest)
+    while (
+        f"{number}.json" in used or (root / "backups" / f"{number}.json").exists()
+    ):
+        number += 1
+    return root / "backups" / f"{number}.json"
+
+
 def apply(changes, root):
     # Validate the entire reviewed proposal before touching any agent file.
     for path, original, *_ in changes:
@@ -265,7 +278,7 @@ def apply(changes, root):
         new = json.loads(result)
         entry = manifest.get(str(path))
         if entry is None:
-            backup = root / "backups" / f"{len(manifest)}.json"
+            backup = new_backup(root, manifest)
             if original is not None:
                 atomic_write(backup, original)
             entry = {

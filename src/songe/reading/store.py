@@ -188,9 +188,16 @@ def signals(store, *, types=None):
 
 
 def save(store, session, revision, found, items):
-    """Replace this learner's signals for one session."""
+    """Replace this learner's signals for one session. A signal retired before
+    (a newer preference replaced it) stays retired."""
     exchange_of = {it["step"]: it.get("exchange") for it in items if it["kind"] == "action"}
     with store.connect() as db:
+        retired = dict(
+            db.execute(
+                "SELECT id, retired_at FROM signals WHERE model_id=? AND session=? AND retired_at IS NOT NULL",
+                (store.model_id, session),
+            ).fetchall()
+        )
         db.execute(
             "DELETE FROM signals WHERE model_id=? AND session=?",
             (store.model_id, session),
@@ -203,8 +210,8 @@ def save(store, session, revision, found, items):
             s["revision"] = revision
             s["id"] = digest([session, s["type"], s.get("item"), s.get("text")])
             db.execute(
-                "INSERT OR REPLACE INTO signals(id,model_id,session,revision,payload) VALUES (?,?,?,?,?)",
-                (s["id"], store.model_id, session, revision, json.dumps(s, ensure_ascii=False)),
+                "INSERT OR REPLACE INTO signals(id,model_id,session,revision,payload,retired_at) VALUES (?,?,?,?,?,?)",
+                (s["id"], store.model_id, session, revision, json.dumps(s, ensure_ascii=False), retired.get(s["id"])),
             )
         db.execute(
             "INSERT OR REPLACE INTO read_sessions VALUES (?,?,?,?)",
@@ -214,6 +221,94 @@ def save(store, session, revision, found, items):
         db.execute(
             "DELETE FROM practice WHERE model_id=? AND signal_id NOT IN "
             "(SELECT id FROM signals WHERE model_id=?)",
+            (store.model_id, store.model_id),
+        )
+
+
+# How many earlier preferences one question shows (the most recent ones).
+SHOWN = 40
+
+
+def said_at(signal):
+    """When in the user's history a signal's sentence was said: the newest
+    exchange it points at (its session's revision when it points at none),
+    then its place in the session."""
+    return (max((signal.get("exchanges") or {}).values(), default=signal.get("revision") or 0), signal.get("item") or 0)
+
+
+async def retire_replaced(store, reader):
+    """People change: "I prefer window seats." and, weeks later, "I've switched
+    to aisle seats." cannot both be notes. Each preference the user stated
+    about themself is shown to the model with the ones stated before it (which
+    of them does it replace?), each one named is shown again on its own with
+    the new sentence (can both be true now?), and those that cannot are
+    retired: reading, the prompt and practice no longer see them. Returns how
+    many were retired.
+
+    Every preference is gone through each time, oldest first. The list a
+    sentence is shown with only changes when an earlier conversation is read
+    after it (a backlog is read newest first), so all other questions are
+    answered from the reader's cache: one new question for each new sentence."""
+    from . import prompts as P
+
+    def load():
+        with store.connect() as db:
+            return db.execute(
+                "SELECT id, retired_at, payload FROM signals WHERE model_id=?", (store.model_id,)
+            ).fetchall()
+
+    said = [dict(json.loads(payload), id=sid, retired=at is not None) for sid, at, payload in await asyncio.to_thread(load)]
+    said = sorted((s for s in said if s.get("preference")), key=said_at)
+    gone = []
+    try:
+        for place, signal in enumerate(said):
+            earlier = {}  # sentence: its signals
+            for s in said[:place]:
+                if s["preference"] != signal["preference"]:
+                    earlier.setdefault(s["preference"], []).append(s)
+            earlier = dict(list(earlier.items())[-SHOWN:])
+            if signal["retired"] or not earlier:
+                continue
+            answer = await reader.ask(
+                P.REPLACES.format(
+                    notes="\n".join(f"{n}. {text}" for n, text in enumerate(earlier, 1)), sentence=signal["preference"]
+                ),
+                P.REPLACES_SCHEMA,
+                "replaces",
+            )
+            named = answer.get("replaces") if isinstance(answer, dict) else None
+            for n in dict.fromkeys(named if isinstance(named, list) else []):
+                if not (isinstance(n, int) and not isinstance(n, bool) and 1 <= n <= len(earlier)):
+                    continue
+                old, signals = list(earlier.items())[n - 1]
+                if all(s["retired"] for s in signals):
+                    continue
+                sure = await reader.ask(
+                    P.BOTH_TRUE.format(old=old, new=signal["preference"]), P.BOTH_TRUE_SCHEMA, "both_true"
+                )
+                if isinstance(sure, dict) and sure.get("kind") == "later_only":
+                    for s in signals:
+                        if not s["retired"]:
+                            s["retired"] = True
+                            gone.append(s["id"])
+    except Stopped:
+        pass  # the user is back: the rest is asked next time
+    if gone:
+        await asyncio.to_thread(retire, store, gone)
+    return len(gone)
+
+
+def retire(store, ids):
+    """Retire signals a newer preference replaced. Their rows stay, so a
+    session that is read again does not bring them back."""
+    with store.connect() as db:
+        for sid in ids:
+            db.execute(
+                "UPDATE signals SET retired_at=? WHERE model_id=? AND id=?", (time.time(), store.model_id, sid)
+            )
+        db.execute(
+            "DELETE FROM practice WHERE model_id=? AND signal_id IN "
+            "(SELECT id FROM signals WHERE model_id=? AND retired_at IS NOT NULL)",
             (store.model_id, store.model_id),
         )
 
@@ -233,7 +328,7 @@ async def read(store, reader, *, limit=None, on_session=None, newest=False, seco
     starting new sessions after this long (the rest is read later)."""
     import time
 
-    done, started = 0, time.monotonic()
+    done, started, stopped = 0, time.monotonic(), False
     found = await asyncio.to_thread(pending, store)
     if newest:
         found = found[::-1]
@@ -247,6 +342,7 @@ async def read(store, reader, *, limit=None, on_session=None, newest=False, seco
         try:
             found = await read_session(session, items, rows, reader)
         except Stopped:
+            stopped = True
             break
         if getattr(reader, "errors", 0) > errors:
             # Some of the model's answers could not be read: the session stays
@@ -259,4 +355,6 @@ async def read(store, reader, *, limit=None, on_session=None, newest=False, seco
         done += 1
         if on_session:
             on_session(session, found)
+    if not stopped:
+        await retire_replaced(store, reader)
     return done

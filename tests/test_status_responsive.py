@@ -68,7 +68,7 @@ def test_needs_growth_never_decodes_recorded_steps(tmp_path, monkeypatch):
 
     monkeypatch.setattr(Store, "active_steps", decode)
     monkeypatch.setattr(Store, "pool", decode)
-    monkeypatch.setattr(calibration_state, "pending_keys", lambda store: set())
+    monkeypatch.setattr(calibration_state, "pending_keys", lambda store, config=None: set())
     assert calibration_state._needs_growth(config, store) is False
     # A new revision still asks for measuring again.
     monkeypatch.undo()

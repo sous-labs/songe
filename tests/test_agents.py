@@ -1,5 +1,6 @@
 import json
 import plistlib
+from pathlib import Path
 
 from songe import agents, launchd
 from songe.agents.opencode import configure
@@ -305,3 +306,32 @@ def test_init_plan_says_an_installed_agent_needs_one_start(config, monkeypatch):
     assert cli.missing_agents(config) == [
         ("Agent", "pi not set up yet · start it once, then run songe init again")
     ]
+
+
+def test_a_new_backup_never_overwrites_a_kept_one(tmp_path):
+    # After a restore that keeps one entry (a conflict), the manifest is
+    # smaller than the backups folder: numbering by its size reused the kept
+    # entry's backup and lost that agent's original configuration.
+    root = tmp_path / "songe"
+    (root / "backups").mkdir(parents=True)
+    kept = root / "backups" / "1.json"
+    kept.write_bytes(b'{"original": "pi"}')
+    (root / "agent-backups.json").write_text(
+        json.dumps(
+            {
+                str(tmp_path / "pi.json"): {
+                    "backup": str(kept),
+                    "written": "{}",
+                    "edits": [],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    path = tmp_path / "opencode.json"
+    original = b'{"original": "opencode"}'
+    path.write_bytes(original)
+    agents.apply([(path, original, b'{"model": "songe/x"}', "")], root)
+    assert kept.read_bytes() == b'{"original": "pi"}'
+    manifest = json.loads((root / "agent-backups.json").read_text(encoding="utf-8"))
+    assert Path(manifest[str(path)]["backup"]).read_bytes() == original

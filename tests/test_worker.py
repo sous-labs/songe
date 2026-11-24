@@ -108,7 +108,7 @@ class Backend:
 
 
 @pytest.mark.parametrize("phase", ["training", "evaluation", "battery"])
-@pytest.mark.parametrize("upstream", ["mlx", "lmstudio"])
+@pytest.mark.parametrize("upstream", ["mlx", "lmstudio", "llamacpp"])
 @pytest.mark.parametrize("rebuild", [False, True])
 def test_pipeline_resumes_units_and_continues_current_adapter_with_frozen_teacher(
     tmp_path, config, store, monkeypatch, phase, upstream, rebuild
@@ -208,13 +208,48 @@ def test_pipeline_resumes_units_and_continues_current_adapter_with_frozen_teache
         checkpoint = store.root / "versions/night-1/fake-checkpoint.json"
         assert json.loads(checkpoint.read_text(encoding="utf-8"))["iteration"] == 1
         battery_low = False
+    if upstream == "llamacpp":
+        monkeypatch.setattr(
+            fuse, "export_candidate", lambda *args: pytest.fail("export during evaluation")
+        )
+        passed = worker.run(config, store, slice_seconds=60)
+        assert passed["accepted"]
+        assert store.nights()[0]["status"] == "interrupted"
+        assert store.nights()[0]["phase"] == "fuse"
+        assert store.get("current") == "previous"
+        comparisons = Backend.comparisons
+        eval_events = [e for e in store.events() if e["stage"] == "eval"]
+        monkeypatch.setattr(
+            worker, "choose", lambda *args: pytest.fail("reopened the evaluation model")
+        )
+
+        def export(config, kind, adapter, destination, platform, check):
+            check()
+            assert kind == "gguf-lora"
+            assert adapter.name == f"scale-{passed['wake_scale']}-adapter"
+            if not export.attempted:
+                export.attempted = True
+                raise MemoryError("conversion did not fit")
+            destination.write_bytes(b"GGUF")
+            return destination
+
+        export.attempted = False
+        monkeypatch.setattr(fuse, "export_candidate", export)
+        with pytest.raises(MemoryError, match="conversion did not fit"):
+            worker.run(config, store, slice_seconds=60)
+        assert store.nights()[0]["status"] == "interrupted"
+        assert store.get("current") == "previous"
     result = worker.run(config, store, slice_seconds=60)
     assert result["accepted"] and result["wake_scale"] == (
         0.5 if upstream == "lmstudio" and not rebuild else 1
     )
-    assert result["candidate"]["adapter"].endswith(
+    assert Path(result["candidate"]["training_adapter"]).name == (
         f"scale-{result['wake_scale']}-adapter"
     )
+    if upstream == "llamacpp":
+        assert Path(result["candidate"]["adapter"]).read_bytes() == b"GGUF"
+        assert Backend.comparisons == comparisons
+        assert [e for e in store.events() if e["stage"] == "eval"] == eval_events
     assert store.nights()[0]["id"] == first_night
     assert store.nights()[0]["status"] == "ready"
     assert Backend.trained_units == [1, 2]
@@ -223,7 +258,7 @@ def test_pipeline_resumes_units_and_continues_current_adapter_with_frozen_teache
     )
     assert len(Backend.scored) == len(set(Backend.scored))
     assert store.get("current") == "previous"  # publication belongs to scheduler
-    assert len(store.slices()) == 2
+    assert len(store.slices()) == (4 if upstream == "llamacpp" else 2)
     assert all(s["ended"] is not None for s in store.slices())
     assert store.slices()[0]["interrupted_by"]
     assert store.slices()[1]["units_done"] > 0

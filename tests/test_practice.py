@@ -6,7 +6,7 @@ import copy
 import json
 
 from songe.practice import store as practice
-from songe.practice.checks import placebo_for
+from songe.practice.checks import STOCK_LESSONS, placebo_for
 from songe.reading import store as reading
 from songe.reading import timeline
 from tests.test_reading import SCENE, FakeReader, args, record_session
@@ -27,6 +27,7 @@ class Writer(FakeReader):
             return copy.deepcopy(self.scene)
         if name == "matters":
             self.asked.append(name)
+            self.prompts.append(prompt)
             real = prompt.split("A: ", 1)[1].startswith("Check which file")
             return {"why": "w", "answer": self.pick or ("A" if real else "B")}
         return await super().ask(prompt, schema, name)
@@ -56,8 +57,9 @@ def test_a_scene_is_framed_on_the_logged_request_and_kept(store):
     # The prompt carries the lesson and a short summary, never the session.
     assert "Check which file the failing test covers" in writer.prompts[0]
     assert "fix the failing test" not in writer.prompts[0]
-    # One session only: no lesson from elsewhere to compare with.
-    assert row["checks"]["matters"] is None
+    # One session only: the forced choice still runs, against a stock lesson.
+    assert writer.asked == ["dream", "matters"] and row["checks"]["matters"] is True
+    assert any(f": {text}\n" in writer.prompts[1] for text in STOCK_LESSONS)
 
 
 def test_scenes_that_fail_a_check_are_dropped_with_its_code(store):
@@ -102,12 +104,30 @@ def test_a_repeated_lesson_from_another_session_cannot_be_its_own_placebo(store)
             ("s2", json.dumps(duplicate)),
         )
 
-    writer = Writer(pick="neither")
+    writer = Writer()
     asyncio.run(practice.write(store, writer, 1))
 
     (row,) = practice.practice(store)
-    assert writer.asked == ["dream"]
-    assert row["checks"]["matters"] is None and row["drop"] is None
+    assert writer.asked == ["dream", "matters"]
+    assert writer.prompts[1].count(original["lesson"]) == 1
+    assert row["checks"]["matters"] is True and row["drop"] is None
+
+
+def test_a_first_session_scene_about_something_else_is_dropped(store):
+    # With one session there is no other lesson to compare with; the scene
+    # used to be kept unchecked (matters stayed None, and None is not a drop).
+    row = written(store, pick="neither")[0][0]
+    assert row["checks"]["matters"] is False and row["drop"] == "matters"
+    assert row["why"]["matters_answer"] == "neither"
+
+
+def test_placebo_falls_back_to_a_stock_lesson_other_than_the_real_one():
+    for real in ("Use uv for tests.", *STOCK_LESSONS):
+        signal = {"session": "s1", "lesson": f" {real} "}
+        for scene in ("a", "b", "c", "d", "e", "f"):
+            # A lesson of the same session is not a placebo.
+            placebo, _ = placebo_for(scene, signal, [("s1", "Run ruff first.")])
+            assert placebo in STOCK_LESSONS and placebo != real
 
 
 def test_placebo_selection_uses_a_distinct_lesson_when_available():
@@ -139,3 +159,84 @@ def test_forget_deletes_practice(store):
     store.forget()
     with store.connect() as db:
         assert db.execute("SELECT COUNT(*) FROM practice").fetchone()[0] == 0
+
+
+def test_not_copy_catches_non_latin_verbatim_requests():
+    from songe.practice import checks
+
+    ar_req = "أصلح دالة حساب الضريبة في ملف الفواتير للعميل السري"
+    ar_ev = checks.copy_evidence({"request": ar_req}, {}, [ar_req], [])
+    assert ar_ev and ar_ev[0].startswith("request overlap")
+
+    zh_req = "修复客户发票文件中的税率计算函数"
+    zh_ev = checks.copy_evidence({"request": zh_req}, {}, [zh_req], [])
+    assert zh_ev and zh_ev[0].startswith("request overlap")
+
+    # Different Arabic request should not trigger copy overlap.
+    ar_other = "أنشئ جدول بيانات جديد لإدارة المخزون الشهري"
+    assert checks.copy_evidence({"request": ar_other}, {}, [ar_req], []) == []
+
+
+def test_not_copy_ignores_definition_keywords_in_prose():
+    from songe.practice import checks
+
+    # Tool output in English: "function the", "class is" are not definitions.
+    code = ["Done: the function the agent called is fine; this class is the base."]
+    scene = {"request": "add the missing check to the parser"}
+    assert checks.copy_evidence(scene, {}, ["fix it"], code) == []
+
+
+def test_not_copy_still_catches_copied_definitions():
+    from songe.practice import checks
+
+    code = [
+        "def compute_vat(amount):\n    return amount * 0.2\n",
+        "function renderInvoice(rows) {",
+        "class InvoiceStore extends Base {",
+        "fn parse_line(s: &str) -> Line {",
+        "struct LineItem {",
+        "class Ledger:",
+    ]
+    assert checks.identifiers(code) == {
+        "compute_vat",
+        "renderInvoice",
+        "InvoiceStore",
+        "parse_line",
+        "LineItem",
+        "Ledger",
+    }
+    files = {"vat.py": "def compute_vat(total):\n    return total\n"}
+    assert checks.copy_evidence({"request": "x"}, files, ["y"], code) == ["compute_vat"]
+
+
+def test_a_chat_without_tools_or_system_message_gives_a_plain_scene():
+    """#136: a plain chat client sends no tools and no system message. The
+    user's question is not made a system message, and the scene writer is
+    told the agent has no tools, so it writes a conversation, not tool steps."""
+    from songe.practice import prompts
+    from songe.practice.frame import build, frame_from_request
+
+    request = {"messages": [{"role": "user", "content": "What is the capital of Australia?"}]}
+    frame = frame_from_request(request, "trip-notes")
+    assert frame["system"] == "" and frame["tools"] == []
+    scene = {
+        "moment": {"kind": "user_message", "step": {}, "agent_said": "Canberra.",
+                   "user_message": "And when was it founded?"},
+        "request": "What is the capital of Australia?", "files": [], "steps": [],
+    }
+    messages, problems, _ = build(scene, frame)
+    assert problems == []
+    assert [m["role"] for m in messages] == ["user", "assistant", "user"]
+    # The checks read the user's first message too (they skipped messages[0]).
+    from songe.practice.checks import render_text
+
+    assert render_text(messages).startswith("USER: What is the capital of Australia?")
+    # The scene writer is told there are no tools; an agent with tools is not.
+    assert prompts.tools_section(None, []) == prompts.NO_TOOLS
+    assert "no tools" in prompts.NO_TOOLS and "user_message" in prompts.NO_TOOLS
+    tools = [{"type": "function", "function": {"name": "read", "parameters": {"properties": {"path": {}}}}}]
+    shown = prompts.tools_section(tools, tools)
+    assert shown.startswith("The agent's tools") and "- read(path)" in shown
+    # A logged system prompt is still the frame's.
+    framed = frame_from_request({"messages": [{"role": "system", "content": "Be brief."}] + request["messages"]}, "x")
+    assert build(scene, framed)[0][0] == {"role": "system", "content": "Be brief."}

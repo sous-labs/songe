@@ -362,9 +362,33 @@ def swap_space(platform, *, running=False):
     return f"Needs {required / 1e9:.1f} GB free on {name}; {free / 1e9:.1f} GB available"
 
 
-def admit_storage(config, store, platform, *, calibration=False):
+def mlx_gguf_lora_bytes(adapter):
+    from ..upstream.protection import weight_bytes
+
+    # The PEFT copy keeps the saved tensor dtypes. Allow the GGUF to use up
+    # to twice that space for tensors stored as float32.
+    return 3 * weight_bytes(adapter)
+
+
+def export_requirements(config, store, candidate):
+    target = artifact_root(config, store, create=False)
+    destination = Path(candidate["artifact"])
+    require_publish_volume(target, destination)
+    # An already-published file needs no staging space. The exporter checks
+    # ownership before it can reuse the file.
+    if destination.exists():
+        return []
+    return [(target, mlx_gguf_lora_bytes(candidate["training_adapter"]))]
+
+
+def admit_storage(config, store, platform, *, calibration=False, pending_export=None):
     try:
-        preflight(phase_requirements(config, store, platform, calibration=calibration))
+        requirements = (
+            export_requirements(config, store, pending_export)
+            if pending_export is not None
+            else phase_requirements(config, store, platform, calibration=calibration)
+        )
+        preflight(requirements)
         if wait := swap_space(platform):
             raise StorageWait(wait)
     except StorageWait as exc:

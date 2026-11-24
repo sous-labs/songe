@@ -326,6 +326,41 @@ def interval(values_by_cluster, confidence, bootstraps=2000):
     return draws[tail], draws[bootstraps - 1 - tail]
 
 
+def drift_between(base, candidate, r, shapes, views=None):
+    """The candidate's KL to the base on a prompt the base answered, and in
+    shapes (beside it, one entry per prompt) what that mean hides: the base's
+    and the candidate's entropy, and how often they agree on the most likely
+    token. None for a backend that only measures the KL."""
+    measure = getattr(candidate, "measure", None)
+    if measure is None:
+        shapes.append(None)
+        return kl_between(base, candidate, r["prompt"], r["prompt"], r["y"], views=views)
+    m = measure(base, r["prompt"], r["prompt"], r["y"], **({} if views is None else {"views": views}))
+    shapes.append([m["reference_entropy"], m["entropy"], m["agreement"]])
+    return m["kl"]
+
+
+def sharpness(checkpoint):
+    """How the candidate's distributions compare with the base's on the
+    "not broken" set that gated (the drift set, else the general prompts):
+    mean entropy of each in nats/token, the relative change, and the share of
+    tokens where both prefer the same one. A model can grow overconfident
+    (entropy falls) with its preferred tokens unchanged, which keeps the mean
+    KL small; this shows it. Recorded only: it gates nothing."""
+    source = (checkpoint.get("drift_check") or {}).get("source", "general")
+    shapes = [s for s in checkpoint.get(
+        "drift_set_shapes" if source == "drift" else "drifts_shapes") or [] if s]
+    if not shapes:
+        return {"base_entropy": None, "entropy": None, "entropy_change": None, "agreement": None}
+    base, own = mean(s[0] for s in shapes), mean(s[1] for s in shapes)
+    return {
+        "base_entropy": base,
+        "entropy": own,
+        "entropy_change": (own - base) / base if base > 0 else None,
+        "agreement": mean(s[2] for s in shapes),
+    }
+
+
 def drift_choice(general, drift_values, drift_refs, config):
     """Which "not broken" measure gates (docs/CONTRACTS.md, Integration
     decisions): the drift set once it has min_drift conversations and its
@@ -408,19 +443,37 @@ def evaluate(
     rows=False: only the "not broken" measure; returns its value (a later
     call with the same checkpoint goes on to the held-out rows)."""
     checkpoint = {} if checkpoint is None else checkpoint
+
+    def kept_drift(kind, r, into):
+        """The drift KL at r, its shape appended to into; both kept for the
+        incumbent (kept_as) like its other measurements."""
+        def measure():
+            shape = []
+            return [drift_between(base, candidate, r, shape, views), shape[0]]
+
+        value, shape = kept(kept_as, kind, r, measure)
+        into.append(shape)
+        return value
+
     # The drift set first: the same measure on real contexts where the base
     # was right (confirmed successes). Never trained on. When it can decide
     # (drift_choice), the bundled prompts are not needed and not measured.
     drift_set = checkpoint.setdefault("drift_set", [])
+    # One entry beside each KL (None where it was not measured, as in a
+    # check begun before these were kept).
+    set_shapes = checkpoint.setdefault("drift_set_shapes", [])
+    set_shapes.extend([None] * (len(drift_set) - len(set_shapes)))
     for r in list(drift_refs)[len(drift_set) :]:
         if identical:
             drift_set.append(0.0)
+            set_shapes.append(None)
             continue
         getattr(candidate, "boundary", candidate.check)()
-        drift_set.append(kept(kept_as, "drift", r, lambda r=r: kl_between(
-            base, candidate, r["prompt"], r["prompt"], r["y"], views=views)))
+        drift_set.append(kept_drift("drift", r, set_shapes))
         commit()
     drifts = checkpoint.setdefault("drifts", [])
+    shapes = checkpoint.setdefault("drifts_shapes", [])
+    shapes.extend([None] * (len(drifts) - len(shapes)))
     _, decided = drift_choice(None, drift_set, list(drift_refs), candidate.config)
     if decided["source"] != "drift":
         # The bundled prompts, with the same samples for every version: a
@@ -430,10 +483,10 @@ def evaluate(
         for r in general_refs[len(drifts) :]:
             if identical:
                 drifts.append(0.0)
+                shapes.append(None)
                 continue
             getattr(candidate, "boundary", candidate.check)()
-            drifts.append(kept(kept_as, "general", r, lambda r=r: kl_between(
-                base, candidate, r["prompt"], r["prompt"], r["y"], views=views)))
+            drifts.append(kept_drift("general", r, shapes))
             commit()
     commit()
     drift, checkpoint["drift_check"] = drift_choice(

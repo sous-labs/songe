@@ -196,6 +196,12 @@ def test_gate_skips_bundled_prompts_when_the_drift_set_decides(config):
     assert evaluate(candidate, candidate, [], general, drift_refs=drift_refs, checkpoint=cache) == []
     assert calls == [f"d{i}" for i in range(12)]  # bundled prompts skipped
     assert cache["drift_check"]["source"] == "drift" and cache["drifts"] == []
+    # This backend measures the KL only: nothing is kept beside it.
+    from songe.sleep.evaluate import sharpness
+
+    assert cache["drift_set_shapes"] == [None] * 12
+    assert sharpness(cache) == {"base_entropy": None, "entropy": None, "entropy_change": None, "agreement": None}
+
     # Too few successes: the bundled prompts gate, and are measured.
     calls.clear()
     cache = {}
@@ -238,6 +244,44 @@ class Answering(Model):
 
     def compare(self, student, teacher, y, kind="forward_kl"):
         return 0.1 if y == [2] else 0.3
+
+def test_the_check_keeps_entropy_and_agreement_beside_the_drift():
+    """What a mean KL hides is kept for the set that gated; it gates nothing."""
+    from types import SimpleNamespace
+
+    from songe.sleep.evaluate import evaluate, sharpness
+
+    class Fake:
+        config = SimpleNamespace(min_drift=10, gate_confidence=0.95, general_drift_limit=0.05)
+        measured = []
+
+        def check(self):
+            pass
+
+        def measure(self, base, prompt, teacher, y, *, hindsight=False):
+            self.measured.append(prompt)
+            # The base's entropy, this version's (a fifth lower), agreement.
+            return {"kl": 0.01, "reference_entropy": 2.0, "entropy": 1.6, "agreement": 0.9}
+
+    candidate = Fake()
+    drift_refs = [{"conversation": f"c{i}", "prompt": f"d{i}", "y": []} for i in range(3)]
+    general = [{"prompt": f"g{i}", "y": []} for i in range(4)]
+    # Resumed: the first drift prompt was measured before these were kept.
+    cache = {"drift_set": [0.01]}
+    evaluate(candidate, candidate, [], general, drift_refs=drift_refs, checkpoint=cache)
+    assert candidate.measured == ["d1", "d2", "g0", "g1", "g2", "g3"]
+    assert cache["drift_set"] == [0.01] * 3 and cache["drifts"] == [0.01] * 4
+    assert cache["drift_set_shapes"] == [None, [2.0, 1.6, 0.9], [2.0, 1.6, 0.9]]
+    assert cache["drifts_shapes"] == [[2.0, 1.6, 0.9]] * 4
+    # Three conversations cannot gate yet: the general prompts did, so theirs.
+    assert cache["drift_check"]["source"] == "general"
+    assert sharpness(cache) == {"base_entropy": 2.0, "entropy": 1.6,
+                                "entropy_change": pytest.approx(-0.2), "agreement": 0.9}
+    # The first Dream's incumbent is the base itself: not measured.
+    cache = {}
+    evaluate(candidate, candidate, [], general, drift_refs=drift_refs, checkpoint=cache, identical=True)
+    assert cache["drifts_shapes"] == [None] * 4 and sharpness(cache)["entropy"] is None
+
 
 
 def add_lesson_signal(store, signal_id, source):
@@ -541,11 +585,15 @@ def test_the_gate_judges_what_each_version_writes(monkeypatch):
     shown = judged.examples(steps, before, after, rows)
     assert [e["source"] for e in shown] == ["original", "original", "practice"]  # real conversations first
     assert shown[0]["feedback"] == "use pnpm here, never npm" and shown[2]["lesson"] == "Always use pnpm."
-    # The judge prefers the old answer: a loss. The same action: a tie, no judge asked.
-    verdicts["say"] = '{"follows": "both"}'
-    monkeypatch.setattr(judged, "teacher_logprob", lambda b, t, y: -1.0 if y == [1.0] else 0.0)
-    monkeypatch.setattr(judged, "plain_logprob", lambda b, s, y: -0.5)
-    assert judged.outcome(backend, steps[0], before["s0"], after["s0"]) == ("loss", "teacher")
+    # The judge does not decide: a tie, whatever it said. The teacher is not
+    # asked (this backend has none): its preference is what training fits.
+    for say, why in (('{"follows": "both"}', "both"), ('{"follows": "neither"}', "neither"),
+                     ("Let me think about the two answers", "unclear")):
+        verdicts["say"] = say
+        assert judged.outcome(backend, steps[0], before["s0"], after["s0"]) == ("tie", why)
+    rows = judged.judge(backend, Journal(), steps, before, after, "scale-1.0", lambda: None)
+    assert judged.summary(rows) == {"count": 0, "worse": 0, "same": 3, "checked": 3, "available": 3}
+    # The same action: a tie, no judge asked.
     assert judged.outcome(backend, steps[0], before["s0"], before["s0"]) == ("tie", "same")
 
 
@@ -574,9 +622,6 @@ def test_near_identical_calls_tie_and_a_judge_that_always_picks_one_side_counts_
     read = lambda offset: {"text": "", "tool_calls": [{"name": "read", "arguments": {"path": "snake.py", "offset": offset}}]}  # noqa: E731
     assert not differs(read(20), read(21))
     monkeypatch.setattr(judged, "render", lambda tok, messages, tools, **kw: messages[0]["content"])
-    monkeypatch.setattr(judged, "paired_prompts", lambda tok, step, config: ([1], [2]))
-    monkeypatch.setattr(judged, "teacher_logprob", lambda b, t, y: 0.0)
-    monkeypatch.setattr(judged, "plain_logprob", lambda b, s, y: 0.0)
 
     class AlwaysA:
         tokenizer = config = None

@@ -348,6 +348,69 @@ def test_memory_sized_interruption_keeps_cycle_resumable(cycle, config, store):
     assert len(store.nights()) == 1
 
 
+def test_worker_saves_resolved_training_settings_at_cycle_start(
+    cycle, config, store, monkeypatch
+):
+    import sys
+
+    from songe import telemetry
+    from songe.config import TRAINING_KEYS
+    from songe.models import registry
+    from songe.steps import digest
+
+    backend, _ = cycle
+    config.learning_rate = 6e-5
+    config.save(store.root)
+    path = store.root / "config.toml"
+    installation = "".join(
+        line
+        for line in path.read_text(encoding="utf-8").splitlines(keepends=True)
+        if not line.startswith("vocab_clip = ")
+    )
+    path.write_text(installation, encoding="utf-8")
+    registry.register(config, store, "fixture", legacy=True)
+    registry.set_learning(store, "fixture", "all")
+    selected = Config.for_model(store.root, "fixture")
+    selected.accumulation = 2
+    selected.save(store.root)
+    monkeypatch.setattr(telemetry, "configure", lambda root: None)
+    sizing = {"max_sequence": 1024, "token_chunk": 32, "response_tokens": 128}
+    argv = ["worker", "--child", "--data-dir", str(store.root), "--model-key", "fixture"]
+    argv += ["--sizing", json.dumps(sizing)]
+    monkeypatch.setattr(sys, "argv", argv)
+    backend.interrupt_training = True
+
+    worker.main()
+
+    (night,) = store.nights()
+    assert night["status"] == "interrupted"
+    record = night["record"]
+    saved = record["training_settings"]
+    assert saved["learning_rate"] == {"value": 6e-5, "source": "installation"}
+    assert saved["accumulation"] == {"value": 2, "source": "per-model"}
+    assert saved["vocab_clip"] == {"value": Config().vocab_clip, "source": "default"}
+    assert saved["max_sequence"]["value"] == config.max_sequence
+    assert set(saved) == set(TRAINING_KEYS)
+    assert digest({key: item["value"] for key, item in saved.items()}) == record[
+        "configuration"
+    ]
+
+    # Same effective policy, different source and a smaller slice.
+    path.write_text(
+        f"vocab_clip = {Config().vocab_clip}\n" + installation, encoding="utf-8"
+    )
+    argv[-1] = json.dumps(sizing | {"max_sequence": 512})
+    worker.main()
+
+    (finished,) = store.nights()
+    assert finished["id"] == night["id"]
+    assert finished["status"] == "rejected"
+    assert finished["record"]["training_settings"] == saved
+    sizes = finished["record"]["slice_sizes"]
+    assert [size["max_sequence"] for size in sizes] == [1024, 512]
+    assert snapshot(selected, store)["nights"][0]["record"]["training_settings"] == saved
+
+
 def test_rescored_unlearnable_revision_leaves_selected_pool(store):
     original = steps(1)[0] | {"surprise": 1}
     store.add_pool([original])

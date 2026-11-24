@@ -254,6 +254,8 @@ class Session:
                 feedback=self.short(text[:1500]) + about,
                 reason=signal["reason"],
                 after=self.after_view(item),
+                # The user's own words can hold a wish to keep as they said it.
+                wish=P.USER_WISH if source == "user" else "",
             ),
             P.LESSON_SCHEMA,
             "lesson",
@@ -290,6 +292,29 @@ class Session:
                     "classify",
                 )
                 parts = [p for p in answer.get("parts") or [] if isinstance(p, dict)]
+                # What the turn is, judged on its own: a standing wish about
+                # how this user wants things, a change wanted once, new work,
+                # or a reaction. A standing wish the split above did not read
+                # as feedback ("i want in russian", read as a new task) is a
+                # correction all the same.
+                verdict, wish = ("task", "") if len(e["text"]) > P.TURN_CHARS else P.turn_verdict(
+                    await self.model.ask(
+                        P.TURN.format(
+                            earlier=self.short("\n".join(user_messages(items, e["item"]))),
+                            steps=self.short(step_lines(items, turn + 1, e["item"])),
+                            message=e["text"],
+                        ),
+                        P.TURN_SCHEMA,
+                        "turn",
+                    ),
+                    e["text"],
+                )
+                if verdict == "lasting" and not any(
+                    p.get("kind") == "feedback" and p.get("type") in P.TYPES for p in parts
+                ):
+                    parts = parts + [{"says_something_is_wrong": True, "kind": "feedback",
+                                      "type": "correction", "text": e["text"]}]
+                before = len(self.signals)
                 for p in parts:
                     # The yes/no is asked first; trust it over the type.
                     if (
@@ -307,6 +332,12 @@ class Session:
                             p.get("text") or e["text"],
                             f"as the user's message after step {e['after_step']}",
                         )
+                for signal in self.signals[before:]:
+                    signal["turn_kind"] = verdict  # quick.suitable reads it
+                    if wish:
+                        # The standing wish, as the turn question worded it,
+                        # is the lesson and the note.
+                        signal.update(lesson=wish, short=wish, generality="always")
                 if any(p.get("kind") == "new_task" for p in parts):
                     self.task_starts.append(e["item"])
                 e["classified"] = parts
@@ -345,7 +376,10 @@ class Session:
                     )
                 )
                 answer = await self.model.ask(
-                    P.REVIEW.format(task=self.task_text(e["item"]), steps=view),
+                    P.REVIEW.format(
+                        task=self.task_text(e["item"]), steps=view,
+                        **(P.REVIEW_COMMANDS if e.get("commands", True) else P.REVIEW_TOOLS),
+                    ),
                     P.REVIEW_SCHEMA,
                     "review",
                 )
@@ -391,6 +425,30 @@ class Session:
                         f"in the tool result of step {s.get('step')}",
                     )
         return self.signals
+
+
+async def stated_preferences(items, model):
+    """(item index, sentence) for each sentence the rules flag as a possible
+    preference of the user's own and the model judges to be one, in any user
+    message, the opening one included."""
+    from .rules import preference_sentences
+    from .timeline import clip
+
+    out, said = [], "(nothing: this is the first message)"
+    for i, it in enumerate(items):
+        if it.get("kind") == "action" and str(it.get("text") or "").strip():
+            said = clip(it["text"], 600)
+        if it.get("kind") != "user":
+            continue
+        for sentence in preference_sentences(it.get("content")):
+            answer = await model.ask(
+                P.PREFERENCE.format(before=said, message=clip(it["content"], 1200), sentence=sentence),
+                P.PREFERENCE_SCHEMA,
+                "preference",
+            )
+            if answer.get("kind") == "about_me":
+                out.append((i, sentence))
+    return out
 
 
 async def read_session(session, items, rows, model):
@@ -454,6 +512,48 @@ async def read_session(session, items, rows, model):
                 "item": item,
                 "text": sentence,
                 "from": "rules",
+                "lesson": sentence,
+                "short": sentence,
+                "generality": "always",
+                "evidence_steps": [about["step"]] if about and about.get("step") else [],
+                "placed": True,
+            }
+        )
+    # A preference the user states about themself ("I avoid dairy.") is kept in
+    # their words too, wherever it stands: the model's own lesson for such a
+    # message, if any, turned it into a procedure and lost what they named
+    # (live, Qwen3.5-4B: "Always check for user constraints before recommending
+    # content."), and an opening message is read by nobody else.
+    for item, sentence in await stated_preferences(items, model):
+        if sentence in have:
+            continue
+        have.add(sentence)
+        holder = next(
+            (
+                s
+                for s in found
+                if s.get("source") == "user" and s.get("item") == item and s.get("lesson")
+                and sentence in " ".join(str(s.get("text") or "").split())
+            ),
+            None,
+        )
+        if holder:
+            holder["preference"] = sentence  # its lesson stays for practice; the prompt gets the sentence
+            continue
+        # Practice and before/after start at the step the sentence is about;
+        # with nothing before it, at the answer it got.
+        about = reacted_action(items[:item], sentence) or next(
+            (it for it in items[item:] if it.get("kind") == "action" and it.get("exchange")), None
+        )
+        found.append(
+            {
+                "session": session,
+                "source": "user",
+                "type": "correction",
+                "item": item,
+                "text": sentence,
+                "from": "rules",
+                "preference": sentence,
                 "lesson": sentence,
                 "short": sentence,
                 "generality": "always",

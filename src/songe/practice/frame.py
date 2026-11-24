@@ -28,8 +28,10 @@ ROOT = "/tmp/work"  # used only when the logged prompt names no working director
 
 
 def frame_from_request(request, project):
-    """System prompt and tools of a logged request, moved to a new folder."""
-    system = request["messages"][0]["content"]
+    """System prompt and tools of a logged request, moved to a new folder.
+    A request without a system message (a plain chat client) gives none."""
+    first = (request.get("messages") or [{}])[0]
+    system = (first.get("content") or "") if first.get("role") == "system" else ""
     if not isinstance(system, str):
         system = "\n".join(p.get("text", "") for p in system if isinstance(p, dict))
     # A sibling of the real project folder, so paths look like the user's own.
@@ -240,8 +242,8 @@ def build(dream, frame):
     tools, problems = frame["tools"], []
     names = tool_names(tools)
     ws = Workspace(frame["workdir"], dream.get("files") or [])
-    messages = [{"role": "system", "content": frame["system"]},
-                {"role": "user", "content": dream.get("request") or ""}]
+    messages = [{"role": "system", "content": frame["system"]}] if frame["system"] else []
+    messages.append({"role": "user", "content": dream.get("request") or ""})
     if not (dream.get("request") or "").strip():
         problems.append("no user request")
     steps = list(dream.get("steps") or [])

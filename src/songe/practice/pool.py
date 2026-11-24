@@ -77,6 +77,18 @@ def practice_steps(store, split="train"):
     return steps
 
 
+def practice_revisions(store):
+    """{step id: revision} of every kept scene practice_steps returns (both
+    splits), read by SQLite: no scene is decoded."""
+    with store.connect() as db:
+        rows = db.execute(
+            "SELECT id, rowid FROM practice WHERE model_id=? AND kept=1"
+            " AND COALESCE(json_array_length(payload,'$.messages'), 0) > 0",
+            (store.model_id,),
+        ).fetchall()
+    return {"practice:" + scene: rowid for scene, rowid in rows}
+
+
 MOMENTS_PER_CONVERSATION = 3  # judged.PER_UNIT: a conversation's test moments
 DRIFT_MAX = 48  # confirmed successes measured for drift, at most
 

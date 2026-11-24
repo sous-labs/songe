@@ -1,5 +1,6 @@
 """Restrained terminal output, also readable in pipes and captured logs."""
 
+import json
 import os
 import sys
 from contextlib import contextmanager
@@ -13,7 +14,13 @@ from . import NAME
 from .interface_copy import terse
 from .panels import pipeline
 from .status import model_training, training_model
-from .wording import model_level, model_status, status_lines
+from .wording import (
+    IGNORED_MODEL_SETTINGS,
+    TRAINING_SETTINGS,
+    model_level,
+    model_status,
+    status_lines,
+)
 
 ACCENT = "cyan"
 
@@ -115,3 +122,21 @@ def status(data):
     output.print()
     # Details per model live in the dashboard (songe open), not here.
     models_table(data.get("models", []), data=data)
+
+
+def training_settings(model, rows, ignored):
+    output = console()
+    title = f"{TRAINING_SETTINGS} · {model}" if model else TRAINING_SETTINGS
+    output.print(Text(title))
+    table = Table(box=None, padding=(0, 2), pad_edge=False, header_style="dim")
+    table.add_column("Setting", no_wrap=True)
+    table.add_column("Source", no_wrap=True)
+    table.add_column("Value")
+    for key, value, source in rows:
+        table.add_row(
+            key, source, Text(json.dumps(value, ensure_ascii=False, sort_keys=True))
+        )
+    output.print(table)
+    if ignored:
+        skipped = ", ".join(sorted(ignored))
+        output.print(Text(f"{IGNORED_MODEL_SETTINGS} · {skipped}", style="yellow"))

@@ -1,3 +1,4 @@
+import contextlib
 import math
 from types import SimpleNamespace
 
@@ -248,17 +249,56 @@ def test_frozen_prefix_keeps_the_exact_forward_with_a_short_gradient_window(
     assert prefixes == [] and tokens == len(y)
     backend.config.max_sequence, backend.config.teacher_chunk = len(y) + 4, 5
     windowed, grads, tokens = backend.train_step(step, seed=8)
-    # Only the last four context tokens plus the response carry gradient.
-    # Under gradient checkpointing transformers drops the cache in training,
-    # so the student sees only the window (bounded memory); the loss then
-    # differs from the full-context one but stays finite and trainable.
-    expected = [] if checkpointing else [student[: len(student) - 4]]
-    assert prefixes == expected and tokens == len(y)
-    if not checkpointing:
-        assert windowed == pytest.approx(full, rel=1e-4, abs=1e-7)
+    # Only the last four context tokens plus the response carry gradient; the
+    # context before them is still read, so the student sees what the teacher
+    # sees and the loss is the full-context one. That holds under gradient
+    # checkpointing too, where transformers alone would drop the prefix.
+    assert prefixes == [student[: len(student) - 4]] and tokens == len(y)
+    assert windowed == pytest.approx(full, rel=1e-4, abs=1e-7)
     assert grads.keys() == full_grads.keys()
     assert all(torch.isfinite(g).all() for g in grads.values())
     assert any(g.abs().sum() > 0 for g in grads.values())
+
+
+def test_checkpointing_reads_the_frozen_prefix_once(backend, step, monkeypatch):
+    y = [7, 8, 9]
+    monkeypatch.setattr(backend, "sample", lambda *args, **kwargs: (y, "", None))
+    backend.config.max_sequence, backend.config.teacher_chunk = len(y) + 4, 5
+    student, _ = paired_prompts(backend.tokenizer, step, backend.config)
+    caches = []
+    original = backend.prefix_state
+    monkeypatch.setattr(
+        backend, "prefix_state", lambda ids: caches.append(original(ids)) or caches[-1]
+    )
+    loss, grads, _ = backend.train_step(step, seed=8)
+    # The backward pass runs each layer again; the prefix must not grow.
+    assert caches[0].get_seq_length() == len(student) - 4
+    assert not backend._window_only
+    assert all(
+        "_can_checkpoint_with_cache" not in vars(m) for m in backend.model.modules()
+    )
+    backend.model.gradient_checkpointing_disable()
+    plain_loss, plain, _ = backend.train_step(step, seed=8)
+    assert loss == pytest.approx(plain_loss, rel=1e-5, abs=1e-7)
+    for name, grad in grads.items():
+        assert torch.allclose(grad, plain[name], rtol=1e-4, atol=1e-7), name
+
+
+def test_a_prefix_that_cannot_be_frozen_leaves_the_window(backend, step, monkeypatch):
+    y = [7, 8, 9]
+    monkeypatch.setattr(backend, "sample", lambda *args, **kwargs: (y, "", None))
+    full, _, _ = backend.train_step(step, seed=8)
+    backend.config.max_sequence, backend.config.teacher_chunk = len(y) + 4, 5
+    prefixes = []
+    # A recurrent state, say: not a key-value cache the layers can read twice.
+    monkeypatch.setattr(
+        backend, "prefix_state", lambda ids: prefixes.append(ids) or object()
+    )
+    windowed, grads, _ = backend.train_step(step, seed=8)
+    assert backend._window_only and windowed != pytest.approx(full, rel=1e-4)
+    assert all(torch.isfinite(g).all() for g in grads.values())
+    backend.train_step(step, seed=8)
+    assert len(prefixes) == 1  # not read again for nothing
 
 
 def test_lora_scale_follows_alpha_over_rank(backend):
@@ -294,6 +334,46 @@ def test_update_frozen_teacher_checkpoint_and_deltas(backend, step, tmp_path):
     bad = {name: torch.full_like(g, float("nan")) for name, g in grads.items()}
     with pytest.raises(ValueError, match="Non-finite"):
         backend.apply(bad)
+
+
+def test_heldout_kl_is_measured_against_the_cycle_start_teacher(backend, step):
+    # A second Dream: the version it starts from already has an adapter.
+    generator = torch.Generator().manual_seed(3)
+    with torch.no_grad():
+        for p in backend.model.parameters():
+            if p.requires_grad:
+                p.add_(0.05 * torch.randn(p.shape, generator=generator))
+    backend.snapshot_teacher()
+    student, _ = paired_prompts(backend.tokenizer, step, backend.config)
+    y = [7, 8, 9]
+    # The candidate is still the teacher and reads the same prompt: no
+    # distance to the cycle's teacher, a real one to the original base.
+    assert backend.kl_from(backend, student, student, y, hindsight=True) == pytest.approx(0, abs=1e-6)
+    assert backend.kl_from(backend, student, student, y) > 1e-4
+    assert backend.compare(student, student, y) == pytest.approx(0, abs=1e-6)
+
+
+def test_measure_gives_entropy_and_agreement_with_the_kl(backend, step):
+    student, _ = paired_prompts(backend.tokenizer, step, backend.config)
+    y = [7, 8, 9, 10, 11]
+    backend.config.token_chunk = 2  # chunks of 2, 2 and 1 tokens
+    same = backend.measure(backend, student, student, y)
+    assert same["kl"] == pytest.approx(0, abs=1e-6) and same["agreement"] == 1
+    assert 0 < same["entropy"] == pytest.approx(same["reference_entropy"], rel=1e-5)
+    with backend.base():
+        logits = backend.head(backend.hidden(student + y[:-1])[:, -len(y):]).float()
+    expected = torch.special.entr(logits.softmax(-1)).sum(-1).mean().item()
+    assert same["reference_entropy"] == pytest.approx(expected, rel=1e-5)
+    generator = torch.Generator().manual_seed(3)
+    with torch.no_grad():
+        for p in backend.model.parameters():
+            if p.requires_grad:
+                p.add_(0.05 * torch.randn(p.shape, generator=generator))
+    moved = backend.measure(backend, student, student, y)
+    assert moved["kl"] == pytest.approx(backend.kl_from(backend, student, student, y)) and moved["kl"] > 1e-4
+    assert moved["reference_entropy"] == pytest.approx(same["reference_entropy"], rel=1e-5)
+    assert moved["entropy"] != same["entropy"]  # the version's own, not the base's
+    assert 0 <= moved["agreement"] <= 1
 
 
 def test_nucleus_filter_precedes_temperature_and_retains_boundary_ties():
@@ -368,6 +448,31 @@ def test_effective_delta_scaling_and_per_cycle_norm(backend):
         )
 
 
+def test_half_strength_keeps_narrow_layer_shapes():
+    # Qwen3.5's in_proj_a/b have 32 outputs at rank 64: the merged delta has
+    # fewer components than the rank, and the factors must keep their shapes.
+    torch.manual_seed(0)
+    rank, outputs, inputs = 8, 4, 16
+    model = torch.nn.Module()
+    model.layer = torch.nn.Module()
+    model.layer.lora_A = torch.nn.ModuleDict(
+        {"default": torch.nn.Linear(inputs, rank, bias=False)}
+    )
+    model.layer.lora_B = torch.nn.ModuleDict(
+        {"default": torch.nn.Linear(rank, outputs, bias=False)}
+    )
+    a, b = "layer.lora_A.default.weight", "layer.lora_B.default.weight"
+    baseline = {a: torch.randn(rank, inputs), b: torch.randn(outputs, rank)}
+    trained = {a: torch.randn(rank, inputs), b: torch.randn(outputs, rank)}
+    fake = SimpleNamespace(torch=torch, model=model)
+    TorchBackend.scale_delta(fake, baseline, trained, 0.5)
+    params = dict(model.named_parameters())
+    assert params[a].shape == (rank, inputs)
+    assert params[b].shape == (outputs, rank)
+    desired = 0.5 * (baseline[b] @ baseline[a] + trained[b] @ trained[a])
+    torch.testing.assert_close(params[b] @ params[a], desired, atol=1e-5, rtol=1e-4)
+
+
 def test_train_resume_preserves_optimizer_units(
     backend, step, tmp_path, writable_file_fsync
 ):
@@ -378,7 +483,7 @@ def test_train_resume_preserves_optimizer_units(
     work.mkdir()
     pool = [step | {"id": "experience"}, step | {"id": "second"}]
 
-    def interrupted(iteration, budget):
+    def interrupted(iteration, budget, live=None):
         if iteration == 1:
             raise Interrupted("activity")
 
@@ -390,7 +495,7 @@ def test_train_resume_preserves_optimizer_units(
     assert first["iteration"] == 1 and "token_divergences" not in first
     clone = TorchBackend(backend.config)
     units = []
-    result = clone.train(pool, [], work, lambda i, _: units.append(i))
+    result = clone.train(pool, [], work, lambda i, *_: units.append(i))
     assert units == [2] and clone._updates == 2
     assert result["steps_learned"] == 2
     uninterrupted = tmp_path / "uninterrupted"
@@ -414,6 +519,7 @@ def test_full_sleep_worker_on_cpu_with_random_hf_model(tmp_path, monkeypatch):
     config.force_cpu_training = True
     config.calibration_available = True
     config.min_train, config.min_heldout, config.min_new = 3, 3, 1
+    config.learning = "hindsight"  # this test trains on the recorded steps
     store = Store(tmp_path / "data")
     for i in range(35):
         context = [{"role": "user", "content": f"Calculate {i}"}]
@@ -510,8 +616,8 @@ def test_gate_reads_the_reference_once_for_all_versions(backend, step):
     original = backend.teacher_hidden
 
     def counted(*args, **kw):
-        if len(args) < 3:  # the reference's read (the candidate passes its own context)
-            reads.append(1)
+        if not isinstance(args[2] if len(args) > 2 else None, contextlib.nullcontext):
+            reads.append(1)  # the reference's read (the candidate's passes a null context)
         return original(*args, **kw)
 
     backend.teacher_hidden = counted
@@ -587,7 +693,7 @@ def test_the_bases_reads_are_kept_across_dreams(backend, step, tmp_path):
     reads, original = [], backend.teacher_hidden
 
     def counted(*args, **kw):
-        if len(args) < 3:
+        if not isinstance(args[2] if len(args) > 2 else None, contextlib.nullcontext):
             reads.append(1)
         return original(*args, **kw)
 

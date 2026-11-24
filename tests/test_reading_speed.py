@@ -129,3 +129,30 @@ async def test_reader_stats_are_logged_per_stage(store, caplog):
     assert len(lines) == 2
     assert "stage=read calls=1" in lines[0] and "per_call=100" in lines[0]
     assert "stage=close calls=2" in lines[1]
+
+
+async def test_each_server_gets_the_reasoning_controls_it_honours(store):
+    sent = {}
+
+    def server_for(name):
+        def server(request):
+            sent[name] = json.loads(request.content)
+            return httpx.Response(200, json={"choices": [{"finish_reason": "stop",
+                                                          "message": {"content": json.dumps({"ok": True})}}]})
+        return server
+
+    for name in ("vllm", "mlx", "llamacpp", "lmstudio", "ollama"):
+        reader = reading_client.Reader(store, "http://model/v1", f"m-{name}", server=name,
+                                       client=httpx.AsyncClient(transport=httpx.MockTransport(server_for(name))))
+        await reader.ask(f"question for {name}", {"type": "object"}, "review")
+        await reader.close()
+    # Probed: the chat-template switch works on vLLM, mlx-lm and llama.cpp ...
+    for name in ("vllm", "mlx", "llamacpp"):
+        assert sent[name]["chat_template_kwargs"] == {"enable_thinking": False}
+    # ... only vLLM caps reasoning with a budget ...
+    assert sent["vllm"]["thinking_token_budget"] == reading_client.THINKING_BUDGET[False]
+    assert "thinking_token_budget" not in sent["mlx"] and "thinking_token_budget" not in sent["llamacpp"]
+    # ... and LM Studio and Ollama get neither (nothing tried worked there).
+    for name in ("lmstudio", "ollama"):
+        assert "chat_template_kwargs" not in sent[name] and "thinking_token_budget" not in sent[name]
+        assert sent[name]["reasoning_effort"] == "none"

@@ -301,7 +301,7 @@ def mark_capacity_samples(config, store, saved):
         (s["id"], s["revision"]): s["required_sequence"]
         for s in saved.get("samples", [])
     }
-    for step in sample_pool(store):
+    for step in sample_pool(store, config):
         if step.get("split") == "heldout":
             continue  # Gate forwards do not use the student backprop limit.
         required = lengths.get((step["id"], revision_id(step)))
@@ -924,6 +924,13 @@ def admit_phase(config, store, platform, phase):
     )
 
 
+def device_full(exc):
+    """The accelerator had no room for the model (torch.OutOfMemoryError, or
+    the CUDA/HIP allocator's message), as when the user's model server holds
+    most of the card. Not the host memory guard's stop."""
+    return type(exc).__name__ == "OutOfMemoryError" or " out of memory" in str(exc).lower()
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--data-dir", type=Path, default=data_dir())
@@ -948,6 +955,7 @@ def main():
     except Exception as exc:
         from ..artifacts.storage import StorageWait
         from ..telemetry import failure_hint
+        from ..wording import DEVICE_FULL
 
         if isinstance(exc, StorageWait):
             scoped.set("disk_wait", str(exc))
@@ -956,7 +964,10 @@ def main():
         # is its capacity, so the smaller measured sizes stand.
         if args.child and record_buffer_ceiling(scoped, str(exc).encode()):
             return
-        scoped.set("child_error", failure_hint("Calibration", args.data_dir))
+        scoped.set(
+            "child_error",
+            DEVICE_FULL if device_full(exc) else failure_hint("Calibration", args.data_dir),
+        )
         # A capability error (the architecture cannot train) is final. Anything
         # environmental (files mid-upgrade, servers, IO) is retried by the
         # scheduler before the model is marked unsupported.

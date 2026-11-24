@@ -1,5 +1,6 @@
 import shutil
 import subprocess
+from pathlib import Path
 
 from . import Accel
 
@@ -25,6 +26,31 @@ class ChildHandle:
 _NVML = {"ready": None}
 
 
+def unified_memory(meminfo=Path("/proc/meminfo")):
+    """(total, free) bytes for an NVIDIA GPU without its own memory.
+
+    Integrated GPUs (GB10 / DGX Spark, Jetson) allocate from system RAM, so
+    NVML reports their memory as not supported and nvidia-smi prints [N/A].
+    Their memory is the system's, as on Apple Silicon: MemTotal and
+    MemAvailable. Raises OSError when /proc/meminfo cannot be read, so the
+    caller still fails closed.
+    """
+    fields = {}
+    for line in meminfo.read_text(encoding="utf-8").splitlines():
+        key, _, value = line.partition(":")
+        parts = value.split()
+        if parts and parts[0].isdigit():
+            fields[key] = int(parts[0]) * 1024
+    if not fields.get("MemTotal") or "MemAvailable" not in fields:
+        raise OSError("No system memory figures for a unified-memory GPU")
+    return fields["MemTotal"], fields["MemAvailable"]
+
+
+def _not_supported(pynvml, exc):
+    code = getattr(pynvml, "NVML_ERROR_NOT_SUPPORTED", 3)
+    return getattr(exc, "value", None) == code
+
+
 def nvml_accelerators():
     """NVIDIA memory through NVML: in-process, milliseconds, unaffected by a
     busy GPU. Returns None when the NVML library is not available."""
@@ -39,20 +65,26 @@ def nvml_accelerators():
         devices = []
         for index in range(pynvml.nvmlDeviceGetCount()):
             handle = pynvml.nvmlDeviceGetHandleByIndex(index)
-            memory = pynvml.nvmlDeviceGetMemoryInfo(handle)
+            try:
+                memory = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                total, free = int(memory.total), int(memory.free)
+            except pynvml.NVMLError as exc:
+                if not _not_supported(pynvml, exc):
+                    raise
+                total, free = unified_memory()
             name = pynvml.nvmlDeviceGetName(handle)
             identity = pynvml.nvmlDeviceGetUUID(handle)
             devices.append(
                 Accel(
                     "cuda",
                     name.decode() if isinstance(name, bytes) else str(name),
-                    int(memory.total),
-                    int(memory.free),
+                    total,
+                    free,
                     identity.decode() if isinstance(identity, bytes) else str(identity),
                 )
             )
         return devices
-    except pynvml.NVMLError:
+    except (pynvml.NVMLError, OSError):
         _NVML["ready"] = False
         return None
 
@@ -78,14 +110,19 @@ def nvidia_smi_accelerators():
         raise ValueError("Empty NVIDIA memory measurement")
     devices = []
     for row in rows.splitlines():
-        identity, name, total, free = row.split(",", 3)
+        identity, name, total, free = (part.strip() for part in row.split(",", 3))
+        if total == free == "[N/A]":
+            # Integrated GPU: its memory is the system's (see unified_memory).
+            total, free = unified_memory()
+        else:
+            total, free = int(total) * 1024**2, int(free) * 1024**2
         devices.append(
             Accel(
                 "cuda",
-                name.strip(),
-                int(total) * 1024**2,
-                int(free) * 1024**2,
-                identity.strip(),
+                name,
+                total,
+                free,
+                identity,
             )
         )
     return devices
@@ -156,8 +193,12 @@ def gpu_usage(max_age=3.0):
                 ["nvidia-smi", "--query-gpu=utilization.gpu,memory.used", "--format=csv,noheader,nounits"],
                 timeout=3, stderr=subprocess.DEVNULL,
             ).decode().splitlines()[0]
-            busy, used = (int(x.strip()) for x in row.split(",")[:2])
-            value = {"busy": busy, "memory": used * 1024**2}
+            busy, used = (x.strip() for x in row.split(",")[:2])
+            # memory.used is [N/A] on integrated GPUs (GB10); busy still reads.
+            value = {
+                "busy": int(busy),
+                "memory": int(used) * 1024**2 if used.isdigit() else None,
+            }
     except (OSError, ValueError, IndexError, subprocess.SubprocessError):
         value = None
     _GPU.update(at=now, value=value)

@@ -9,6 +9,7 @@
   <a href="#-how-it-works">How it works</a> •
   <a href="#-commands">Commands</a> •
   <a href="ROADMAP.md">Roadmap</a> •
+  <a href="https://discord.gg/cBEywVkXjY">Discord</a> •
   <a href="https://souslabs.ai">Website</a>
 </p>
 
@@ -45,6 +46,16 @@ With [uv](https://docs.astral.sh/uv/) or [pipx](https://pipx.pypa.io/) (Python 3
 uv tool install songe        # or: pipx install songe
 songe init
 ```
+
+No uv or pipx yet? Either installs in one line:
+
+```sh
+curl -LsSf https://astral.sh/uv/install.sh | sh    # uv (or: brew install uv)
+brew install pipx                                  # pipx on macOS (Debian/Ubuntu: sudo apt install pipx)
+```
+
+Both give Songe its own environment in a lasting place, which its
+background service needs.
 
 macOS with Homebrew:
 
@@ -139,6 +150,7 @@ once, and trains on what fits. See [DESIGN.md](DESIGN.md).
 | Command | What it does |
 | --- | --- |
 | `songe` | what it is doing |
+| `songe status --training [MODEL]` | resolved Deep Dream settings and where they come from |
 | `songe open` | the dashboard in your browser |
 | `songe models` | each model, and whether it dreams on its own |
 | `songe models MODEL on\|off` | auto-dream for one model |
@@ -174,7 +186,8 @@ service moves to the new version by itself in a quiet moment.
 ## 🧭 Roadmap and contributing
 
 Where Songe is going: [ROADMAP.md](ROADMAP.md). Ideas and bugs are welcome as
-[issues](https://github.com/sous-labs/songe/issues); to contribute, see
+[issues](https://github.com/sous-labs/songe/issues). Questions and results from your nights go in
+[Discord](https://discord.gg/cBEywVkXjY). To contribute, see
 [CONTRIBUTING.md](CONTRIBUTING.md). Security reports: [SECURITY.md](SECURITY.md).
 
 Licensed under [Apache-2.0](LICENSE).
