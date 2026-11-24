@@ -826,6 +826,59 @@ def test_a_note_practised_in_two_conversations_keeps_one_for_its_test(store):
     assert ensure_note_heldout(store) == 0
 
 
+def test_a_learned_lesson_keeps_its_note_when_its_own_conversation_got_worse():
+    """Live (Qwen3.5-4B on a rented card, two Dreams): the pnpm lesson passed
+    the note test on its three held-out scenes, the note left, both pnpm
+    conversations were then judged worse, and the habit fell from 10 of 16
+    test requests to 2. A lesson is kept back when a conversation it came
+    from is among the moments the candidate, served without its note, lost."""
+    from songe.sleep import judged
+
+    lessons = [
+        {"id": "l1", "signals": ["uv-a", "uv-b"], "learned": True},
+        {"id": "l2", "signals": ["pnpm-a"], "learned": True},
+        {"id": "l3", "signals": ["chef-a"], "learned": False},
+    ]
+    session = {"uv-a": "c1", "uv-b": "c2", "pnpm-a": "c3", "chef-a": "c4"}
+    rows = [{"conversation": c, "outcome": o} for c, o in (("c1", "win"), ("c2", "tie"), ("c3", "loss"), ("c4", "loss"))]
+    assert judged.kept_back(lessons, rows, session) == {"l2"}  # l3 was not leaving anyway
+    assert judged.kept_back(lessons, [r | {"outcome": "tie"} for r in rows], session) == set()
+
+
+def test_each_version_answers_with_the_notes_it_is_served_with(monkeypatch):
+    """The gate's judged moments are answered as the user would get them:
+    with the lessons block in the system message, where the proxy puts it.
+    Answers written with different notes are different measurements."""
+    from songe.sleep import judged
+
+    seen = []
+    monkeypatch.setattr(judged, "paired_prompts", lambda tok, step, config: (step["context"], None))
+    monkeypatch.setattr(judged, "answer", lambda text, tok, tools: {"text": text, "tool_calls": [], "valid": True})
+
+    class Fake:
+        tokenizer = config = None
+
+        def sample(self, prompt, seed=None, *, deterministic=False, max_tokens=None):
+            seen.append(prompt)
+            return [], "ok", None
+
+    class Journal:
+        names = []
+
+        def unit(self, name, fn):
+            self.names.append(name)
+            return fn()
+
+    step = {"id": "s0", "conversation": "c", "source_id": 1, "observed_id": 0, "tools": [],
+            "context": [{"role": "system", "content": "Be brief."}, {"role": "user", "content": "Install zod"}]}
+    journal = Journal()
+    judged.answers(Fake(), journal, [step], "before", lambda: None, notes="Lessons:\n- Use pnpm.")
+    judged.answers(Fake(), journal, [step], "scale-1.0", lambda: None)
+    assert seen[0][0]["content"] == "Be brief.\n\nLessons:\n- Use pnpm." and seen[0][1:] == step["context"][1:]
+    assert seen[1] == step["context"]
+    assert journal.names[0] not in ("judged-before-s0", journal.names[1]) and journal.names[1] == "judged-scale-1.0-s0"
+
+
 def test_judged_units_decide_and_the_kl_is_only_a_diagnostic():
     from songe.sleep.gate import decide
 

@@ -140,19 +140,21 @@ def write(backend, step, max_tokens=ANSWER_TOKENS, notes=""):
     return {"tokens": list(y), **answer(text, backend.tokenizer, step.get("tools"))}
 
 
-def answers(backend, journal, steps, name, check, kept_as=None):
+def answers(backend, journal, steps, name, check, kept_as=None, notes=""):
     """Every moment's answer by the loaded version, resumable. kept_as: a
-    KeptMeasurements (the incumbent's answers, reused on later Dreams)."""
-    from ..steps import revision_id
+    KeptMeasurements (the incumbent's answers, reused on later Dreams).
+    notes: the lessons block the version is served with (write)."""
+    from ..steps import digest, revision_id
     from .evaluate import kept
 
+    served = [digest(notes)[:16]] if notes else []
     out = {}
     for step in steps:
         check()
         out[step["id"]] = journal.unit(
-            f"judged-{name}-{step['id']}",
-            lambda step=step: kept(kept_as, f"answer{ANSWER_TOKENS}", [step["id"], revision_id(step)],
-                                   lambda: write(backend, step)),
+            "-".join(["judged", name, *served, step["id"]]),
+            lambda step=step: kept(kept_as, f"answer{ANSWER_TOKENS}", [step["id"], revision_id(step), *served],
+                                   lambda: write(backend, step, notes=notes)),
         )
     return out
 
@@ -324,6 +326,21 @@ def learned_lessons(backend, journal, store, name, check):
         for member in same.get(s["signal_id"], [s["signal_id"]]):
             scenes.setdefault(member, []).append(s)
     return learned(backend, journal, quick.active(store), scenes, name, check)
+
+
+def kept_back(lessons, rows, session):
+    """The lessons that passed the note test and keep their note all the
+    same: {lesson id}. lessons: learned()'s rows. rows: the judged moments,
+    the candidate answering without those lessons' notes. session: {signal
+    id: the conversation it came from}. A lesson whose own conversation is
+    among the moments judged worse is not learned as the user is served: on
+    three held-out scenes the candidate passed, in the user's conversation it
+    did not."""
+    lost = {r["conversation"] for r in rows if r["outcome"] == "loss"}
+    return {
+        row["id"] for row in lessons
+        if row["learned"] and {session.get(sig) for sig in row["signals"]} & lost
+    }
 
 
 def examples(steps, before, after, rows, limit=3):

@@ -77,13 +77,10 @@ def decide(
     drift = mean(r["drift"] for r in after)
     result = dict(heldout_change=change, noise_margin=margin, general_drift=drift)
     if judged:
-        wins = sum(a["outcome"] == "win" for a in judged)
-        losses = sum(a["outcome"] == "loss" for a in judged)
         result["kl_change"] = mean(b["kl"] - a["kl"] for b, a in zip(before, after, strict=False))
-        if wins <= losses or change <= margin:
-            return Decision(
-                False, f"Not clearly better: better on {wins}, worse on {losses}", **result
-            )
+        reason = judged_reason(judged, change, margin)
+        if reason:
+            return Decision(False, reason, **result)
     elif change <= margin:
         return Decision(
             False, "Held-out improvement does not exceed bootstrap noise", **result
@@ -122,6 +119,34 @@ def decide(
     return Decision(True, "Held-out improvement passed all checks", **result)
 
 
+WORSE_Z = 1.64
+
+
+def judged_reason(judged, change, margin):
+    """Why the judged moments reject the candidate, or None.
+
+    Rows marked "served" compared what the user would be served (the
+    candidate with the notes that stay in the prompt) with what they are
+    served now (the version in use with all its notes). The candidate must
+    not be worse there, and adopting must give something: a lesson learned
+    (its note leaves the prompt) or a moment won. Other rows compared the two
+    versions with no notes: the candidate must be clearly better."""
+    wins = sum(a["outcome"] == "win" for a in judged)
+    losses = sum(a["outcome"] == "loss" for a in judged)
+    if any(a.get("served") for a in judged):
+        # Worse only beyond what a judge that is right four times in five
+        # gives by chance: an equally good version got 3 against 8 before
+        # (WORSE_Z, a one-sided 5% on the moments that got a verdict).
+        if losses - wins > WORSE_Z * math.sqrt(losses + wins):
+            return f"Worse than what you have now: better on {wins}, worse on {losses}"
+        if wins <= losses and not any(a.get("learned") for a in judged):
+            return f"Nothing to adopt yet: no lesson learned, better on {wins}, worse on {losses}"
+        return None
+    if wins <= losses or change <= margin:
+        return f"Not clearly better: better on {wins}, worse on {losses}"
+    return None
+
+
 def judged_check(judged, *, bootstraps=2000, confidence=0.95):
     """decide()'s judged test alone, for rejecting a candidate before its
     held-out rows are measured: the failing Decision, or None when the
@@ -136,13 +161,9 @@ def judged_check(judged, *, bootstraps=2000, confidence=0.95):
     samples = sorted(mean(rng.choices(gains, k=len(gains))) for _ in range(bootstraps))
     lower = samples[int((1 - confidence) / 2 * bootstraps)]
     margin = max(math.ulp(change), change - lower)
-    wins = sum(a["outcome"] == "win" for a in judged)
-    losses = sum(a["outcome"] == "loss" for a in judged)
-    if wins <= losses or change <= margin:
-        return Decision(
-            False, f"Not clearly better: better on {wins}, worse on {losses}",
-            heldout_change=change, noise_margin=margin,
-        )
+    reason = judged_reason(judged, change, margin)
+    if reason:
+        return Decision(False, reason, heldout_change=change, noise_margin=margin)
     return None
 
 

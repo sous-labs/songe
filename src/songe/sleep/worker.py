@@ -1074,10 +1074,16 @@ def run(
 
         moments = judged.moments(heldout) if config.learning == "dreams" else []
         before_answers = {}
+        # The user is served the version in use with the Quick Dream notes in
+        # the prompt, so that is what it answers with here. The candidate
+        # answers with the notes that would stay beside it (judged_outcomes).
+        from .. import quick
+
+        notes_now = quick.block(quick.active(store)) if moments else ""
         if moments:
             try:
                 before_answers = judged.answers(
-                    backend, journal, moments, "before", check, kept_as=kept_incumbent
+                    backend, journal, moments, "before", check, kept_as=kept_incumbent, notes=notes_now
                 )
             except (Interrupted, MemoryError):
                 raise
@@ -1110,6 +1116,29 @@ def run(
         if others:
             before_others = answer_others("unrelated-before")
 
+        def notes_beside(scale):
+            """(the notes that would stay in the prompt beside the candidate
+            at this strength, how many would leave). The notes of lessons it
+            follows without them leave on adoption (judged.learned); the
+            candidate is loaded at that strength, or its answers are kept."""
+            gone = {row["id"] for row in learned_now(scale) if row["learned"]}
+            staying = [lesson for lesson in quick.active(store) if lesson.get("id") not in gone]
+            return quick.block(staying), len(gone)
+
+        # A lesson that passed the note test still keeps its note when the
+        # candidate, served without it, is judged worse at one of that
+        # lesson's own conversations (live: the pnpm note left on three
+        # held-out scenes, both pnpm conversations were then worse, and the
+        # habit fell from 10 of 16 test requests to 2).
+        kept_back, judged_as = {}, {}
+
+        def learned_now(scale):
+            back = kept_back.get(scale, set())
+            return [
+                row | {"learned": row["learned"] and row["id"] not in back, "kept_back": row["id"] in back}
+                for row in judged.learned_lessons(backend, journal, store, f"scale-{scale}", check)
+            ]
+
         def judged_outcomes(scale):
             """Each judged moment's outcome (win, loss, tie) for this
             strength, {id: verdict}; {} when judging is unavailable (the KL
@@ -1120,9 +1149,24 @@ def run(
             if others:
                 answer_others(f"unrelated-scale-{scale}")
             try:
-                after_answers = judged.answers(backend, journal, moments, f"scale-{scale}", check)
-                return {r["id"]: r for r in judged.judge(
-                    backend, journal, moments, before_answers, after_answers, f"scale-{scale}", check)}
+                from ..reading.store import signals as lesson_signals
+
+                session = {s["id"]: s.get("session") for s in lesson_signals(store)}
+                name = f"scale-{scale}"
+                while True:
+                    staying, gone = notes_beside(scale)
+                    after_answers = judged.answers(
+                        backend, journal, moments, name, check, notes=staying
+                    )
+                    rows = judged.judge(
+                        backend, journal, moments, before_answers, after_answers, name, check)
+                    back = judged.kept_back(learned_now(scale), rows, session)
+                    if not back:
+                        break
+                    kept_back.setdefault(scale, set()).update(back)
+                    name = f"scale-{scale}-kept-{len(kept_back[scale])}"
+                judged_as[scale] = name
+                return {r["id"]: r | {"served": True, "learned": gone} for r in rows}
             except (Interrupted, MemoryError):
                 raise
             except Exception as exc:  # noqa: BLE001
@@ -1135,7 +1179,8 @@ def run(
                 backend.scale_delta(baseline, trained, scale)
 
         def with_outcomes(rows, verdicts):
-            return [r | ({"outcome": verdicts[r["id"]]["outcome"], "by": verdicts[r["id"]]["by"]}
+            keys = ("outcome", "by", "served", "learned")
+            return [r | ({k: verdicts[r["id"]][k] for k in keys if k in verdicts[r["id"]]}
                          if r["id"] in verdicts else {}) for r in rows]
 
         def scale_adapter(scale):
@@ -1226,7 +1271,8 @@ def run(
             verdicts = judged_outcomes(scale)
             judged_rows = [
                 {"id": s["id"], "conversation": s["conversation"], **{
-                    k: verdicts[s["id"]][k] for k in ("outcome", "by")}}
+                    k: verdicts[s["id"]][k] for k in ("outcome", "by", "served", "learned")
+                    if k in verdicts[s["id"]]}}
                 for s in heldout if s["id"] in verdicts
             ]
             rejected = judged_check(judged_rows, confidence=config.gate_confidence)
@@ -1267,8 +1313,8 @@ def run(
                 journal.phase = "gate"
                 # The fused model is the same candidate: the judged outcomes stand.
                 outcomes = {r["id"]: r for r in adapted if r.get("outcome")}
-                return [r | ({"outcome": outcomes[r["id"]]["outcome"], "by": outcomes[r["id"]]["by"]}
-                             if r["id"] in outcomes else {})
+                return [r | ({k: outcomes[r["id"]][k] for k in ("outcome", "by", "served", "learned")
+                              if k in outcomes[r["id"]]} if r["id"] in outcomes else {})
                         for r in measured(f"fused-evaluation-{scale}", fused)]
             finally:
                 del fused
@@ -1389,7 +1435,10 @@ def run(
                 key=lambda k: (scales.get(str(k)) or {}).get("heldout_change") or float("-inf"))
             rows = (scales.get(str(shown)) or {}).get("judged") or []
             if rows:
-                after_answers = judged.answers(backend, journal, moments, f"scale-{shown}", check)
+                after_answers = judged.answers(
+                    backend, journal, moments, judged_as.get(shown, f"scale-{shown}"), check,
+                    notes=notes_beside(shown)[0],
+                )
                 record["examples"] = judged.examples(moments, before_answers, after_answers, rows)
                 record["improved"] = judged.summary(rows)
                 record["judged"] = rows
@@ -1406,9 +1455,7 @@ def run(
             if decision.accepted and scale is not None:
                 try:
                     backend.scale_delta(baseline, trained, scale)
-                    record["learned"] = judged.learned_lessons(
-                        backend, journal, store, f"scale-{scale}", check
-                    )
+                    record["learned"] = learned_now(scale)
                     record["absorbed_signals"] = sorted(
                         {sig for row in record["learned"] if row["learned"] for sig in row["signals"]}
                     )
