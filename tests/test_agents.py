@@ -419,3 +419,15 @@ PI_RESTORED = (
     b'{\n  "providers": {\n    "mine": {\n      "baseUrl": "http://x/v1"\n    },\n'
     b'    "other": {\n      "baseUrl": "http://y/v1"\n    }\n  }\n}\n'
 )
+
+
+def test_an_opencode_file_of_another_shape_binds_nothing(tmp_path, monkeypatch):
+    from songe.agents.opencode import OpenCode
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / ".config"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / ".local/state"))
+    folder = OpenCode().folder(tmp_path)
+    folder.mkdir(parents=True)
+    for text in ("[]", '{"model": 5}', '{"model": "x/y", "provider": {"x": "str"}}'):
+        (folder / "opencode.json").write_text(text, encoding="utf-8")
+        assert OpenCode().binding(tmp_path) == ("", "")

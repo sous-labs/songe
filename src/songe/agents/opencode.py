@@ -174,7 +174,7 @@ class OpenCode(Agent):
             value = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return "", ""
-        model = value.get("model", "")
+        model = value.get("model", "") if isinstance(value, dict) else ""
         # The model picked in opencode's UI lives in its state file and wins
         # over the config default, so it is the one the user actually runs.
         try:
@@ -183,9 +183,12 @@ class OpenCode(Agent):
                 model = f"{recent[0].get('providerID', '')}/{recent[0]['modelID']}"
         except (OSError, ValueError, AttributeError):
             pass
-        provider, _, model_id = model.partition("/")
-        definition = (value.get("providers") or value.get("provider") or {}).get(provider, {})
-        options = definition.get("settings") or definition.get("options") or {}
-        if model:
-            return model_id or model, options.get("baseURL", "").rstrip("/")
+        try:
+            provider, _, model_id = model.partition("/")
+            definition = (value.get("providers") or value.get("provider") or {}).get(provider, {})
+            options = definition.get("settings") or definition.get("options") or {}
+            if model:
+                return model_id or model, options.get("baseURL", "").rstrip("/")
+        except AttributeError:
+            pass  # A hand-edited file of another shape binds nothing, as on main.
         return "", ""
