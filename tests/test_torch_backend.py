@@ -482,7 +482,7 @@ def test_train_resume_preserves_optimizer_units(
     work.mkdir()
     pool = [step | {"id": "experience"}, step | {"id": "second"}]
 
-    def interrupted(iteration, budget):
+    def interrupted(iteration, budget, live=None):
         if iteration == 1:
             raise Interrupted("activity")
 
@@ -494,7 +494,7 @@ def test_train_resume_preserves_optimizer_units(
     assert first["iteration"] == 1 and "token_divergences" not in first
     clone = TorchBackend(backend.config)
     units = []
-    result = clone.train(pool, [], work, lambda i, _: units.append(i))
+    result = clone.train(pool, [], work, lambda i, *_: units.append(i))
     assert units == [2] and clone._updates == 2
     assert result["steps_learned"] == 2
     uninterrupted = tmp_path / "uninterrupted"
@@ -518,6 +518,7 @@ def test_full_sleep_worker_on_cpu_with_random_hf_model(tmp_path, monkeypatch):
     config.force_cpu_training = True
     config.calibration_available = True
     config.min_train, config.min_heldout, config.min_new = 3, 3, 1
+    config.learning = "hindsight"  # this test trains on the recorded steps
     store = Store(tmp_path / "data")
     for i in range(35):
         context = [{"role": "user", "content": f"Calculate {i}"}]
