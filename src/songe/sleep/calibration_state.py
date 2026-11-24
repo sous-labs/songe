@@ -263,6 +263,40 @@ def teacher_measured(saved):
     )
 
 
+def teacher_wanted(saved):
+    """Teacher lengths deferred examples need that no measurement covers yet.
+
+    Measuring doubles the teacher length toward the longest example, so it
+    can jump over the length most examples need. When the measured length
+    above it does not fit beside the user's server, every example is
+    deferred and nothing measures again (#140); the scheduler then asks for
+    that exact length here."""
+    done = [
+        r.get("teacher_sequence", 0)
+        for r in saved.get("teacher_rows", [])
+        + saved.get("teacher_limits", [])
+        + [h for h in saved.get("held", []) if h.get("kind") == "teacher"]
+    ]
+    return sorted(
+        w
+        for w in set(saved.get("teacher_wanted", []))
+        if not any(w <= t and close_enough(w, t) for t in done)
+    )
+
+
+def ask_for_teacher(saved, length):
+    """The calibration with a teacher of `length` tokens asked for (measuring
+    is then incomplete), or None when a measurement already covers it."""
+    asked = saved | {
+        "teacher_wanted": sorted(set(saved.get("teacher_wanted", [])) | {length})
+    }
+    if not teacher_wanted(asked):
+        return None
+    if asked.get("progress"):
+        asked["progress"] = asked["progress"] | {"complete": False}
+    return asked
+
+
 def bracket(config, rows, limits):
     """The smallest-chunk failure and the largest success below it."""
     boundary = min(
@@ -323,9 +357,15 @@ def progress(config, saved, target, pool):
     teacher_stopped = bool(teacher_bounds) and close_enough(
         measured_teacher, min(teacher_bounds)
     )
-    teacher_done = measured_teacher >= teacher_target or teacher_stopped
+    teacher_done = (
+        measured_teacher >= teacher_target or teacher_stopped
+    ) and not teacher_wanted(saved)
     sequence_done = coverage(config, rows, target) or sequence_held
-    complete = (sequence_done and teacher_done) or memory_bounded or chunk_bounded
+    # A teacher length asked for (teacher_wanted) is measured even when the
+    # window reached its memory limit; otherwise it would be asked forever.
+    complete = (sequence_done and teacher_done) or (
+        (memory_bounded or chunk_bounded) and not teacher_wanted(saved)
+    )
     if memory_bounded or chunk_bounded:
         reason = "memory"
     elif complete and saved.get("held"):

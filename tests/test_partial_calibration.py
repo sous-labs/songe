@@ -995,3 +995,89 @@ def test_measuring_covers_the_practice_scenes_a_dream_trains_on(config, store):
     # The scheduler can now see that nothing pending fits a small slice,
     # instead of loading the model to find out.
     assert smallest_pending(dreams, {"samples": samples}, store) == 566
+
+
+def test_a_teacher_length_the_ladder_jumped_over_is_measured_when_asked(
+    config, store, measured
+):
+    """#140: measuring doubled the teacher length to the longest example
+    (13,179) past the length the examples need (about 8,600). With a guard
+    correction that row no longer fit beside the user's server, every example
+    was deferred on every slice, and nothing measured again."""
+    from songe.sleep import calibration_state
+    from songe.sleep.calibration_state import ask_for_teacher, needs_growth
+
+    backend, _ = measured
+    original = calibration_state.measure_pool
+
+    def long_teacher(*args, **kwargs):
+        samples, target, pool = original(*args, **kwargs)
+        return [s | {"teacher_sequence": 13179} for s in samples], target, pool
+
+    calibration_state.measure_pool = long_teacher
+    try:
+        calibrate._calibrate(config, store.root, (256,))
+        saved = store.get("calibration")
+        assert saved["progress"]["complete"] and not needs_growth(config, store)
+        lengths = [r["teacher_sequence"] for r in saved["teacher_rows"]]
+        assert 13179 in lengths and 10000 not in lengths
+        # The scheduler asks for the length the deferred examples need.
+        asked = ask_for_teacher(saved, 10000)
+        assert asked["progress"]["complete"] is False
+        store.set("calibration", asked)
+        assert needs_growth(config, store)
+        backend.teachers.clear()
+        calibrate._calibrate(Config.load(store.root), store.root, (256,))
+        saved = store.get("calibration")
+        # Only the asked length is measured, and measuring is complete again.
+        assert backend.teachers == [10000]
+        assert 10000 in [r["teacher_sequence"] for r in saved["teacher_rows"]]
+        assert saved["progress"]["complete"] and not needs_growth(config, store)
+        # Measured once: asking again (or for a length within a tenth) does
+        # not measure again; the scheduler then stops with a note instead.
+        assert ask_for_teacher(saved, 10000) is None
+        assert ask_for_teacher(saved, 9500) is None
+        assert ask_for_teacher(saved, 5000) is not None  # 3600 and 7200 are far
+    finally:
+        calibration_state.measure_pool = original
+
+
+def test_a_deferred_teacher_names_what_the_graphics_card_lacks():
+    """#140, case 1: the 13,179-token teacher measured 17.63 GB; a guard stop
+    raised the correction to 1.171 (20.64 GB), with 20.23 GB of the card free
+    beside the user's server."""
+    from songe.sleep.sizing import teacher_card_shortfall
+
+    gb = 10**9
+    calibration = {
+        "device_peak_correction": 1.171,
+        "teacher_rows": [
+            {"teacher_sequence": 13179, "host_peak_bytes": 4 * gb,
+             "device_peak_bytes": int(17.63 * gb)},
+        ],
+    }
+    card = SimpleNamespace(name="RTX 5090", memory_free=int(20.23 * gb))
+    sample = SimpleNamespace(vram=[card])
+    short = teacher_card_shortfall(calibration, sample, 8613)
+    assert 0.39 * gb < short < 0.43 * gb
+    assert teacher_card_shortfall(calibration, SimpleNamespace(vram=[]), 8613) is None
+    assert teacher_card_shortfall(calibration, sample, 14000) is None
+
+
+def test_an_asked_teacher_length_keeps_measuring_open_at_the_memory_limit(config):
+    """Measuring that stopped at the window's memory limit is complete, but a
+    teacher length asked for must still be measured; else the scheduler would
+    ask again on every tick and measuring would return at once."""
+    rows = [
+        r | {"sequence": 900, "response_tokens": config.response_tokens}
+        for r in original_rows()
+    ]
+    limit = rows[0] | {"sequence": 960, "host_peak_bytes": 30 * GB}
+    saved = {"rows": rows, "capacity_limits": [limit], "teacher_rows": [
+        {"teacher_sequence": 13179, "host_peak_bytes": 8 * GB, "device_peak_bytes": 0}]}
+    assert progress(config, saved, 4096, "pool")["completion_reason"] == "memory"
+    saved["teacher_wanted"] = [8613]
+    assert not progress(config, saved, 4096, "pool")["complete"]
+    saved["teacher_rows"].append(
+        {"teacher_sequence": 8613, "host_peak_bytes": 6 * GB, "device_peak_bytes": 0})
+    assert progress(config, saved, 4096, "pool")["complete"]

@@ -504,6 +504,21 @@ def free_needed(config, calibration, sample, pressure_data, accept=None):
     return high
 
 
+def teacher_card_shortfall(calibration, sample, length):
+    """Card memory still missing for the shortest measured teacher of at least
+    `length` tokens, as training would predict it; None when there is no
+    card or no such measurement."""
+    rows = [
+        t
+        for t in corrected(calibration or {}).get("teacher_rows", [])
+        if t.get("teacher_sequence", 0) >= length and t.get("device_peak_bytes")
+    ]
+    if not rows or not sample.vram:
+        return None
+    need = min(rows, key=lambda t: t["teacher_sequence"])["device_peak_bytes"]
+    return max(0, need - min(a.memory_free for a in sample.vram))
+
+
 def gigabytes(value):
     return f"{value / 1e9:.1f} GB"
 

@@ -831,8 +831,11 @@ def held(saved, kind):
 def next_teacher(saved, teacher_target):
     """Double the measured teacher length toward the longest real one; bisect
     below a total-capacity limit or a size held for lack of free memory."""
-    from .calibration_state import close_enough, teacher_measured
+    from .calibration_state import close_enough, teacher_measured, teacher_wanted
 
+    wanted = teacher_wanted(saved)
+    if wanted:
+        return wanted[0]
     measured = teacher_measured(saved)
     if measured >= teacher_target:
         return None
@@ -869,6 +872,13 @@ def measure_teachers(
         }
         save_progress(policy, store, saved, target, pool)
         prompt = (tokens * (length // len(tokens) + 1))[: max(1, length - len(y))]
+        # Measure the teacher on its own: memory the allocator still caches
+        # from the training probes made every teacher read as large as the
+        # largest of them (#140).
+        (
+            getattr(backend, "release_cache", None)
+            or getattr(backend, "release", lambda: None)
+        )()
         backend.reset_peak_memory()
         start = time.perf_counter()
         with Meter(platform, baseline, backend, policy.guard_min_interval) as meter:

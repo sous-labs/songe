@@ -958,6 +958,17 @@ class TorchBackend:
         self._peak_rss = max(self._peak_rss, self._process.memory_info().rss)
         return self._peak_rss
 
+    def release_cache(self):
+        """Return cached accelerator memory, so the card shows what is in use.
+        Only for measuring: training keeps its cache (no per-step cost)."""
+        import gc
+
+        gc.collect()
+        if self.device.type in {"cuda", "xpu"}:
+            getattr(self.torch, self.device.type).empty_cache()
+        elif self.device.type == "mps":
+            self.torch.mps.empty_cache()
+
     def reset_peak_memory(self):
         if self.device.type in {"cuda", "xpu"}:
             getattr(self.torch, self.device.type).reset_peak_memory_stats(self.device)

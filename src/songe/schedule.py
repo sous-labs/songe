@@ -1082,7 +1082,12 @@ class Scheduler:
 
                 training_platform = TrainingPlatform(self.platform, self.config)
                 sample = await asyncio.to_thread(snapshot, training_platform)
-                from .sleep.sizing import choose_size, free_needed, waiting_reason
+                from .sleep.sizing import (
+                    choose_size,
+                    free_needed,
+                    gigabytes,
+                    waiting_reason,
+                )
 
                 self.observe_memory(sample)
                 sizing = (
@@ -1110,18 +1115,43 @@ class Scheduler:
                         shortest is not None
                         and sizing.get("max_teacher_sequence", float("inf")) < shortest
                     ):
+                        from .sleep.calibration_state import ask_for_teacher
+                        from .sleep.sizing import teacher_card_shortfall
+
+                        asked = ask_for_teacher(
+                            self.store.get("calibration") or {}, shortest
+                        )
+                        if asked is not None:
+                            # No teacher of the length these examples need was
+                            # measured (the ladder jumped over it): measure it
+                            # instead of deferring them on every slice (#140).
+                            self.store.set("calibration", asked)
+                            self.reason = "Measuring memory for longer conversations"
+                            await self.restore()
+                            return
+                        needed = free_needed(
+                            self.config,
+                            calibration,
+                            sample,
+                            self.pressure_history.data,
+                            lambda s: s.get("max_teacher_sequence", 0) >= shortest,
+                        )
+                        card = teacher_card_shortfall(calibration, sample, shortest)
                         self.reason = waiting_reason(
                             sample,
                             self.pressure_history.data,
-                            free_needed(
-                                self.config,
-                                calibration,
-                                sample,
-                                self.pressure_history.data,
-                                lambda s: s.get("max_teacher_sequence", 0) >= shortest,
+                            needed,
+                            what="intact training samples deferred"
+                            + (
+                                f" · the graphics card needs {gigabytes(card)} more free"
+                                if card
+                                else ""
                             ),
-                            what="intact training samples deferred",
                         )
+                        # Measured and still too big beside what else runs: a
+                        # pressed Dream ends with a note instead of retrying
+                        # without end.
+                        self.note_fit_wait(sample, needed)
                         self.unload_retry_at = time.monotonic() + RETRY_FIRST_SECONDS
                         await self.restore()
                         return
