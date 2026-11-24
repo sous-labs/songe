@@ -385,6 +385,16 @@ class TaskScheduler(OwnedService):
                 capture_output=True,
             )
 
+    def stale_launcher(self):
+        """A launcher written before #158 replaced itself with os.execvpe:
+        it lost spaced paths and uv venvs, and left Task Scheduler's job, so
+        /End and RestartOnFailure no longer reached the service (#157)."""
+        try:
+            text = self.target.with_suffix(".py").read_text(encoding="utf-8")
+        except OSError:
+            return False
+        return "os.execvpe" in text
+
     def definition(self):
         import ast
 

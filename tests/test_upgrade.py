@@ -620,3 +620,35 @@ def test_service_uses_homebrew_opt_path(tmp_path):
         path.write_text("")
     assert stable_python(str(cellar)) == str(opt)
     assert stable_python("/usr/bin/python3") == "/usr/bin/python3"
+
+
+def test_an_old_windows_launcher_is_rewritten_even_at_the_same_release(tmp_path):
+    # Before #158 the launcher replaced itself with os.execvpe, which broke
+    # spaced paths and left the task's job (#157). Only init rewrote it, so an
+    # upgrade must, even when the service already runs this release.
+    root, config, service, calls, run = installed(
+        tmp_path, TaskScheduler, ".xml", private=False, version=__version__
+    )
+    launcher = service.target.with_suffix(".py")
+    argv, env = service.definition()
+    launcher.write_text(
+        "import os\n"
+        f"os.environ.update({env!r})\n"
+        f"argv = {argv!r}\n"
+        "os.execvpe(argv[0], argv, os.environ)\n",
+        encoding="utf-8",
+    )
+    assert service.stale_launcher()
+    replies = iter([state(), state(instance="new-again")])
+    upgrade.catch_up(
+        root, config, service=service, run=run, read_state=lambda: next(replies)
+    )
+    assert not service.stale_launcher()
+    assert "subprocess.call" in launcher.read_text(encoding="utf-8")
+    assert service.definition() == (argv, env)
+    assert [argv[1] for argv, kwargs in calls if argv[0] == "schtasks"][-1] == "/Run"
+    # Once rewritten, the next check finds nothing to do.
+    calls.clear()
+    upgrade._checked.clear()
+    upgrade.catch_up(root, config, service=service, run=run, read_state=state)
+    assert calls == []

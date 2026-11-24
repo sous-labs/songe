@@ -220,15 +220,17 @@ def catch_up(
 
             python = str(runtime_python(root)) if private else stable_python()
             rebind = os.path.abspath(argv[0]) != os.path.abspath(python)
+            # Rewrite a launcher an older release wrote, even at the same Python.
+            rewrite = rebind or getattr(service, "stale_launcher", lambda: False)()
             if (state or {}).get("busy"):
                 # It did not answer in time, so its release is unknown: say
                 # nothing unless this install itself must change under it.
-                if update_runtime or rebind:
+                if update_runtime or rewrite:
                     emit(f"Update to {__version__} waits until the service is less busy")
                 return None
             pending = root / PENDING
             retry = pending.exists()
-            if not (update_runtime or old_service or rebind):
+            if not (update_runtime or old_service or rewrite):
                 if runtime is not None and Version(runtime) != Version(__version__):
                     raise RuntimeError(
                         f"runtime {runtime} differs from CLI {__version__}"
@@ -271,7 +273,7 @@ def catch_up(
                     raise RuntimeError("runtime update did not install the CLI release")
                 pending_data["runtime_pending"] = False
                 atomic_write(pending, json.dumps(pending_data).encode("utf-8"))
-            if rebind:
+            if rewrite:
                 argv[0] = python
                 # launchd caches its loaded definition; reload before kickstart.
                 from .platform.services import Launchd
