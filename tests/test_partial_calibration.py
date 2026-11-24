@@ -1081,3 +1081,81 @@ def test_an_asked_teacher_length_keeps_measuring_open_at_the_memory_limit(config
     saved["teacher_rows"].append(
         {"teacher_sequence": 8613, "host_peak_bytes": 6 * GB, "device_peak_bytes": 0})
     assert progress(config, saved, 4096, "pool")["complete"]
+
+
+def test_one_measurement_covers_every_deferred_example_in_the_gap(config):
+    """#140 review: asking for the shortest deferred length admitted one
+    example per measuring run. Ask for the longest one below the measured
+    row that does not fit; if that does not fit either, bisect."""
+    from songe.sleep.calibration_state import teacher_to_ask, teacher_wanted
+
+    def row(length):
+        return {"teacher_sequence": length, "host_peak_bytes": 1, "device_peak_bytes": 1}
+
+    samples = [
+        {"id": f"s{i}", "revision": "r", "required_sequence": 4000, "teacher_sequence": t}
+        for i, t in enumerate((5000, 6000, 8000, 8613, 9400, 12500, 14000))
+    ]
+    saved = {"samples": samples, "teacher_rows": [row(13179)]}
+    sizing = {"max_teacher_sequence": 4500}
+    asked = teacher_to_ask(config, saved, None, sizing)
+    # 14000 is above the measured 13179, which does not fit, and 12500 is
+    # within a tenth of it: the longest length worth measuring is 9400.
+    assert teacher_wanted(asked) == [9400]
+    # Measured, and 9400 does not fit either: the middle of the rest.
+    asked["teacher_rows"].append(row(9400))
+    again = teacher_to_ask(config, asked, None, sizing)
+    assert teacher_wanted(again) == [6000]
+    # Close to what does not fit, or already fitting: nothing to measure.
+    assert teacher_to_ask(config, saved, None, {"max_teacher_sequence": 20000}) is None
+    near = {"samples": samples[3:5], "teacher_rows": [row(9400)]}
+    assert teacher_to_ask(config, near, None, {"max_teacher_sequence": 8000}) is None
+
+
+def test_a_teacher_that_fails_to_measure_is_not_asked_forever(config):
+    """#140 review: a requested teacher whose measuring fails (the card is
+    full) recorded nothing, so measuring stayed open and the model never
+    trained. After two tries the length is no longer asked."""
+    from songe.sleep.calibration_state import ask_for_teacher, teacher_wanted
+
+    saved = ask_for_teacher({"progress": {"complete": True}}, 9000)
+    assert teacher_wanted(saved) == [9000]
+    saved["teacher_tries"] = {"9000": 1}
+    assert teacher_wanted(saved) == [9000]
+    saved["teacher_tries"] = {"9000": 2}
+    assert teacher_wanted(saved) == [] and ask_for_teacher(saved, 9000) is None
+    # A length beyond the whole machine's limit is never measured.
+    limited = {"teacher_limits": [{"teacher_sequence": 8000}]}
+    assert ask_for_teacher(limited, 9000) is None
+
+
+def test_the_unload_wait_asks_for_the_missing_teacher_measurement(
+    config, store, measured, monkeypatch
+):
+    """#140 review: when training needs the agent's model unloaded, the wait
+    for memory came first and returned before the ask, so the same deadlock
+    stayed on smaller cards."""
+    from songe.sleep import sizing as sizing_module
+    from songe.sleep.calibration_state import teacher_wanted
+
+    _, machine = measured
+    saved = store.get("calibration")
+    saved["samples"] = [
+        {"id": "s1", "revision": "r", "required_sequence": 4000, "teacher_sequence": 8613}
+    ]
+    saved["teacher_rows"] = [
+        {"teacher_sequence": 13179, "host_peak_bytes": 1, "device_peak_bytes": 1}
+    ]
+    store.set("calibration", saved)
+    monkeypatch.setattr(
+        sizing_module, "choose_size", lambda *a: {"max_teacher_sequence": 7227}
+    )
+    monkeypatch.setattr(schedule, "after_unload", lambda before, reclaimable: before)
+    monkeypatch.setattr(
+        "songe.sleep.calibration_state.pending_keys", lambda store, config=None: None
+    )
+    scheduler = schedule.Scheduler(config, store, SimpleNamespace(), machine)
+    wait = scheduler.memory_wait(config, store, Snapshot(24 * GB, 20 * GB), 0)
+    assert wait == "Measuring memory for longer conversations"
+    assert teacher_wanted(store.get("calibration")) == [8613]
+    assert scheduler.last_fit is None

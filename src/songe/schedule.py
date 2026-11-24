@@ -650,10 +650,19 @@ class Scheduler:
                 or size.get("max_teacher_sequence", float("inf")) >= shortest
             )
 
-        if not retrying and fits(
-            choose_size(config, calibration, after_unload(before, reclaimable), history)
-        ):
+        size = choose_size(config, calibration, after_unload(before, reclaimable), history)
+        if not retrying and fits(size):
             return None
+        if size and not fits(size):
+            # Training would fit, but no teacher length the examples need
+            # was measured: measure it rather than wait for memory (#140).
+            from .sleep.calibration_state import teacher_to_ask
+
+            asked = teacher_to_ask(config, calibration, store, size)
+            if asked is not None:
+                store.set("calibration", asked)
+                self.last_fit = None
+                return "Measuring memory for longer conversations"
         needed = free_needed(config, calibration, before, history, fits)
         self.last_fit = (before, needed)  # for note_fit_wait
         return waiting_reason(before, history, needed)
@@ -1056,7 +1065,8 @@ class Scheduler:
                         self.reason = wait
                         # The wait a pressed Deep Dream is in before training
                         # (live: the page showed nothing for it).
-                        self.note_fit_wait(*self.last_fit)
+                        if self.last_fit:
+                            self.note_fit_wait(*self.last_fit)
                         return
                 if unloads:
                     wait = park_wait(
@@ -1115,11 +1125,14 @@ class Scheduler:
                         shortest is not None
                         and sizing.get("max_teacher_sequence", float("inf")) < shortest
                     ):
-                        from .sleep.calibration_state import ask_for_teacher
+                        from .sleep.calibration_state import teacher_to_ask
                         from .sleep.sizing import teacher_card_shortfall
 
-                        asked = ask_for_teacher(
-                            self.store.get("calibration") or {}, shortest
+                        asked = teacher_to_ask(
+                            self.config,
+                            self.store.get("calibration") or {},
+                            self.store,
+                            sizing,
                         )
                         if asked is not None:
                             # No teacher of the length these examples need was

@@ -870,15 +870,13 @@ def measure_teachers(
             "kind": "teacher",
             "phase": "teacher",
         }
+        if length in saved.get("teacher_wanted", []):
+            # Counted before measuring: a run that fails here (the card is
+            # full) still counts, and the length is not asked forever.
+            tries = saved.setdefault("teacher_tries", {})
+            tries[str(length)] = tries.get(str(length), 0) + 1
         save_progress(policy, store, saved, target, pool)
         prompt = (tokens * (length // len(tokens) + 1))[: max(1, length - len(y))]
-        # Measure the teacher on its own: memory the allocator still caches
-        # from the training probes made every teacher read as large as the
-        # largest of them (#140).
-        (
-            getattr(backend, "release_cache", None)
-            or getattr(backend, "release", lambda: None)
-        )()
         backend.reset_peak_memory()
         start = time.perf_counter()
         with Meter(platform, baseline, backend, policy.guard_min_interval) as meter:
