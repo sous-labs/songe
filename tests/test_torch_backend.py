@@ -167,6 +167,7 @@ def test_tokens_per_second_with_a_coarse_clock(backend, monkeypatch):
     tokens, _, stats = backend.sample([3, 8], seed=91, max_tokens=2)
     assert tokens
     assert math.isfinite(stats.generation_tps) and stats.generation_tps > 0
+    assert math.isfinite(stats.prompt_tps)
 
 
 def test_sampling_seed_base_and_interruption(backend):

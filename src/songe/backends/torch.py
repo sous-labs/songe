@@ -56,7 +56,7 @@ class Stats:
 
     @property
     def prompt_tps(self):
-        return self.prompt_tokens / (self.prompt_seconds or self.seconds)
+        return self.prompt_tokens / max(self.prompt_seconds or self.seconds, 1e-6)
 
 
 def divergence(
