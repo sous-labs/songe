@@ -53,6 +53,37 @@ def test_three_lines_idle_and_calibration_progress(config, store, monkeypatch):
     assert [key for key, value in lines(state)] == ["now", "next", "paused"]
 
 
+def test_with_two_models_the_wait_is_the_pressed_models(config, store, monkeypatch):
+    """Reported by Jack in a test on 11-24: with a 4B and a 1.7B, the status
+    said "ready to learn · 14 practice scenes waiting" (the 4B's) while the
+    1.7B, the one pressed, had none."""
+    from songe.practice import pool
+    from songe.status import experience_wait
+
+    config.learning = "dreams"
+    registry.migrate(config, store)
+    for name in ("first-4b", "pressed-1.7b"):
+        registry.observe(config, store, name)
+        registry.set_learning(store, name, "all")
+        registry.support(store, name, "trainable")
+    models = [m for m in registry.summaries(config, store) if m["id"] in {"first-4b", "pressed-1.7b"}]
+    assert models[0]["id"] == "first-4b"
+    kept = {"first-4b": [object()] * 14, "pressed-1.7b": []}
+    monkeypatch.setattr(pool, "practice_steps", lambda scoped, split="train": kept.get(scoped.model_key, []))
+    monkeypatch.setattr(pool, "heldout_units", lambda scoped: 5)
+    monkeypatch.setattr(pool, "untrained", lambda scoped, steps=None: list(steps or []))
+    monkeypatch.setattr(store, "traffic_times", lambda n: [1.0])
+    others = [m for m in registry.summaries(config, store) if m["id"] not in {"first-4b", "pressed-1.7b"}]
+    for m in others:
+        registry.set_learning(store, m["id"], "off")
+    models = registry.summaries(config, store)
+    assert experience_wait(config, store, models).startswith("ready to learn · 14")
+    store.set("requested_model", "pressed-1.7b")
+    assert experience_wait(config, store, models).startswith("a Deep Dream needs 1 practice scene · 0 kept")
+    store.set("requested_model", None)
+    assert experience_wait(config, store, models, "pressed-1.7b").startswith("a Deep Dream needs 1 practice scene")
+
+
 @pytest.mark.parametrize("reason,detail", [
     # The scheduler decided to start: it is starting.
     ("Will sleep when idle", "Starting now"),
