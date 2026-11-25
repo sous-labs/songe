@@ -324,3 +324,18 @@ def test_a_later_gguf_learner_gets_the_converter_runtime_once(tmp_path, monkeypa
     # CUDA/ROCm runtimes already carry torch; nothing is installed there.
     cuda = SimpleNamespace(accelerators=lambda: [SimpleNamespace(kind="cuda")])
     assert install.converter_python(Rooted(cuda, tmp_path)) == sys.executable
+
+
+def test_real_conversions_get_the_converter_runtime(monkeypatch):
+    """Conversion and merges pass artifacts.runtime.guarded_run; only the
+    inner memory.guarded_run was recognised, so a Mac without torch never
+    got the converter runtime and the panel said only "background work
+    failed" (reported by Jack in a test on 11-24)."""
+    from songe import memory
+    from songe.artifacts import runtime
+    from songe.backends import install
+
+    monkeypatch.setattr(install, "converter_python", lambda platform: "converter")
+    assert install.interpreter_for(None, runtime.guarded_run) == "converter"
+    assert install.interpreter_for(None, memory.guarded_run) == "converter"
+    assert install.interpreter_for(None, lambda *a, **k: None) == sys.executable

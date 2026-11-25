@@ -267,7 +267,13 @@ def converter_python(platform):
 
 
 def interpreter_for(platform, runner):
-    """A real run provisions the converter; an injected runner never installs."""
-    from ..memory import guarded_run
+    """A real run provisions the converter; an injected runner never installs.
 
-    return converter_python(platform) if runner is guarded_run else sys.executable
+    Conversion and merges run through artifacts.runtime.guarded_run (which
+    wraps memory.guarded_run); comparing against the inner one alone meant a
+    real run never reached converter_python."""
+    from .. import memory
+    from ..artifacts import runtime
+
+    real = runner is runtime.guarded_run or runner is memory.guarded_run
+    return converter_python(platform) if real else sys.executable
