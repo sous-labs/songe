@@ -668,6 +668,20 @@ def test_init_creates_its_data_once_accepted(tmp_path, monkeypatch, local, how):
         assert Store(root).version()["artifact"] == str(tmp_path / "model")
 
 
+def test_init_with_a_service_file_target_does_not_say_it_started(
+    tmp_path, monkeypatch, capsys
+):
+    """--launchd-target only writes the service file, but init printed
+    "Service running · starts at login" (reported by Jack in a test on 11-24)."""
+    from songe import cli
+
+    _, argv = fresh_install(tmp_path, monkeypatch, True)
+    assert cli.main([*argv, "--yes"]) == 0
+    out = capsys.readouterr().out
+    assert "Service running" not in out and "starts at login" not in out
+    assert "Service file written" in out and "not started" in out
+
+
 def test_reinit_declined_leaves_an_existing_install_as_it_was(tmp_path, monkeypatch):
     from songe import cli
 

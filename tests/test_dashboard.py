@@ -81,6 +81,37 @@ def test_a_dream_waiting_for_disk_space_says_how_much(config, store, monkeypatch
     assert activity(config, store, worker, None, models, live=True)["next"] == pending["next"]
 
 
+def test_with_two_models_the_wait_is_the_pressed_models(config, store, monkeypatch):
+    """Reported by Jack in a test on 11-24: with a 4B and a 1.7B, the status
+    said "ready to learn · 14 practice scenes waiting" (the 4B's) while the
+    1.7B, the one pressed, had none."""
+    from songe.practice import pool
+    from songe.status import experience_wait
+
+    config.learning = "dreams"
+    registry.migrate(config, store)
+    for name in ("first-4b", "pressed-1.7b"):
+        registry.observe(config, store, name)
+        registry.set_learning(store, name, "all")
+        registry.support(store, name, "trainable")
+    models = [m for m in registry.summaries(config, store) if m["id"] in {"first-4b", "pressed-1.7b"}]
+    assert models[0]["id"] == "first-4b"
+    kept = {"first-4b": [object()] * 14, "pressed-1.7b": []}
+    monkeypatch.setattr(pool, "practice_steps", lambda scoped, split="train": kept.get(scoped.model_key, []))
+    monkeypatch.setattr(pool, "heldout_units", lambda scoped: 5)
+    monkeypatch.setattr(pool, "untrained", lambda scoped, steps=None: list(steps or []))
+    monkeypatch.setattr(store, "traffic_times", lambda n: [1.0])
+    others = [m for m in registry.summaries(config, store) if m["id"] not in {"first-4b", "pressed-1.7b"}]
+    for m in others:
+        registry.set_learning(store, m["id"], "off")
+    models = registry.summaries(config, store)
+    assert experience_wait(config, store, models).startswith("ready to learn · 14")
+    store.set("requested_model", "pressed-1.7b")
+    assert experience_wait(config, store, models).startswith("a Deep Dream needs 1 practice scene · 0 kept")
+    store.set("requested_model", None)
+    assert experience_wait(config, store, models, "pressed-1.7b").startswith("a Deep Dream needs 1 practice scene")
+
+
 @pytest.mark.parametrize("reason,detail", [
     # The scheduler decided to start: it is starting.
     ("Will sleep when idle", "Starting now"),
@@ -386,6 +417,20 @@ async def test_hashed_assets_are_immutable(config, store):
         ] == "no-cache"
 
 
+def test_hidden_status_lines_stay_hidden_at_phone_width():
+    """At phone width an empty GPU label showed with no GPU line, since
+    the narrow layout's `display: grid` beat the `hidden` attribute."""
+    import re
+    from pathlib import Path
+
+    css = (Path(__file__).resolve().parents[1] / "src/songe/ui/next.css").read_text(
+        encoding="utf-8"
+    )
+    phone = css.split("@media (width < 46rem)", 1)[1]
+    assert re.search(r"\.status p \{[^}]*display: grid", phone)
+    assert re.search(r"\.status p\[hidden\] \{ display: none; \}", phone)
+
+
 async def test_real_model_scheduler_reports_idle_then_experience_then_off(
     config, store
 ):
@@ -645,3 +690,17 @@ def test_empty_store_pipeline_keeps_counts_and_unknown_measurements(config, stor
     }
     assert metrics["wake"] == {"last": None}
     assert metrics["versions"] == []
+
+
+def test_page_times_use_a_24_hour_clock():
+    """Times the page writes sit beside 24-hour times Songe words itself
+    ("since your last Quick Dream at 16:00"): one clock, whatever the
+    browser's language."""
+    import re
+    from pathlib import Path
+
+    import songe
+
+    script = (Path(songe.__file__).parent / "ui" / "next.js").read_text(encoding="utf-8")
+    calls = re.findall(r"toLocaleTimeString\(([^)]*)\)", script)
+    assert calls and all("hourCycle: 'h23'" in call for call in calls)

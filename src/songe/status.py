@@ -93,10 +93,17 @@ def work_text(training, model=None):
     return text
 
 
-def experience_wait(config, store, models):
+def experience_wait(config, store, models, first=None):
+    """What learning waits on, said for one model: the one a pressed Dream is
+    for, else `first` (the model the status is about), else the first in the
+    list. With several models, the first in the list spoke for all of them
+    (reported by Jack in a test on 11-24: "ready to learn · 14 practice scenes
+    waiting" was another model's while the pressed one had none)."""
     from .config import Config
     from .sleep.calibration_state import measurement_text, needs_growth
 
+    lead = [store.get("requested_model"), first]
+    models = sorted(models, key=lambda m: lead.index(m["id"]) if m["id"] in lead else len(lead))
     enabled = [m for m in models if m.get("enabled")]
     if not enabled:
         return "learning off for all models" if models else "no models · songe init"
@@ -322,14 +329,14 @@ def activity(config, store, scheduler, training, models, *, live, ready=None):
         "Waiting for experience",
         "Waiting for enabled models and learnable experience",
     }:
-        reason = experience_wait(config, store, models)
+        reason = experience_wait(config, store, models, (target or {}).get("id"))
     elif (
         reason in {"Waiting for an idle gap", "Will sleep when idle"}
         or "without proxy traffic" in reason
     ):
         # With nothing to run, quiet time is not what it waits on; data is.
         reason = (
-            experience_wait(config, store, models)
+            experience_wait(config, store, models, (target or {}).get("id"))
             if live
             and not ready
             and hasattr(scheduler, "choose_model")

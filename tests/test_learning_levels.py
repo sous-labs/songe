@@ -1,5 +1,7 @@
 """Learning windows use recorded source exchanges; no model runtime is loaded."""
 
+import asyncio
+import contextlib
 import sqlite3
 from types import SimpleNamespace
 
@@ -332,6 +334,47 @@ async def test_cancel_throws_the_dream_away_and_keeps_its_practice_untrained(lev
     assert learner.nights()[-1]["status"] == "discarded"
     assert learner.get("experience_watermark") == 7  # what it practised stays untrained
     assert await scheduler.cancel("other") == 0
+
+
+async def test_cancel_says_it_stopped_work_that_was_not_a_dream_yet(levels):
+    """Cancel during a measurement stopped it but answered "No Dream to
+    cancel" (reported by Jack in a test on 11-24)."""
+    config, store, _ = levels
+    scheduler = ModelScheduler(config, store, SimpleNamespace())
+    reading = scheduler.reading_task = asyncio.create_task(asyncio.sleep(60))
+    app = create_app(config, store, scheduler=scheduler)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app), base_url="http://localhost"
+    ) as client:
+        response = await client.post(
+            "/api/control", json={"action": "cancel", "model": "other"}
+        )
+        assert response.json()["message"] == "Stopped · no Dream had started yet"
+        with contextlib.suppress(asyncio.CancelledError):
+            await reading
+        response = await client.post(
+            "/api/control", json={"action": "cancel", "model": "other"}
+        )
+        assert response.json()["message"] == "No Dream to cancel"
+
+
+async def test_cancel_stops_a_pressed_dream_still_getting_ready(levels):
+    """A pressed Deep Dream that has not started yet (only requested) is
+    stopped by Cancel, which says so and takes its pause away."""
+    config, store, _ = levels
+    scheduler = ModelScheduler(config, store, SimpleNamespace())
+    store.set("requested_model", "other")
+    store.set("requested_sleep", True)
+    store.set("paused", True)
+    app = create_app(config, store, scheduler=scheduler)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app), base_url="http://localhost"
+    ) as client:
+        response = await client.post(
+            "/api/control", json={"action": "cancel", "model": "other"}
+        )
+    assert response.json()["message"] == "Stopped · no Dream had started yet"
+    assert store.get("paused") is False and store.get("requested_model") is None
 
 
 async def test_a_manual_deep_dream_trains_with_auto_dream_off(levels):

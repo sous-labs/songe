@@ -84,4 +84,4 @@ def main():
 if __name__ == "__main__":
     from songe.telemetry import diagnostic_main
 
-    diagnostic_main(main)
+    diagnostic_main(main, stoppable=True)

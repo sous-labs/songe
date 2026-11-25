@@ -77,6 +77,42 @@ def test_tools_checksum_cache_tamper_repair_and_platform_selection(tmp_path):
     assert not list(tmp_path.glob(".download-*"))
 
 
+def test_only_the_converters_of_the_llama_cpp_source_are_extracted(tmp_path):
+    """Windows' default path limit is 260 characters. The pinned source tree
+    has web UI files 220 characters deep, so with the data folder in front
+    every extraction failed with FileNotFoundError (reported by Jack in a
+    test on 11-24). The converters never read them."""
+    deep = "tools/ui/src/lib/components/" + "a" * 150 + ".svelte"
+    tree = "llama.cpp-c1a4feb/"
+    archive = tmp_path / "source.tar.gz"
+    archive.write_bytes(
+        archive_bytes(
+            {
+                tree + "convert_hf_to_gguf.py": b"hf",
+                tree + "convert_lora_to_gguf.py": b"lora",
+                tree + "conversion/base.py": b"base",
+                tree + "gguf-py/gguf/__init__.py": b"gguf",
+                tree + "models/templates/Kimi-K3.jinja": b"template",
+                tree + "models/ggml-vocab-llama.gguf": b"vocab",
+                tree + deep: b"ui",
+                "bin/llama-quantize": b"binary",
+            }
+        )
+    )
+    out = tmp_path / "out"
+    extract(archive, out)
+    kept = sorted(p.relative_to(out).as_posix() for p in out.rglob("*") if p.is_file())
+    assert kept == [
+        "bin/llama-quantize",
+        tree + "conversion/base.py",
+        tree + "convert_hf_to_gguf.py",
+        tree + "convert_lora_to_gguf.py",
+        tree + "gguf-py/gguf/__init__.py",
+        tree + "models/templates/Kimi-K3.jinja",
+    ]
+    assert max(len(name) for name in kept) < 100
+
+
 @pytest.mark.parametrize(
     "name", ["../escape", "/absolute", "C:/windows", "dir/../../escape", "dir\\escape"]
 )

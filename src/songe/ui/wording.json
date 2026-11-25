@@ -95,7 +95,7 @@
     "disk": "Waits for disk space",
     "no_data": "Waits for new conversations",
     "model_server": "Waits for the model to be loaded in your model server",
-    "paused": "Paused",
+    "paused": "Paused · press Resume to continue",
     "unsupported": "This model cannot learn here yet",
     "error": "Stopped by an error · run songe doctor"
   },
@@ -310,11 +310,14 @@
   "measuring_progress": "{done} of {total} tokens measured",
   "measured_can": "{name} can learn on this machine · Dreams can train it from now on",
   "measured_cannot": "{name} can't learn on this machine: {reason} · Songe still works for it, without training",
+  "not_supported": "Not supported yet",
+  "choose_another": "Choose another model",
   "control_unreachable": "Can't reach Songe · it may have restarted · reload the page",
   "page_error": "The page hit an error · reload it",
   "quick_failed": {
     "unreadable": "Quick Dream {when} couldn't read your conversations: the model's answers weren't readable · they stay unread and are read next time",
-    "no_model": "Quick Dream {when} couldn't start: no model is loaded in your model server"
+    "no_model": "Quick Dream {when} couldn't start: no model is loaded in your model server",
+    "memory": "Quick Dream {when} couldn't start: memory was tight on this computer · close some apps, then press Quick Dream"
   },
   "quick_checked_read": "Quick Dream {when} read {read} · found {found} · no new preferences",
   "chip_failed": "failed",
@@ -323,7 +326,8 @@
   "quick_read_found": "Read {read} · found {found}",
   "quick_failed_card": {
     "unreadable": "Couldn't read your conversations: the model's answers weren't readable · they stay unread and are read next time",
-    "no_model": "Couldn't start: no model is loaded in your model server"
+    "no_model": "Couldn't start: no model is loaded in your model server",
+    "memory": "Couldn't start: memory was tight on this computer · close some apps, then press Quick Dream"
   },
   "getting_ready": "Getting ready · testing how much your computer can learn at once · {done} of {total} tokens so far",
   "getting_ready_title": "Getting ready to train · testing how much your computer can learn at once · {done} of {total} tokens so far",

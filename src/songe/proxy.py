@@ -429,9 +429,32 @@ def create_app(config=None, store=None, client=None, scheduler=None):
                     (raw for raw, alias in aliases.items() if alias == requested), None
                 )
                 model = model or (store.get("primary_model") if is_alias else requested)
+                refs = ()
+                if (
+                    model == requested
+                    and requested.startswith("songe/")
+                    and not await asyncio.to_thread(registry.find, store, requested)
+                ):
+                    # A Songe name nobody registered: a model downloaded
+                    # after Songe started. Find it in the library; never
+                    # register the Songe name itself as a model (live: its
+                    # 404 marked the name unsupported and the real model was
+                    # renamed songe/<name>-<hash>).
+                    from .models import library
+
+                    try:
+                        ref = await asyncio.to_thread(library.named, config, requested)
+                    except Exception:
+                        logger.warning("library_lookup_failed", exc_info=True)
+                        ref = None
+                    model, refs = (ref.serving_id, (ref,)) if ref else (None, ())
+                    if model is None:
+                        # Passed on as asked (the server answers 404), not
+                        # served by the primary model's version.
+                        version, binding = None, f"{requested}:base"
                 if model:
                     row = await asyncio.to_thread(
-                        registry.observe, config, store, model
+                        registry.observe, config, store, model, refs
                     )
                     model = row["id"]
                     selected = store.scoped(model)
