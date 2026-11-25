@@ -482,7 +482,7 @@ class Backend:
         mx = self.mx
         config = self.config
         prompt, teacher_prompt = paired_prompts(self.tokenizer, step, config)
-        y, forced = lesson_tokens(self, step, prompt, seed)
+        y, forced = lesson_tokens(self, step, prompt, seed, teacher_prompt)
         chunk = config.token_chunk
         spans = [(s, min(s + chunk, len(y))) for s in range(0, len(y), chunk)]
         # Hindsight steps learn from this cycle's teacher; general anchors keep

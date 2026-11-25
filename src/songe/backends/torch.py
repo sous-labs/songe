@@ -774,7 +774,7 @@ class TorchBackend:
             raise ValueError("Backend was opened for serving only")
         config = self.config
         prompt, teacher_prompt = paired_prompts(self.tokenizer, step, config)
-        y, forced = lesson_tokens(self, step, prompt, seed)
+        y, forced = lesson_tokens(self, step, prompt, seed, teacher_prompt)
         teacher_context = self.teacher() if step.get("hindsight") else self.base()
         teacher_h = self.teacher_hidden(teacher_prompt, y, teacher_context)
         self.check()

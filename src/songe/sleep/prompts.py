@@ -339,7 +339,7 @@ def answer_tokens(tokenizer, step, config):
     return ids + ([end] if end is not None else [])
 
 
-def lesson_tokens(backend, step, prompt, seed=None):
+def lesson_tokens(backend, step, prompt, seed=None, teacher_prompt=None):
     """(tokens, forced): what one training example's loss runs over.
 
     forced: the teacher's own answer. The teacher (shown the note) and the
@@ -347,10 +347,22 @@ def lesson_tokens(backend, step, prompt, seed=None):
     note leads to, so the place where they part, often the first token, is
     in the loss. Otherwise the student's fresh rollout (DESIGN 3.4): once
     the student has started its own answer, a teacher scoring those tokens
-    mostly agrees with the rest, and the start is one token among many."""
+    mostly agrees with the rest, and the start is one token among many.
+
+    A practice scene that carries no answer (an agent's scene: its teacher's
+    answer is a tool call, which is not kept) is answered by the teacher
+    here, from teacher_prompt, and trained along that. Its lesson is as
+    often one token (`pnpm` where the student writes `npm`) as a plain
+    chat's, and a rollout hides it the same way. It costs what the rollout
+    it replaces cost."""
     y = answer_tokens(backend.tokenizer, step, backend.config)
     if y:
         return y, True
+    if teacher_prompt and step.get("practice") and step.get("hindsight"):
+        with backend.teacher():
+            y = list(backend.sample(teacher_prompt, seed=seed)[0])
+        if y:
+            return y, True
     return backend.sample(prompt, seed=seed)[0], False
 
 

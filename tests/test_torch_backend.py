@@ -727,3 +727,28 @@ def test_a_step_with_the_teachers_answer_is_trained_along_it(backend, step):
     # Without one, the rollout as before.
     backend.sample = rollout
     assert backend.train_step(step, seed=1)[2] >= 1
+
+
+def test_an_agents_practice_scene_is_trained_along_its_teachers_answer(backend, step):
+    """No stored answer: the teacher (shown the note) writes one, the loss
+    runs along it, and the clip does not apply."""
+    scene = step | {"practice": True}
+    student, teacher = paired_prompts(backend.tokenizer, scene, backend.config)
+    assert student != teacher
+    prompts, rollout = [], backend.sample
+
+    def sample(prompt, seed=None, **kwargs):
+        prompts.append(list(prompt))
+        return rollout(prompt, seed=seed, **kwargs)
+
+    backend.sample = sample
+    backend.config.vocab_clip = 0.0
+    unclipped = backend.train_step(scene, seed=3)[0]
+    backend.config.vocab_clip = 1e-12  # would cut every term of a rollout
+    value, grads, count = backend.train_step(scene, seed=3)
+    assert prompts == [teacher, teacher] and count >= 1
+    assert value == pytest.approx(unclipped) and value > 1e-9
+    assert any(g.abs().sum() > 0 for g in grads.values())
+    # The same step as a real one: the student's rollout, clipped.
+    assert backend.train_step(step, seed=3)[0] < 1e-9
+    assert prompts[-1] == paired_prompts(backend.tokenizer, step, backend.config)[0]

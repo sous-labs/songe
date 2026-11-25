@@ -180,6 +180,53 @@ def test_a_scene_with_the_teachers_answer_is_trained_along_it(config):
     assert answer_tokens(tokenizer, long, config) == list(b"Yes, che")
 
 
+def test_an_agents_practice_scene_is_trained_along_the_answer_its_teacher_writes(config):
+    """An agent's scene keeps no answer (the teacher's is a tool call). The
+    teacher writes one when the scene is trained, so the token where it and
+    the student part is in the loss, as for a plain chat's scene."""
+    import contextlib
+    from types import SimpleNamespace
+
+    from songe.sleep.prompts import lesson_tokens
+
+    weights, asked = ["student"], []
+
+    @contextlib.contextmanager
+    def teacher():
+        weights.append("teacher")
+        try:
+            yield
+        finally:
+            weights.pop()
+
+    def sample(prompt, seed=None):
+        asked.append((weights[-1], prompt, seed))
+        return ([4, 5] if prompt == [1, 2, 3] else [7, 8, 9]), "", None
+
+    backend = SimpleNamespace(tokenizer=Tokenizer(), config=config, sample=sample, teacher=teacher)
+    note = [{"role": "user", "content": "Lesson: use pnpm."}]
+    scene = make("practice:s#v1", hindsight=note) | {"practice": True}
+    # The teacher's prompt (the scene and its note), answered with the teacher's weights.
+    assert lesson_tokens(backend, scene, [1, 2], 5, [1, 2, 3]) == ([4, 5], True)
+    assert asked == [("teacher", [1, 2, 3], 5)] and weights == ["student"]
+    # A stored answer comes first: nothing is written.
+    stored = scene | {"teacher_answer": {"content": "Yes.", "finished": False}}
+    assert lesson_tokens(backend, stored, [1, 2], 5, [1, 2, 3]) == (list(b"Yes."), True)
+    assert len(asked) == 1
+    # The student's own rollout, as before: a real step, a scene rehearsed
+    # without its note, and a caller that has no teacher prompt.
+    for step, teacher_prompt in (
+        (make("real", hindsight=note), [1, 2, 3]),
+        (scene | {"hindsight": []}, [1, 2, 3]),
+        (scene, None),
+    ):
+        assert lesson_tokens(backend, step, [1, 2], 5, teacher_prompt) == ([7, 8, 9], False)
+    assert [who for who, _, _ in asked[1:]] == ["student"] * 3
+    # A teacher that writes nothing: the rollout.
+    backend.sample = lambda prompt, seed=None: ([] if prompt == [1, 2, 3] else [7], "", None)
+    assert lesson_tokens(backend, scene, [1, 2], 5, [1, 2, 3]) == ([7], False)
+
+
 def test_an_agents_practice_scene_asks_its_teacher_for_an_action_not_a_reply(config):
     """With tools in the request a scene often ends on a tool result and the
     right next step is a tool call: its aside closes with the line a real
