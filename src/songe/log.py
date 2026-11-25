@@ -17,6 +17,14 @@ from .storage import private_dir
 
 # 3: repeated parts of recorded requests and steps stored once (parts.py).
 SCHEMA_VERSION = 3
+# Steps of turns brought in by `songe import` are read for what the user said
+# (notes, practice) but are never test moments or training contexts: another
+# model answered them, with another agent's tools (imports.py).
+NOT_IMPORTED = (
+    "NOT EXISTS (SELECT 1 FROM exchanges e WHERE e.id=json_extract(s.payload,'$.source_id')"
+    " AND e.binding LIKE 'import:%')"
+)
+
 # Tries of one recording while another writer holds the database, each
 # waiting the connection timeout (5 s): a minute covers giving back the space
 # of a store at its size limit.
@@ -183,6 +191,10 @@ CREATE TABLE IF NOT EXISTS practice (
 -- Sessions whose recordings were deleted for the size limit after they were
 -- learned from (recordings.keep_under); their signals and practice stay.
 CREATE TABLE IF NOT EXISTS pruned_sessions (session TEXT PRIMARY KEY, at REAL NOT NULL);
+-- Turns brought in from an agent's own logs (songe import), by content, so
+-- importing the same logs again adds only what is new.
+CREATE TABLE IF NOT EXISTS imports (
+ key TEXT PRIMARY KEY, exchange_id INTEGER NOT NULL, source TEXT NOT NULL, at REAL NOT NULL);
 """
 
 
@@ -473,6 +485,7 @@ class Store:
         complete=True,
         binding="",
         started=None,
+        import_key=None,
     ):
         # Giving space back (recordings.compact) can hold the write lock
         # longer than one connection timeout; a recording waits for it (in
@@ -480,14 +493,20 @@ class Store:
         # being lost.
         for attempt in range(RECORD_ATTEMPTS):
             try:
-                return self._record(path, request, response, status, complete, binding, started)
+                return self._record(
+                    path, request, response, status, complete, binding, started, import_key
+                )
             except sqlite3.OperationalError as exc:
                 if "locked" not in str(exc) or attempt == RECORD_ATTEMPTS - 1:
                     raise
 
-    def _record(self, path, request, response, status, complete, binding, started):
+    def _record(self, path, request, response, status, complete, binding, started, import_key=None):
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            if import_key is not None and db.execute(
+                "SELECT 1 FROM imports WHERE key=?", (import_key,)
+            ).fetchone():
+                return None
             cutoff = db.execute(
                 "SELECT value FROM state WHERE key='forgotten_at'"
             ).fetchone()
@@ -518,6 +537,13 @@ class Store:
                     refs,
                 ),
             )
+            if import_key is not None:
+                # One summary line for a whole import, not one per turn.
+                db.execute(
+                    "INSERT INTO imports VALUES (?,?,?,?)",
+                    (import_key, cur.lastrowid, binding, time.time()),
+                )
+                return cur.lastrowid
             messages = request.get("messages") if isinstance(request, dict) else None
             db.execute(
                 "INSERT INTO events(created,model_id,stage,text) VALUES (?,?,?,?)",
@@ -828,6 +854,7 @@ class Store:
             db.execute("DELETE FROM reading_cache")
             db.execute("DELETE FROM practice")
             db.execute("DELETE FROM pruned_sessions")
+            db.execute("DELETE FROM imports")
             # Cycle records keep their counts; example text quotes the
             # conversations and goes (docs/CONTRACTS.md, Integration decisions).
             for night_id, raw in db.execute("SELECT id, record FROM nights").fetchall():
@@ -1032,14 +1059,15 @@ class Store:
     def _learning_filter(self, db):
         level, cutoff = self.learning_policy(db)
         if level == "all":
-            return "1", ()
+            return NOT_IMPORTED, ()
         if level == "off" or cutoff is None:
             return "0", ()
         # Use the original recording time, never a later hindsight revision.
         # A model's first request starts before registration but is recorded
         # afterward, so request-start time would incorrectly exclude it.
         return (
-            "EXISTS (SELECT 1 FROM exchanges e WHERE e.id=json_extract(s.payload,'$.source_id') AND COALESCE(e.recorded_at,e.created)>?)",
+            "EXISTS (SELECT 1 FROM exchanges e WHERE e.id=json_extract(s.payload,'$.source_id') AND COALESCE(e.recorded_at,e.created)>?)"
+            " AND " + NOT_IMPORTED,
             (cutoff,),
         )
 
