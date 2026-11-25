@@ -1901,20 +1901,6 @@ class ModelScheduler(Scheduler):
             return None
         learner = self.installation_store.scoped(model)
         unread = len(await asyncio.to_thread(reading.pending, learner))
-        sample = await asyncio.to_thread(self.platform.memory)
-        if unread and sample.pressure != "normal":
-            # Reading waits for normal memory pressure (read_sessions); a
-            # press under pressure would say "started" and read nothing
-            # (reported by Jack in a test on 11-24: a Mac at "warning").
-            learner.set("quick_checked", {"at": time.time(), "nothing_new": False, "error": "memory"})
-            from . import quick as quick_lessons
-
-            await asyncio.to_thread(
-                quick_lessons.record, learner,
-                {"added": [], "lessons": len(quick_lessons.active(learner)),
-                 "changes": {"added": [], "reworded": [], "dropped": []}},
-                time.time(), None, read=0, found=0, error="memory")
-            return "memory"
         if unread:
             probe_reader = await self.reader_for(model)
             if probe_reader is None:
@@ -1935,6 +1921,21 @@ class ModelScheduler(Scheduler):
             # so, on the notice and (lasting) on the dashboard.
             learner.set("quick_checked", {"at": time.time(), "nothing_new": True})
             return "nothing"
+        sample = await asyncio.to_thread(self.platform.memory)
+        if sample.pressure != "normal":
+            # Reading waits for normal memory pressure (read_sessions), also
+            # when it would only publish lessons from new signals; a press
+            # under pressure would say "started" and do nothing
+            # (reported by Jack in a test on 11-24: a Mac at "warning").
+            learner.set("quick_checked", {"at": time.time(), "nothing_new": False, "error": "memory"})
+            from . import quick as quick_lessons
+
+            await asyncio.to_thread(
+                quick_lessons.record, learner,
+                {"added": [], "lessons": len(quick_lessons.active(learner)),
+                 "changes": {"added": [], "reworded": [], "dropped": []}},
+                time.time(), None, read=0, found=0, error="memory")
+            return "memory"
         self.dream_task = asyncio.create_task(
             self.read_sessions(
                 force=True,

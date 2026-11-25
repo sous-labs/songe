@@ -784,6 +784,22 @@ async def test_quick_dream_under_memory_pressure_says_so_instead_of_started(conf
     assert await scheduler.quick_now("learner") == 1
 
 
+async def test_quick_dream_with_only_new_signals_under_memory_pressure_says_so(config, store, monkeypatch):
+    """Nothing unread, but signals since the last Quick Dream: the press would
+    publish lessons, and reading waits under memory pressure all the same."""
+    config.learning = "dreams"
+    registry.migrate(config, store)
+    registry.observe(config, store, "learner")
+    registry.set_learning(store, "learner", "all")
+    learner = store.scoped("learner")
+    learner.set("quick_seen", [999, 999])  # differs from what is there now
+    scheduler, asked = scheduler_for(config, store, monkeypatch, loaded=["learner"])
+    scheduler.platform.memory().pressure = "warn"
+    assert await scheduler.quick_now("learner") == "memory"
+    assert getattr(scheduler, "dream_task", None) is None and asked == []
+    assert learner.get("quick_checked")["error"] == "memory"
+
+
 def test_a_pi_compaction_is_not_a_conversation_and_its_continuation_joins(store):
     """Live demo: pi's summarise calls were read as separate sessions and the
     user's conversation was split from its continuation."""
