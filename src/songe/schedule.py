@@ -1620,10 +1620,15 @@ class ModelScheduler(Scheduler):
 
     async def ensure_model(self, model, version):
         """Renew the selected identity; serialize global servers across bindings."""
-        if model in self.press_loads:
+        held = self.press_loads.get(model)
+        if held:
             # The agent asked for a model Songe loaded for a press: it is the
-            # user's now, never released by Songe (release_press_load).
-            self.press_loads[model]["used"] = True
+            # user's now, never released by Songe (release_press_load). While
+            # the press still loads it, the agent waits for that load rather
+            # than start a second one (LM Studio would drop the press's
+            # pending claim and load another instance beside it).
+            held["used"] = True
+            await held["loading"].wait()
         global_binding = self.installation_config.upstream in {"llamacpp", "mlx"}
         while True:
             async with self.lock:
@@ -2040,7 +2045,8 @@ class ModelScheduler(Scheduler):
         # Not under self.lock: a cold load can take minutes and the agent's
         # requests wait on that lock. Registered first, so other work skips
         # the model (loaded_listing) and learning waits (reading_busy).
-        self.press_loads[model] = {"version": version, "used": False}
+        loading = asyncio.Event()
+        self.press_loads[model] = {"version": version, "used": False, "loading": loading}
         try:
             await self.upstream.load(version)
         except MemoryPressure as exc:
@@ -2050,6 +2056,7 @@ class ModelScheduler(Scheduler):
             logger.warning("press_load_failed %s: %s", model, exc)
             return "no_model"
         finally:
+            loading.set()
             owned = getattr(self.upstream, "owned", {})
             # Only a load Songe requested is Songe's: a model that was already
             # loaded (the user's) is reused and never claimed, never released.
@@ -2067,10 +2074,12 @@ class ModelScheduler(Scheduler):
             self.release_tasks[model] = asyncio.create_task(self.release_press_load(model))
 
     async def release_press_load(self, model):
-        """Unload what load_for_press loaded, once nothing is in flight (Ollama:
-        keep_alive 0, confirmed by /api/ps; LM Studio: unload), unless the
-        agent has asked for that model since: then it is the user's, and the
-        server's own idle timeout decides."""
+        """Unload what load_for_press loaded, once nothing is in flight and no
+        reader is on it (Ollama: keep_alive 0, confirmed by /api/ps; LM Studio:
+        unload), unless the agent has asked for that model since: then it is
+        the user's, and the server's own idle timeout decides. A request that
+        arrives while it releases sends it back here to wait; nothing drops
+        Songe's claim on an instance it did not release."""
         interval = getattr(self.installation_config, "guard_min_interval", 0.1)
         while True:
             held = self.press_loads.get(model)
@@ -2087,20 +2096,24 @@ class ModelScheduler(Scheduler):
             ):
                 await asyncio.sleep(interval)  # retried, never dropped
                 continue
-            break
 
-        def still_ours():
-            # Checked again right before the unload and while it waits: a
-            # request admitted meanwhile keeps the model.
-            return not held["used"] and not any(self.in_flight.values())
+            def still_ours(held=held):
+                # Checked again right before the unload and while it waits:
+                # any request admitted meanwhile (its model not known yet)
+                # stops it, and the loop above decides.
+                return not held["used"] and not any(self.in_flight.values())
 
-        try:
-            await self.upstream.unload(held["version"], still=still_ours)
+            try:
+                released = await self.upstream.unload(held["version"], still=still_ours)
+            except Exception as exc:
+                logger.warning("press_release_failed %s: %s", model, exc)
+                self.press_loads.pop(model, None)
+                return
+            if released is False:
+                continue  # interrupted by a request: wait, then decide again
             logger.info("press_released %s", held["version"]["identifier"])
-        except Exception as exc:
-            logger.warning("press_release_failed %s: %s", model, exc)
-        finally:
             self.press_loads.pop(model, None)
+            return
 
     def dream_blocked(self, model):
         """Why Dream can do nothing for this model right now, or None."""

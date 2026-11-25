@@ -823,6 +823,8 @@ def pressed_setup(config, store, monkeypatch, tmp_path, upstream, *, available=9
     def route(request):
         if request.url.path.startswith("/api/"):
             return ollama(request)
+        if request.method == "GET":
+            return httpx.Response(200, json={"data": []})
         body = json.loads(request.content)
         name = (body.get("response_format") or {}).get("json_schema", {}).get("name")
         asked.append((body["model"], name))
@@ -999,6 +1001,9 @@ async def test_a_press_loads_without_holding_the_agents_lock(config, store, monk
 
 
 async def test_a_request_admitted_during_the_release_keeps_the_model(config, store, monkeypatch, tmp_path):
+    """A request admitted while Songe releases stops the release with Songe's
+    claim kept: one for another model sends it back to wait and release
+    later; one for this model leaves the model to the agent."""
     running = []
     hooks = {}
     upstream, handler, generated = fake_ollama(tmp_path, running, hooks)
@@ -1006,15 +1011,19 @@ async def test_a_request_admitted_during_the_release_keeps_the_model(config, sto
     assert await scheduler.load_for_press("learner") is None
 
     async def admitted():
-        scheduler.acquire("admission")
+        hooks.pop("show")
+        scheduler.acquire("admission")  # a request for another model
 
     hooks["show"] = admitted  # same_weights, just before the unload
-    await scheduler.release_press_load("learner")
+    release = asyncio.create_task(scheduler.release_press_load("learner"))
+    await asyncio.sleep(0.05)
     assert running == ["learner:latest"] and all("keep_alive" not in g for g in generated)
-    # Admitted after keep_alive 0 was sent: Ollama loads it again for the
-    # agent, and the release stops waiting for /api/ps at once.
-    scheduler.release("admission")
-    del hooks["show"]
+    assert "learner" in upstream.owned and "learner" in scheduler.press_loads
+    scheduler.release("admission")  # it finished: the release goes on
+    await asyncio.wait_for(release, 2)
+    assert running == [] and generated[-1]["keep_alive"] == 0 and upstream.owned == {}
+    # Admitted after keep_alive 0 was sent, for this model: Ollama loads it
+    # again for the agent, and the release stops waiting for /api/ps at once.
     assert await scheduler.load_for_press("learner") is None
 
     async def agent_back(body):
@@ -1023,9 +1032,52 @@ async def test_a_request_admitted_during_the_release_keeps_the_model(config, sto
 
     hooks.update({"generate": agent_back, "keep": True})
     started = asyncio.get_running_loop().time()
-    await scheduler.release_press_load("learner")
+    release = asyncio.create_task(scheduler.release_press_load("learner"))
+    await asyncio.sleep(0.05)
+    await scheduler.ensure_model("learner", learner.version())  # the agent's request
+    scheduler.release("admission")
+    await asyncio.wait_for(release, 2)
     assert asyncio.get_running_loop().time() - started < 2
     assert running == ["learner:latest"] and scheduler.press_loads == {}
+    assert "learner" in upstream.owned  # Songe's claim is never just dropped
+
+
+async def test_the_agent_waits_for_a_press_load_instead_of_loading_again(config, store, monkeypatch, tmp_path):
+    """LM Studio: a request for the model while a press loads it used to drop
+    the press's pending claim and load a second instance beside it."""
+    from tests.test_lmstudio import FakeLMS
+
+    upstream = FakeLMS(tmp_path, appear_after=1)
+    upstream.config.upstream_url = "http://lms.test/v1"
+    scheduler, learner, asked = pressed_setup(config, store, monkeypatch, tmp_path, upstream)
+    folder = tmp_path / "lmstudio-community/granite-4.2-3b-MLX-4bit"
+    folder.mkdir(parents=True)
+    (folder / "model.safetensors").write_bytes(b"mlx weights")
+    with store.connect() as db:
+        db.execute("UPDATE versions SET artifact=? WHERE id='base-learner'", (str(folder),))
+    loading, go = asyncio.Event(), asyncio.Event()
+    request_load = upstream.request_load
+
+    async def slow(key, identifier, context=None):
+        loading.set()
+        await go.wait()
+        await request_load(key, identifier, context)
+
+    upstream.request_load = slow
+    press = asyncio.create_task(scheduler.load_for_press("learner"))
+    try:
+        await asyncio.wait_for(loading.wait(), 2)
+        agent = asyncio.create_task(scheduler.ensure_model("learner", learner.version()))
+        await asyncio.sleep(0.05)
+        assert not agent.done()  # it waits for the press's load
+    finally:
+        go.set()
+    assert await press is None
+    await asyncio.wait_for(agent, 2)
+    assert [c[0] for c in upstream.calls if c[0] == "load"] == ["load"]
+    assert [m["identifier"] for m in upstream.ps] == ["learner"]
+    await scheduler.release_press_load("learner")  # the agent's now: kept
+    assert len(upstream.ps) == 1 and scheduler.press_loads == {}
 
 
 async def test_a_press_that_fails_after_loading_releases_the_model(config, store, monkeypatch, tmp_path):
@@ -1104,11 +1156,17 @@ async def test_a_pressed_quick_dream_loads_and_releases_on_lm_studio(config, sto
 
     upstream.live_owned = admitted
     upstream.calls.clear()
-    await scheduler.release_press_load("learner")
-    assert not any(c[0] == "unload" for c in upstream.calls) and len(upstream.ps) == 1
+    upstream.ps[0]["contextLength"] = 32768  # Songe's choice, not the user's
+    release = asyncio.create_task(scheduler.release_press_load("learner"))
+    await asyncio.sleep(0.05)
     upstream.live_owned = live_owned
-    scheduler.release("admission")
-    upstream.ps.clear()
+    assert not any(c[0] == "unload" for c in upstream.calls) and len(upstream.ps) == 1
+    # The claim stays Songe's: its context is not taken for the user's.
+    await upstream.served_contexts()
+    assert "learner" in upstream.owned and "learner" not in upstream.user_contexts
+    scheduler.release("admission")  # that request (another model's) is done
+    await asyncio.wait_for(release, 2)
+    assert upstream.ps == [] and scheduler.press_loads == {}
     # A model the user loaded in LM Studio is read with and never unloaded.
     record_session(store, ask="fix the other failing test")
     upstream.ps.append({"identifier": "learner", "path": "lmstudio-community/granite-4.2-3b-MLX-4bit",

@@ -316,7 +316,7 @@ class Ollama:
                         for m in await self._running()
                     }:
                         if still is not None and not still():
-                            return  # the agent asked for it meanwhile
+                            return False  # a request arrived meanwhile
                         await asyncio.sleep(
                             getattr(self.config, "guard_min_interval", 0.1)
                         )
@@ -324,17 +324,28 @@ class Ollama:
                 raise TimeoutError(
                     f"Ollama did not release model {identifier}"
                 ) from exc
+        return True
 
     async def unload(self, version, still=None):
         """Release an instance Songe requested. still: checked right before
-        the release and while waiting for it; once it says no (the agent
-        asked for the model meanwhile) the instance is left to the agent."""
-        if version["identifier"] in getattr(self, "owned", {}):
-            if await self.same_weights(self.owned[version["identifier"]]) and (
-                still is None or still()
-            ):
-                await self._warm(version["identifier"], 0, still=still)
-            self.owned.pop(version["identifier"], None)
+        the release and while waiting for it; once it says no, the release
+        stops and returns False with Songe's claim kept (the caller decides
+        whether to try again or leave the instance to the agent)."""
+        identifier = version["identifier"]
+        if identifier in getattr(self, "owned", {}):
+            if still is not None and _tag(identifier) not in {
+                _tag(m.get("name", m.get("model"))) for m in await self._running()
+            }:
+                # Already gone: an empty generate would load it again.
+                self.owned.pop(identifier, None)
+                return True
+            if await self.same_weights(self.owned[identifier]):
+                if still is not None and not still():
+                    return False
+                if not await self._warm(identifier, 0, still=still):
+                    return False
+            self.owned.pop(identifier, None)
+        return True
 
     async def prune_version(self, version):
         # Imported full GGUF blobs are another copy on the library volume.

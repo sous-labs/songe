@@ -105,8 +105,11 @@ or by auto-dream:
   `keep_alive: 0`, confirmed by `/api/ps`; LM Studio unload), also when it
   fails, in its own task that waits until no request is in flight and no
   reader is on it (retried, never dropped), and checks again right before the
-  unload and while waiting for it. Once the agent asks for that model, it is
-  the user's and is left to the server's own idle timeout. A model that was
+  unload and while waiting for it: a request admitted then stops the release
+  with Songe's claim kept, and it waits again. Once the agent asks for that
+  model, it is the user's and is left to the server's own idle timeout; a
+  request for it while the press still loads it waits for that load instead
+  of starting a second one. A model that was
   already loaded is the user's and is never released; Songe's own requests
   send no `keep_alive`, so the user's setting applies. The proxy
   adds them to the end of the system message of each new session; a session
