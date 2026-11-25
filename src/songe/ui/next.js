@@ -140,7 +140,11 @@ function statusLines(models, inventory, paused) {
     return [`Idle · ${r?.outcome === 'adopted' ? `${name(lastId)} moved to ${r.version}` : `last Deep Dream not used`} ${when(last.last.ended_at)}`,
       needs || (auto ? 'Dreams again when your computer is idle' : 'Auto-dream is off · press Dream to run one')];
   }
-  const firstId = Object.keys(models)[0];
+  // No model can learn here (no local weights, an unsupported
+  // architecture): say so, as `songe status` does, not "Collecting".
+  const ids = Object.keys(models);
+  const firstId = ids.find(id => inventory[id]?.support !== 'unsupported');
+  if (!firstId && ids.length) return [`${W.not_supported} · ${name(ids[0])}`, W.choose_another];
   const pending = models[firstId]?.pending;
   const auto = inventory[firstId]?.auto_dream ?? true;
   return [`Collecting · ${pending ? plural(pending.conversations, 'conversations') : ''} recorded`,
@@ -669,7 +673,7 @@ function modelView(id, ml, inv, paused = false) {
   const dreams = ml?.dreams || [];
   const latest = dreams[0];
   const seen = d => () => control('seen', {model: id, id: d.id});
-  if (unsupported) node.append(quiet(ml, inv, [W.wait.unsupported, inv.reason && `It is ${inv.reason}.`]));
+  if (unsupported) node.append(quiet(ml, inv, [W.wait.unsupported, inv.reason]));
   else if (running === 'deep' && !away) {
     // A Deep Dream running: the learning view.
     node.append(backLink(id), el('section', {class: 'changed'}, dreaming(ml.current)), cycleView(ml.current, 'This Dream'));

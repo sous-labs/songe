@@ -310,6 +310,8 @@
   "measuring_progress": "{done} of {total} tokens measured",
   "measured_can": "{name} can learn on this machine · Dreams can train it from now on",
   "measured_cannot": "{name} can't learn on this machine: {reason} · Songe still works for it, without training",
+  "not_supported": "Not supported yet",
+  "choose_another": "Choose another model",
   "control_unreachable": "Can't reach Songe · it may have restarted · reload the page",
   "page_error": "The page hit an error · reload it",
   "quick_failed": {
