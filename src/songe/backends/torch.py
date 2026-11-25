@@ -19,6 +19,9 @@ from ..sleep.prompts import paired_prompts, response_positions
 from .objective import view_key
 from .reference import TAIL_FLOOR
 
+# Cache layer methods that write the layer's state (see TorchBackend.frozen).
+UPDATES = ("update", "update_conv_state", "update_recurrent_state")
+
 
 @dataclass
 class TorchOptions:
@@ -473,10 +476,13 @@ class TorchBackend:
         Transformers takes the cache away from a checkpointed layer in
         training, because the layer would add to it a second time when the
         backward pass runs the layer again. Here every addition is undone as
-        soon as it returns, so both runs read the same prefix. Caches of
-        another kind (recurrent state) and layers transformers does not
-        checkpoint itself are left alone: the caller then trains on the
-        window only.
+        soon as it returns, so both runs read the same prefix. That includes
+        the convolution and recurrent states of hybrid layers (Inkling-2),
+        which are overwritten in place: left changed, the backward pass ran
+        the layer on other states than the forward pass, routed some tokens
+        to other experts and failed (CheckpointError). Caches of another kind
+        (recurrent state alone) and layers transformers does not checkpoint
+        itself are left alone: the caller then trains on the window only.
         """
         from transformers.cache_utils import DynamicLayer
         from transformers.modeling_layers import GradientCheckpointingLayer
@@ -496,18 +502,34 @@ class TorchBackend:
             yield False
             return
 
+        torch = self.torch
+
+        def snapshot(value):
+            # Keys and values are replaced, never written in place: kept by
+            # reference. Per-state dicts (conv and recurrent states, their
+            # flags) are written in place: copied, tensors included (small).
+            if isinstance(value, dict):
+                return {
+                    k: v.clone() if isinstance(v, torch.Tensor) else v
+                    for k, v in value.items()
+                }
+            return value
+
         def read_only(state):
-            update = state.update
+            for name in UPDATES:
+                update = getattr(state, name, None)
+                if update is None:
+                    continue
 
-            def reading(*args, **kwargs):
-                before = dict(vars(state))
-                try:
-                    return update(*args, **kwargs)
-                finally:
-                    vars(state).clear()
-                    vars(state).update(before)
+                def reading(*args, _update=update, **kwargs):
+                    before = {k: snapshot(v) for k, v in vars(state).items()}
+                    try:
+                        return _update(*args, **kwargs)
+                    finally:
+                        vars(state).clear()
+                        vars(state).update(before)
 
-            state.update = reading
+                setattr(state, name, reading)
 
         try:
             for state in states:
@@ -519,7 +541,8 @@ class TorchBackend:
             for m in layers:
                 vars(m).pop("_can_checkpoint_with_cache", None)
             for state in states:
-                vars(state).pop("update", None)
+                for name in UPDATES:
+                    vars(state).pop(name, None)
 
     def hidden(self, ids):
         inputs = self.torch.tensor([ids], dtype=self.torch.long, device=self.device)

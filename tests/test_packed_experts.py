@@ -163,3 +163,50 @@ def test_block_attention_matches_eager_outputs_and_gradients():
     assert reference_grads.keys() == block_grads.keys()
     for name in reference_grads:
         torch.testing.assert_close(block_grads[name], reference_grads[name], atol=1e-4, rtol=1e-3)
+
+
+def test_a_frozen_prefix_reads_the_same_conv_states_when_checkpointing_replays_a_layer():
+    """Inkling-2's cache layers keep short-convolution states, written in place.
+    Under gradient checkpointing the backward pass runs every layer again; it
+    must see the prefix as the forward pass did, not the window's own tail
+    (on Inkling-2-Mini a Deep Dream then routed tokens to other experts and
+    failed with CheckpointError)."""
+    from types import SimpleNamespace
+
+    from songe.backends.torch import TorchBackend
+
+    model = tiny_inkling().train()
+    ids = torch.randint(0, 97, (1, 40), generator=torch.Generator().manual_seed(5))
+    prefix, window = ids[:, :30], ids[:, 30:]
+
+    def run(checkpointing):
+        model.zero_grad(set_to_none=True)
+        if checkpointing:
+            model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+        else:
+            model.gradient_checkpointing_disable()
+        with torch.no_grad():
+            past = TorchBackend._cache(model.base_model(input_ids=prefix, use_cache=True))
+        if not checkpointing:  # the layers keep the cache themselves
+            out = model.base_model(input_ids=window, past_key_values=past, use_cache=True).last_hidden_state
+            out.float().square().mean().backward()
+            return out.detach(), {n: p.grad.clone() for n, p in model.named_parameters() if p.grad is not None}
+        conv = [{k: v.clone() for k, v in getattr(layer, "conv_states", {}).items() if v is not None}
+                for layer in past.layers]
+        owner = SimpleNamespace(torch=torch, _causal=lambda: model)
+        with TorchBackend.frozen(owner, past) as kept:
+            assert kept
+            out = model.base_model(input_ids=window, past_key_values=past, use_cache=True).last_hidden_state
+            out.float().square().mean().backward()
+        assert any(conv)
+        for layer, states in zip(past.layers, conv, strict=True):
+            for k, v in states.items():
+                torch.testing.assert_close(layer.conv_states[k], v, atol=0, rtol=0)
+        return out.detach(), {n: p.grad.clone() for n, p in model.named_parameters() if p.grad is not None}
+
+    plain, plain_grads = run(checkpointing=False)
+    replayed, grads = run(checkpointing=True)
+    torch.testing.assert_close(replayed, plain)
+    assert grads.keys() == plain_grads.keys()
+    for name in grads:
+        torch.testing.assert_close(grads[name], plain_grads[name], atol=1e-5, rtol=1e-4)
