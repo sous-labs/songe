@@ -178,15 +178,17 @@ or by auto-dream:
 - Deep Dream (2–3 hours, skills): reads what is left, writes practice, trains,
   checks. When one is adopted, a lesson's note leaves the prompt
   (`quick.absorb`) only if the new version follows the lesson without it: on
-  up to three of the lesson's held-out practice scenes it answers from the
-  request alone, and each answer must do what the note asks as well as the
+  up to three of the lesson's held-out practice scenes it answers as it would
+  be served afterwards, with the other lessons' notes in the prompt and
+  without this one, and each answer must do what the note asks as well as the
   teacher's stored answer (`sleep.judged.learned`, recorded as `learned` and
   `absorbed_signals`). A lesson not learned yet, or with no held-out scene,
   keeps its note beside the adapter. So that a note can be tested, a note
   whose lesson has practice from two or more conversations keeps one of them
   out of training (`practice.pool.ensure_note_heldout`: the one with the
   fewest scenes, never one already trained); with practice from a single
-  conversation the note stays until the lesson comes up again. An undo lets
+  conversation three of its scenes are kept out, and at least half of them
+  train. An undo lets
   absorbed notes come back.
 - Reading happens only inside a Dream. In idle moments (auto-dream on): after
   `quick_quiet_seconds`, an automatic Quick Dream (the newest unread

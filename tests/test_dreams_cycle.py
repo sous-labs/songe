@@ -711,16 +711,23 @@ def test_the_gate_judges_what_each_version_writes(monkeypatch):
 
 
 def test_a_note_leaves_only_when_the_candidate_follows_its_lesson_without_it(store, monkeypatch):
-    """On held-out practice the candidate answers from the request alone. A
-    lesson is learned when every scene asked follows the note as well as the
-    teacher's stored answer does; one miss, or no held-out scene to ask, and
-    its note stays in the prompt."""
+    """On held-out practice the candidate answers as it would be served once
+    the lesson's note has left: the other lessons' notes are in the prompt,
+    its own is not. A lesson is learned when every scene asked follows the
+    note as well as the teacher's stored answer does; one miss, or no
+    held-out scene to ask, and its note stays in the prompt.
+
+    Live (Qwen3.5-4B on a rented card): asked with no notes at all, a version
+    passed the pnpm test on three scenes, the note left, and with the three
+    notes that stayed in the prompt it used pnpm on 0 of 16 test requests (11
+    with no notes, 10 with the note back)."""
     import contextlib
 
     from songe import quick
     from songe.sleep import judged
 
-    monkeypatch.setattr(judged, "paired_prompts", lambda tok, step, config: (step["id"], None))
+    monkeypatch.setattr(judged, "paired_prompts", lambda tok, step, config: (
+        step["id"] + "|" + "".join(m["content"] for m in step["context"] if m["role"] == "system"), None))
     monkeypatch.setattr(judged, "render", lambda tok, messages, tools, **kw: messages[0]["content"])
     monkeypatch.setattr(judged, "answer", lambda text, tok, tools: {"text": text, "tool_calls": [], "valid": True})
     monkeypatch.setattr(practice_pool, "held_out", lambda signal, extra=(), scene=None, trained=(): True)
@@ -754,7 +761,7 @@ def test_a_note_leaves_only_when_the_candidate_follows_its_lesson_without_it(sto
         def sample(self, prompt, seed=None, *, deterministic=False, max_tokens=None):
             if "Answer A:" not in prompt:  # the candidate, from the request alone
                 asked.append(prompt)
-                return [], wrote[prompt], None
+                return [], wrote[prompt.split("|")[0]], None
             a, b = prompt.split("Answer A:")[1].split("Answer B:")
             follows = [any(w in x for w in ("uv add", "pnpm add")) for x in (a, b)]
             return [], '{"follows": "%s"}' % {(1, 1): "both", (1, 0): "A", (0, 1): "B", (0, 0): "neither"}[
@@ -768,14 +775,24 @@ def test_a_note_leaves_only_when_the_candidate_follows_its_lesson_without_it(sto
     assert [(r["id"], r["scenes"], r["follows"], r["learned"]) for r in rows] == [
         ("l1", 3, 3, True), ("l2", 2, 1, False), ("l3", 0, 0, False)]
     assert len(asked) == 5  # three of the five uv scenes, both pnpm ones
+    uv, pnpm = [p for p in asked if ":uv#" in p], [p for p in asked if ":pnpm#" in p]
+    assert all("- Use pnpm." in p and "- Start with Yes, chef." in p and "Use uv." not in p for p in uv)
+    assert all("- Use uv." in p and "Use pnpm." not in p for p in pnpm)
 
 
 def test_a_note_practised_in_two_conversations_keeps_one_for_its_test(store):
     """A note can leave only when its lesson is followed on practice that was
-    not trained, from another conversation. One lesson in five held out left
-    half the notes with nothing to be asked on: they could never leave."""
+    not trained. One lesson in five held out left half the notes with nothing
+    to be asked on: they could never leave. A lesson practised in two
+    conversations keeps one out; a lesson from a single conversation keeps
+    three of its scenes out and trains on the rest."""
     from songe import quick
-    from songe.practice.pool import EXTRA_HELD_OUT, ensure_note_heldout, held_out
+    from songe.practice.pool import (
+        EXTRA_HELD_OUT,
+        EXTRA_HELD_OUT_SCENES,
+        ensure_note_heldout,
+        held_out,
+    )
 
     names = [f"s{i}" for i in range(40) if not held_out(f"s{i}")]
     uv_a, uv_b, uv_c, pnpm, chef_a, chef_b = names[:6]
@@ -784,7 +801,7 @@ def test_a_note_practised_in_two_conversations_keeps_one_for_its_test(store):
     def scenes(signal, count):
         with store.connect() as db:
             for n in range(count):
-                row = {"id": f"{signal}#{n}", "signal_id": signal, "tools": [],
+                row = {"id": f"{signal}#{n}", "signal_id": signal, "tools": [], "teacher_note": "Lesson",
                        "messages": [{"role": "user", "content": f"request {signal} {n}"}]}
                 db.execute('INSERT INTO practice(id,model_id,signal_id,payload,kept,"drop",created)'
                            " VALUES (?,?,?,?,1,NULL,0)", (row["id"], store.model_id, signal, json.dumps(row)))
@@ -793,15 +810,19 @@ def test_a_note_practised_in_two_conversations_keeps_one_for_its_test(store):
         scenes(signal, count)
     store.set(quick.KEY, {"version": 1, "updated_at": None, "removed": [], "lessons": [
         {"id": "l1", "text": "Use uv.", "signals": [uv_a, uv_b, uv_c]},
-        {"id": "l2", "text": "Use pnpm.", "signals": [pnpm]},          # one conversation: its note stays
+        {"id": "l2", "text": "Use pnpm.", "signals": [pnpm]},          # one conversation: three scenes kept out
         {"id": "l3", "text": "Start with Yes, chef.", "signals": [chef_a, chef_b, kept]},  # has a held-out one
     ]})
     store.set("trained_signals", [uv_b])  # an adopted version trained on it: never a test afterwards
-    assert ensure_note_heldout(store) == 1
+    assert ensure_note_heldout(store) == 4
     assert store.get(EXTRA_HELD_OUT) == [uv_c]  # the fewest scenes among those never trained
-    held = {s["signal_id"] for s in practice_pool.practice_steps(store, split="held_out")}
-    assert held == {uv_c, kept}
-    assert {s["signal_id"] for s in practice_pool.practice_steps(store)} == {uv_a, uv_b, pnpm, chef_a, chef_b}
+    assert store.get(EXTRA_HELD_OUT_SCENES) == [f"{pnpm}#3", f"{pnpm}#4", f"{pnpm}#5"]
+    held = practice_pool.practice_steps(store, split="held_out")
+    assert {s["signal_id"] for s in held} == {uv_c, kept, pnpm}
+    assert [s["id"] for s in held if s["signal_id"] == pnpm] == [f"practice:{pnpm}#{n}" for n in (3, 4, 5)]
+    train = practice_pool.practice_steps(store)
+    assert {s["signal_id"] for s in train} == {uv_a, uv_b, pnpm, chef_a, chef_b}
+    assert [s["id"] for s in train if s["signal_id"] == pnpm] == [f"practice:{pnpm}#{n}" for n in (0, 1, 2)]
     assert ensure_note_heldout(store) == 0
 
 

@@ -26,7 +26,7 @@ from __future__ import annotations
 import logging
 import re
 
-from ..quick import differs, visible
+from ..quick import differs, verdict_of, visible
 from .examples import answer
 from .prompts import paired_prompts, render
 
@@ -128,8 +128,13 @@ def request_of(step):
     return ""
 
 
-def write(backend, step, max_tokens=ANSWER_TOKENS):
-    """The loaded version's own answer at this moment (deterministic)."""
+def write(backend, step, max_tokens=ANSWER_TOKENS, notes=""):
+    """The loaded version's own answer at this moment (deterministic).
+    notes: the lessons block it is served with, put where the proxy puts it."""
+    if notes:
+        from ..proxy import with_lessons
+
+        step = step | {"context": with_lessons(step.get("context") or [], notes)}
     student, _ = paired_prompts(backend.tokenizer, step, backend.config)
     y, text, _ = backend.sample(student, deterministic=True, max_tokens=max_tokens)
     return {"tokens": list(y), **answer(text, backend.tokenizer, step.get("tools"))}
@@ -250,13 +255,19 @@ def follows(backend, step, answer):
     if not differs(taught, answer):
         return True
     request, guide = request_of(step) or "(not shown)", guide_of(step) or "(none)"
+    # Yes when it names this answer or both in one order at least. Asked for
+    # both orders, a judge that names whichever answer comes first fails an
+    # answer it cannot tell from the teacher's, which is "as well as the
+    # teacher". Measured on 133 scenes with a mechanical check: of 100
+    # answers that follow, both orders passed 61, one order 82; of 33 that
+    # do not, 1 and 3.
+    named = 0
     for swap in (False, True):
         a, b = (answer, taught) if swap else (taught, answer)
         with backend.base():
             text = ask(backend, CHANGES.format(request=request, guide=guide, a=shown(a), b=shown(b)))
-        if verdict_of(text, swap) not in ("after", "both"):
-            return False
-    return True
+        named += verdict_of(text, swap) in ("after", "both")
+    return named > 0
 
 
 def learned(backend, journal, lessons, scenes, name, check):
@@ -266,11 +277,19 @@ def learned(backend, journal, lessons, scenes, name, check):
     lessons: the lessons in the prompt (quick.active), each with the signals
     it stands for. scenes: {signal id: its held-out practice scenes}, never
     trained on. Up to LEARNED_SCENES of a lesson's scenes are answered by the
-    candidate from the request alone; the lesson is learned when every one
-    follows it as well as the teacher's answer does. A lesson with no
-    held-out scene cannot be shown learned, so its note stays."""
+    candidate as it would be served once this lesson's note has left: with
+    the other lessons' notes in the prompt and without its own. (Live: a
+    version that used pnpm on 11 of 16 requests with no notes in the prompt
+    did on 1 of 16 with the uv note beside it; tested with no notes at all,
+    the pnpm note left and the habit fell from 10 of 16 to 2.) The lesson is
+    learned when every answer follows it as well as the teacher's does. A
+    lesson with no held-out scene cannot be shown learned, so its note
+    stays."""
+    from .. import quick
+
     out = []
     for lesson in lessons:
+        beside = quick.block([other for other in lessons if other.get("id") != lesson.get("id")])
         own = {
             s["id"]: s
             for signal in lesson.get("signals") or []
@@ -283,7 +302,9 @@ def learned(backend, journal, lessons, scenes, name, check):
             check()
             passed += bool(journal.unit(
                 f"learned-{name}-{step['id']}",
-                lambda step=step: follows(backend, step, write(backend, step, LEARNED_TOKENS)),
+                lambda step=step, beside=beside: follows(
+                    backend, step, write(backend, step, LEARNED_TOKENS, notes=beside)
+                ),
             ))
         out.append({"id": lesson.get("id"), "text": lesson.get("text"), "signals": list(lesson.get("signals") or []),
                     "scenes": len(own), "follows": passed, "learned": bool(own) and passed == len(own)})
