@@ -232,7 +232,6 @@ def is_packed_base(base):
     """True when base (a model folder) is a checkpoint this module trains."""
     import json
     from pathlib import Path
-
     from types import SimpleNamespace
 
     try:
