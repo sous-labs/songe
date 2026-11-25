@@ -275,5 +275,6 @@ def interpreter_for(platform, runner):
     from .. import memory
     from ..artifacts import runtime
 
+    runner = getattr(runner, "func", runner)  # a partial binding check=
     real = runner is runtime.guarded_run or runner is memory.guarded_run
     return converter_python(platform) if real else sys.executable

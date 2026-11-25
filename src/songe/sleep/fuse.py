@@ -1,3 +1,4 @@
+import functools
 import os
 import shutil
 import subprocess
@@ -185,8 +186,9 @@ def export_candidate(
             progress=progress,
         )
 
-    def runner(argv, **kwargs):
-        return guarded_run(argv, check=check, **kwargs)
+    # A partial, not a new function: interpreter_for recognises the real
+    # runner through it and gives conversions the converter runtime.
+    runner = functools.partial(guarded_run, check=check)
 
     if mlx_adapter:
         import tempfile
@@ -277,8 +279,9 @@ def evaluation_model(config, kind, artifact, platform, check):
     )
     backend = resolve_kind(config, platform)
 
-    def runner(argv, **kwargs):
-        return guarded_run(argv, check=check, **kwargs)
+    # A partial, not a new function: interpreter_for recognises the real
+    # runner through it and gives conversions the converter runtime.
+    runner = functools.partial(guarded_run, check=check)
 
     from ..artifacts.storage import artifact_root
     from ..log import Store

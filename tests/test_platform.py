@@ -339,3 +339,25 @@ def test_real_conversions_get_the_converter_runtime(monkeypatch):
     assert install.interpreter_for(None, runtime.guarded_run) == "converter"
     assert install.interpreter_for(None, memory.guarded_run) == "converter"
     assert install.interpreter_for(None, lambda *a, **k: None) == sys.executable
+
+
+def test_a_dreams_evaluation_conversion_gets_the_converter_runtime(tmp_path, monkeypatch):
+    """The Dream's own export and evaluation bound check= in a wrapper
+    function, which interpreter_for did not recognise either."""
+    from songe import models
+    from songe.artifacts import storage
+    from songe.backends import install
+    from songe.models import gguf
+    from songe.sleep import fuse
+
+    seen = []
+    monkeypatch.setattr(install, "converter_python", lambda platform: "converter")
+    monkeypatch.setattr(gguf, "read_gguf", lambda path: SimpleNamespace(architecture="qwen3"))
+    monkeypatch.setattr("songe.backends.resolve_kind", lambda config, platform: "torch")
+    monkeypatch.setattr(storage, "artifact_root", lambda config, store: tmp_path)
+    monkeypatch.setattr(models, "trainable_base", lambda ref, backend, platform, runner, artifact_directory:
+                        seen.append(install.interpreter_for(platform, runner)))
+    platform = SimpleNamespace(data_dir=lambda: tmp_path)
+    config = SimpleNamespace(upstream="http://127.0.0.1:11434")
+    fuse.evaluation_model(config, "gguf-full", tmp_path / "candidate.gguf", platform, lambda: None)
+    assert seen == ["converter"]
