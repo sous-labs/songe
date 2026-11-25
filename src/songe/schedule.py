@@ -1761,6 +1761,8 @@ class ModelScheduler(Scheduler):
             unread = await self.quick_now(model)
             if unread == "no_model":
                 return {"started": False, "message": "Quick Dream can't start · no model is loaded in your model server · load it, then press Quick Dream"}
+            if unread == "memory":
+                return {"started": False, "message": "Quick Dream can't start · memory is tight on this computer · close some apps, then press Quick Dream"}
             if unread == "nothing":
                 last = (self.installation_store.scoped(model).get("quick_last") or {}).get("at")
                 # The page puts `since` in the viewer's local time.
@@ -1899,6 +1901,20 @@ class ModelScheduler(Scheduler):
             return None
         learner = self.installation_store.scoped(model)
         unread = len(await asyncio.to_thread(reading.pending, learner))
+        sample = await asyncio.to_thread(self.platform.memory)
+        if unread and sample.pressure != "normal":
+            # Reading waits for normal memory pressure (read_sessions); a
+            # press under pressure would say "started" and read nothing
+            # (reported by Jack in a test on 11-24: a Mac at "warning").
+            learner.set("quick_checked", {"at": time.time(), "nothing_new": False, "error": "memory"})
+            from . import quick as quick_lessons
+
+            await asyncio.to_thread(
+                quick_lessons.record, learner,
+                {"added": [], "lessons": len(quick_lessons.active(learner)),
+                 "changes": {"added": [], "reworded": [], "dropped": []}},
+                time.time(), None, read=0, found=0, error="memory")
+            return "memory"
         if unread:
             probe_reader = await self.reader_for(model)
             if probe_reader is None:

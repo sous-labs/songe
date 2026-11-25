@@ -314,7 +314,8 @@
   "page_error": "The page hit an error · reload it",
   "quick_failed": {
     "unreadable": "Quick Dream {when} couldn't read your conversations: the model's answers weren't readable · they stay unread and are read next time",
-    "no_model": "Quick Dream {when} couldn't start: no model is loaded in your model server"
+    "no_model": "Quick Dream {when} couldn't start: no model is loaded in your model server",
+    "memory": "Quick Dream {when} couldn't start: memory was tight on this computer · close some apps, then press Quick Dream"
   },
   "quick_checked_read": "Quick Dream {when} read {read} · found {found} · no new preferences",
   "chip_failed": "failed",
@@ -323,7 +324,8 @@
   "quick_read_found": "Read {read} · found {found}",
   "quick_failed_card": {
     "unreadable": "Couldn't read your conversations: the model's answers weren't readable · they stay unread and are read next time",
-    "no_model": "Couldn't start: no model is loaded in your model server"
+    "no_model": "Couldn't start: no model is loaded in your model server",
+    "memory": "Couldn't start: memory was tight on this computer · close some apps, then press Quick Dream"
   },
   "getting_ready": "Getting ready · testing how much your computer can learn at once · {done} of {total} tokens so far",
   "getting_ready_title": "Getting ready to train · testing how much your computer can learn at once · {done} of {total} tokens so far",
