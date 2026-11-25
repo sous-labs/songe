@@ -187,3 +187,16 @@ def test_unlimited_host_controller_root_has_no_limit(controller):
     (mount / names[0]).unlink()
     sample = platform.memory()
     assert (sample.total, sample.available) == (1000000 * 1024, 900000 * 1024)
+
+
+@pytest.mark.parametrize("kind", ["v1", "v2"])
+def test_page_cache_the_kernel_can_drop_is_not_used_memory(controller, kind):
+    # Live: a 55 GB download in a 94 GB container left 10 GB "free" and the
+    # guard stopped the Dream three times; most of it was page cache.
+    platform, mount, names = controller(kind)
+    (mount / names[1]).write_text("9500000")
+    stat = mount / "memory.stat"
+    before = stat.read_text() if stat.exists() else ""
+    key = "inactive_file" if kind == "v2" else "total_inactive_file"
+    stat.write_text(before + f"{key} 6000000\nactive_file 1000000\n")
+    assert platform.memory().available == 10000000 - 3500000

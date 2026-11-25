@@ -239,6 +239,10 @@ class Linux:
                 if limit != "max":
                     limit = int(limit)
                     used = int((folder / current_name).read_text(encoding="utf-8"))
+                    # The usage counts the page cache. Its inactive part is
+                    # reclaimed on demand (docker stats leaves it out too);
+                    # counting it, a 55 GB download read as "out of memory".
+                    used = max(0, used - _inactive_file(folder, kind))
                     total = min(total, limit)
                     available = min(available, max(0, limit - used))
                 if folder == mount:
@@ -347,3 +351,16 @@ class Linux:
             Path(self.environ.get("XDG_CONFIG_HOME", self.home / ".config"))
             / f"systemd/user/{NAME}.service"
         )
+
+
+def _inactive_file(folder, kind):
+    """Reclaimable page cache charged to this cgroup, in bytes (0 if unknown)."""
+    key = "inactive_file" if kind == "v2" else "total_inactive_file"
+    try:
+        for line in (folder / "memory.stat").read_text(encoding="utf-8").splitlines():
+            name, _, value = line.partition(" ")
+            if name == key:
+                return int(value)
+    except (OSError, ValueError):
+        pass
+    return 0
