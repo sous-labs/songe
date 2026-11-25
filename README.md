@@ -23,12 +23,18 @@
   <a href="LICENSE"><img src="https://img.shields.io/github/license/sous-labs/songe.svg" alt="License: Apache-2.0"></a>
 </p>
 
-Use your local model as usual through opencode, pi or any OpenAI-compatible
-tool. While you work, Songe notices what happens after each of the model's
-actions: the tool result, the error, your next message. When your agent is
-quiet, it teaches the model to see those coming. A new version is used only
-if it passes its checks, and nothing leaves your machine unless you turn on
-the optional cloud learning.
+Songe is a local proxy between your agent (opencode, pi or any
+OpenAI-compatible tool) and your model server. You use your model as usual.
+Songe records what happens after each of the model's actions: the tool
+result, the error, your next message. When your agent is quiet, it turns
+those moments into lessons. A Quick Dream adds your preferences to the
+model's instructions; a Deep Dream fine-tunes a LoRA adapter on practice
+written from the lessons. The new version is served only if it does better
+than the current one on your own conversations; otherwise nothing changes.
+Nothing leaves your machine unless you turn on the optional cloud learning.
+
+Training needs Apple Silicon or an NVIDIA or AMD GPU. Without one, Songe
+still serves and records, but does not train.
 
 ## ✨ Highlights
 
@@ -116,16 +122,16 @@ Tried Songe on another setup? Share the result on the
 
 ```text
  your agent ──► Songe (127.0.0.1:7613) ──► your model server
-                   │ records what happened
+                   │ an OpenAI-compatible proxy: records what happened
                    ▼
             when you are away: a Dream
-   read lessons ─► practice ─► train ─► check ─► use only if better
+   read lessons ─► practice ─► train a LoRA adapter ─► check ─► use only if better
 ```
 
 | | Quick Dream | Deep Dream |
 | --- | --- | --- |
 | Takes | a few minutes | an hour or more |
-| Does | adds the preferences you stated or showed to the model's instructions | writes practice from your lessons and trains a small adapter on it |
+| Does | adds the preferences you stated or showed to the model's instructions | writes practice from your lessons and fine-tunes a LoRA adapter on it |
 | You see | each new preference, with a before/after where the answer changes | why the new version was or was not used |
 | Undo | undo the Quick Dream, or remove one preference | go back to any earlier version |
 
@@ -141,7 +147,7 @@ disappears: it keeps going on the page, or says why it stopped.
 - **Practice.** For each lesson your model writes short practice scenes in
   your agent's own tools. Your real conversations are never trained on.
 - **Training.** The model as it was, shown the lesson, is the teacher; the
-  same model with a small adapter, shown only the scene, is the student
+  same model with a LoRA adapter, shown only the scene, is the student
   (on-policy distillation). Earlier skills are rehearsed so they stay.
 - **Checking.** At the moments you reacted to, the version in use and the new
   one each answer, and a judge compares what they do. The new version is used
