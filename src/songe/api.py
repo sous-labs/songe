@@ -771,10 +771,16 @@ def api_routes(config, store, scheduler=None, *, release=None):
                         # Cancelling ends it all: a pause that held this Dream
                         # goes too, so the button is back to Dream.
                         await asyncio.to_thread(store.set, "paused", False)
+                    # Work under way with no Dream yet (a measurement, a
+                    # reading) is stopped too: say so, not "No Dream".
+                    stopped = getattr(scheduler, "cancel_stopped", False)
                     return JSONResponse({
                         "ok": True,
                         "message": "Dream cancelled · what it practised waits for the next Deep Dream"
-                        if discarded else "No Dream to cancel",
+                        if discarded
+                        else "Stopped · no Dream had started yet"
+                        if stopped
+                        else "No Dream to cancel",
                     })
                 elif action == "remove_lesson":
                     # Out of the prompt for new sessions, and never back.
