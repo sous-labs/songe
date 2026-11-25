@@ -577,6 +577,18 @@ def test_each_stop_shows_its_own_wait():
     }
 
 
+def test_a_wait_carries_the_numbers_its_reason_names():
+    """The page could only say "Waits for free memory": have, need and unit
+    were always null, though the reason names them."""
+    from songe.cycle import wait_of
+
+    memory = "Waiting for memory: smallest calibrated work does not fit · 9.6 GB free, needs 13.2 GB"
+    assert wait_of(memory) == {"code": "memory", "have": 9.6, "need": 13.2, "unit": "GB"}
+    disk = "Needs 49.5 GB free on /; 31.3 GB available"
+    assert wait_of(disk) == {"code": "disk", "have": 31.3, "need": 49.5, "unit": "GB"}
+    assert wait_of("memory guard") == {"code": "memory", "have": None, "need": None, "unit": None}
+
+
 def test_the_last_result_says_whether_its_version_is_still_in_use(dreams):
     """Live run: after Undo the page still described v1's Dream as current."""
     from songe.cycle import model_learning
