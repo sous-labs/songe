@@ -55,3 +55,17 @@ def test_now_names_the_job_during_the_pause_between_slices():
     }
     rows = dict(panel_rows(model, snapshot=snapshot))
     assert rows["now"] == "Training · short pause between runs"
+
+
+def test_a_model_that_cannot_learn_is_named_once():
+    """Now and Next both said "Choose another model"."""
+    data = {
+        "activity": {
+            "now": "waiting · unsupported · Gemma 3",
+            "next": "choose another model",
+        }
+    }
+    assert status_lines(data) == [
+        ("now", "Not supported yet · Gemma 3"),
+        ("next", "Choose another model"),
+    ]
