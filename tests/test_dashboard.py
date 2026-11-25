@@ -358,6 +358,18 @@ async def test_hashed_assets_are_immutable(config, store):
         ] == "no-cache"
 
 
+def test_hidden_status_lines_stay_hidden_at_phone_width():
+    """At phone width an empty GPU label showed with no GPU line, since
+    the narrow layout's `display: grid` beat the `hidden` attribute."""
+    import re
+    from pathlib import Path
+
+    css = (Path(__file__).resolve().parents[1] / "src/songe/ui/next.css").read_text()
+    phone = css.split("@media (width < 46rem)", 1)[1]
+    assert re.search(r"\.status p \{[^}]*display: grid", phone)
+    assert re.search(r"\.status p\[hidden\] \{ display: none; \}", phone)
+
+
 async def test_real_model_scheduler_reports_idle_then_experience_then_off(
     config, store
 ):
