@@ -169,13 +169,43 @@ def evidenced(signal):
     return True
 
 
+# Folder names too common to stand for one project.
+COMMON_FOLDERS = {"home", "root", "user", "users", "src", "app", "code", "work", "dev", "tmp", "temp", "project",
+                  "projects", "repo", "repos", "desktop", "documents", "downloads", "workspace", "main", "test"}
+
+
+def general(text, project):
+    """A note with its project's own name said so it holds in every project:
+    "Put code under src/billing_api/." from a session in billing-api becomes
+    "Put code under src/<package>/." (reported by Jack in a test on 11-24:
+    "Use src/notes_app/ in all file paths." sent a question about another
+    repository into notes_app, and 4 of 8 answers there got worse)."""
+    name = str(project or "")
+    if len(name) < 4 or name.lower() in COMMON_FOLDERS:
+        return text
+    forms = {name: "<project>", name.replace("-", "_"): "<package>", name.replace("_", "-"): "<project>"}
+    for form in sorted(forms, key=len, reverse=True):
+        text = re.sub(rf"(?<![\w-]){re.escape(form)}(?![\w-])", forms[form], text, flags=re.I)
+    return text
+
+
+# A value the user gave on the command line of their tool ("make test MODULE=auth").
+SETTING = re.compile(r"\b([A-Z][A-Z0-9_]+)=([^\s,;'\"`)]+)")
+
+
+def unset(text):
+    """The sentence with each NAME=value said as NAME=<name>."""
+    return SETTING.sub(lambda m: f"{m[1]}=<{m[1].lower()}>", text)
+
+
 def wording(signal):
     """A signal's note for the prompt, and whether it is the user's own
     sentence: a sentence they stated, else the short form reading wrote for
     the prompt (signals read before it existed fall back to the lesson,
-    trimmed by tidy)."""
+    trimmed by tidy). Its project's own name is said for any project
+    (general)."""
     rule = stated_sentence(signal) if signal.get("type") in USER else None
-    return rule or short_of(signal) or signal["lesson"].strip(), bool(rule)
+    return general(rule or short_of(signal) or signal["lesson"].strip(), signal.get("project")), bool(rule)
 
 
 def joined(signals):
@@ -235,8 +265,12 @@ def admitted(store, min_sessions=None, without=(), fits=suitable):
             pass
         elif rule:
             # A rule the user stated groups only with the same sentence of
-            # theirs, never with lessons that merely look alike.
-            home = next((c for c in clusters if c.get("rule") and normal(c["text"]) == normal(text)), None)
+            # theirs, never with lessons that merely look alike. The same
+            # sentence with another value in it ("make test MODULE=auth",
+            # "make test MODULE=parser") is the same rule: one place, not one
+            # per value (Jack's test, 11-24; Qwen3.8-27B on main put the test
+            # command in 3 to 5 of 10 places, one per module).
+            home = next((c for c in clusters if c.get("rule") and normal(unset(c["text"])) == normal(unset(text))), None)
         else:
             home = next((c for c in clusters if not c.get("rule") and similar(text, c["text"])), None)
         if home:
@@ -245,6 +279,9 @@ def admitted(store, min_sessions=None, without=(), fits=suitable):
             clusters.append({"text": text, "signals": [s["id"]], "newest": s.get("revision") or 0,
                              "rule": rule, "first": first})
     for c in clusters:
+        if c.get("rule") and len({normal(wording(by_id[i])[0]) for i in c["signals"]}) > 1:
+            # Said with several values: the value is not part of the rule.
+            c["text"] = unset(c["text"])
         text, own, wordings = joined([by_id[i] for i in c["signals"]])
         if wordings > 1 and any(i in same for i in c["signals"]):
             c.update(text=text, rule=own, joined=True)
