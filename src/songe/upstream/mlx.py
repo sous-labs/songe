@@ -123,7 +123,8 @@ class MLX:
         from .protection import admit, weight_bytes
         from .reuse import served_base
 
-        self.routes.pop(version["identifier"], None)
+        # The route stays while the server is asked again: a request that
+        # arrives meanwhile must not fall back to the owned port (502).
         if getattr(self.config, "server_source_url", "") or self.process is None:
             binding = await served_base(
                 self.config, version, transport=getattr(self, "transport", None)
@@ -131,6 +132,7 @@ class MLX:
             if binding:
                 self.routes[version["identifier"]] = binding
                 return
+        self.routes.pop(version["identifier"], None)
         if self.version == version and self.process and self.process.returncode is None:
             return
 
