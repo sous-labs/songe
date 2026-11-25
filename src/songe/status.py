@@ -539,7 +539,7 @@ def activity(config, store, scheduler, training, models, *, live, ready=None):
     held = scoped_target and (scoped_target.get("memory_wait") or (
         scoped_target.get("fit_wait") and store.get("requested_sleep"))) and not scoped_target.get("dream_stopped")
     disk = (scoped_target.get("disk_wait") or store.get("disk_wait")) if scoped_target else None
-    if disk and not training and live and not ready and not paused:
+    if disk and not training and live and not ready and not paused and not stopping and not reading:
         # A Dream waiting for disk space: what it needs, not "it starts on
         # its own" (reported by Jack in a test on 11-24: a pressed Deep Dream
         # waited 3.5 hours for 42.8 GB with only "pending" on the page).

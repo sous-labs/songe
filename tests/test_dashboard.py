@@ -73,6 +73,10 @@ def test_a_dream_waiting_for_disk_space_says_how_much(config, store, monkeypatch
     assert pending["next"] == "Your Deep Dream is pending · it starts on its own"
     assert result["now"] == "waiting · Needs 42.8 GB free on D:\\; 8.0 GB available"
     assert result["next"] == "Free up disk space · it starts on its own once there is room"
+    # A Quick Dream reading meanwhile keeps its own Now line.
+    worker.reading_activity = {config.base_identifier: {"kind": "quick", "done": 3, "total": 5}}
+    assert activity(config, store, worker, None, models, live=True)["now"] == "in a Quick Dream · 3 of 5"
+    worker.reading_activity = {}
     store.scoped(config.base_identifier).set("disk_wait", None)
     assert activity(config, store, worker, None, models, live=True)["next"] == pending["next"]
 
