@@ -125,6 +125,9 @@ def train(backend, pool, anchors, work, progress):
                 weights_only=True,
             )
             optimizer.load_state_dict(state["optimizer"])
+            from .torch import repage
+
+            repage(optimizer)
             backend._updates = state["updates"]
         else:
             state = backend.mx.load(str(generation / "optimizer.safetensors"))

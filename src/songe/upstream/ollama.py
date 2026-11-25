@@ -56,6 +56,32 @@ class Ollama:
     async def _running(self):
         return (await self._request("GET", "/api/ps")).get("models", [])
 
+    async def listing(self):
+        """The models Ollama holds in memory now (/api/ps), each under its own
+        name and under the Songe identifiers routed to it; None when Ollama
+        cannot say. Ollama loads any model it is asked for, so background work
+        (reading, Quick Dream's before and after) asks only a model that is
+        listed here. Reported by Jack in a test on 11-24: with no listing,
+        Quick Dream's examples loaded an 8B into Ollama (6 GB) while the
+        conversion for training needed that memory, and the memory guard
+        stopped the conversion."""
+        try:
+            running = await self._running()
+        except (httpx.HTTPError, ValueError):
+            return None
+        names = {
+            _tag(m.get("name") or m.get("model"))
+            for m in running
+            if m.get("name") or m.get("model")
+        }
+        found = set()
+        for name in names:
+            found |= {name, name.removesuffix(":latest")}
+        for identifier, name in self.routes.items():
+            if isinstance(name, str) and _tag(name) in names:
+                found.add(identifier)
+        return [{"identifier": i, "type": "llm"} for i in sorted(found)]
+
     async def served_contexts(self):
         """Context Ollama runs each loaded model with (its OLLAMA_CONTEXT_LENGTH,
         4096 by default), from /api/ps. A model that is not loaded is not

@@ -238,6 +238,35 @@ def test_an_example_of_the_question_pasted_back_is_not_the_users_wish():
     assert P.turn_verdict({"standing": "yes", "kind": "once", "wish": "Use metric units."}, "everything in metric")[0] == "lasting"
 
 
+def test_a_wish_limited_to_now_is_not_a_standing_wish():
+    from songe.reading import prompts as P
+
+    # Live (Qwen3.8-27B): "today only reply fast" and "今天先别管 lint 了" were read as standing wishes.
+    fast = {"standing": "yes", "kind": "once", "wish": "Reply fast and short today."}
+    assert P.turn_verdict(fast, "today only reply fast, short short. deadline at 5") == ("task", "")
+    assert P.turn_verdict({"standing": "yes", "kind": "task", "wish": "Ignore lint today."}, "今天先别管 lint 了，下午 demo 要紧") == ("task", "")
+    assert P.turn_verdict({"standing": "yes", "kind": "once", "wish": "Use inline styles."}, "just this once inline styles are fine") == ("task", "")
+    assert P.turn_verdict({"standing": "yes", "kind": "once", "wish": "Answer in Chinese."}, "from today on answer in chinese") == ("lasting", "Answer in Chinese.")
+    assert P.turn_verdict({"standing": "yes", "kind": "once", "wish": "Answer in Chinese."}, "以后都用中文回答，今天开始") == ("lasting", "Answer in Chinese.")
+    assert P.turn_verdict({"standing": "yes", "kind": "once", "wish": "Put today's date at the top of every note."}, "put today's date at the top of every note")[0] == "lasting"
+    fy = {"standing": "yes", "kind": "once", "wish": "Start the fiscal year on February 1."}
+    assert P.turn_verdict(fy, "fiscal starts feb 1st!! FY27 ytd is from 2026-02-01 till today")[0] == "lasting"
+
+
+def test_a_lasting_wish_beside_a_mention_of_today_is_kept():
+    from songe.reading import prompts as P
+
+    # "Today" elsewhere in the message, or a wish said to last beyond today,
+    # does not make the wish a passing one.
+    tabs = {"standing": "yes", "kind": "task", "wish": "Use tabs, not spaces."}
+    assert P.turn_verdict(tabs, "I prefer tabs, not spaces. Today let us refactor utils.py")[0] == "lasting"
+    short = {"standing": "yes", "kind": "once", "wish": "Keep answers short."}
+    assert P.turn_verdict(short, "keep answers short, today and always")[0] == "lasting"
+    assert P.turn_verdict({"standing": "yes", "kind": "once", "wish": "Use no emojis."}, "no emojis ever, not just today")[0] == "lasting"
+    assert P.turn_verdict({"standing": "yes", "kind": "once", "wish": "Use tabs."}, "for now on use tabs")[0] == "lasting"
+    assert P.turn_verdict(short, "keep answers short today, deadline at 5") == ("task", "")
+
+
 def test_a_rule_sentence_carries_what_its_turn_was(store):
     # The rules find "Always ..." in the user's message by its shape; the
     # verdict on the turn it stands in goes with it (quick.suitable).
@@ -517,6 +546,180 @@ def test_the_client_falls_back_when_structured_output_is_refused(store):
     assert reader.cached == 1
 
 
+def test_the_client_stays_structured_after_a_single_off_schema_200(store, caplog):
+    """An enforcing server (vLLM, llama.cpp, LM Studio, Ollama) that returns
+    one off-schema 200 answer gets that single question retried plainly, while
+    structured output stays on and resets after a conforming answer."""
+    import logging
+
+    schema = {
+        "type": "object",
+        "properties": {
+            "steps": {"type": "array", "items": {"type": "integer"}},
+            "reason": {"type": "string"},
+        },
+        "required": ["steps", "reason"],
+    }
+    bodies = []
+    structured_calls = 0
+
+    def server(request):
+        nonlocal structured_calls
+        body = json.loads(request.content)
+        bodies.append(body)
+        if "response_format" in body:
+            structured_calls += 1
+            # 1st and 3rd structured calls return off-schema 200; 2nd conforms and resets counter.
+            if structured_calls in (1, 3):
+                return httpx.Response(
+                    200,
+                    json={
+                        "choices": [{"finish_reason": "stop", "message": {"content": ""}}],
+                        "usage": {"completion_tokens": 5},
+                    },
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {"finish_reason": "stop", "message": {"content": '{"steps": [1], "reason": "ok"}'}}
+                    ],
+                    "usage": {"completion_tokens": 10},
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {"finish_reason": "stop", "message": {"content": '{"steps": [2], "reason": "retried"}'}}
+                ],
+                "usage": {"completion_tokens": 15},
+            },
+        )
+
+    reader = Reader(
+        store,
+        "http://x/v1",
+        "m-vllm",
+        server="vllm",
+        client=httpx.AsyncClient(transport=httpx.MockTransport(server)),
+    )
+
+    async def run():
+        a = await reader.ask("q1", schema, "responsible")
+        b = await reader.ask("q2", schema, "responsible")
+        c = await reader.ask("q3", schema, "responsible")
+        return a, b, c
+
+    with caplog.at_level(logging.INFO, logger="songe.reading.client"):
+        a, b, c = asyncio.run(run())
+    assert a == c == {"steps": [2], "reason": "retried"}
+    assert b == {"steps": [1], "reason": "ok"}
+    assert reader.structured is True
+    assert getattr(reader, "errors", 0) == 0
+    assert not any("reader_no_structured" in r.getMessage() for r in caplog.records)
+    # q1: structured (off-schema) + plain retry; q2: structured (ok, resets); q3: structured (off-schema) + plain retry.
+    assert [bool("response_format" in b) for b in bodies] == [True, False, True, True, False]
+    assert reader.tokens_out == 5 + 15 + 10 + 5 + 15
+
+
+@pytest.mark.parametrize(
+    "ignored_content",
+    [
+        "Step 2 caused the error.",
+        json.dumps({"steps": ["not-an-int"], "reason": "wrong type"}),
+    ],
+)
+def test_the_client_switches_to_plain_after_two_off_schema_200s(store, caplog, ignored_content):
+    """A server that ignores response_format with 200 twice in a row switches
+    to plain schema-in-prompt mode, logs once, and stays plain afterwards."""
+    import logging
+
+    schema = {
+        "type": "object",
+        "properties": {
+            "steps": {"type": "array", "items": {"type": "integer"}},
+            "reason": {"type": "string"},
+        },
+        "required": ["steps", "reason"],
+    }
+    bodies = []
+
+    def server(request):
+        body = json.loads(request.content)
+        bodies.append(body)
+        if "response_format" in body:
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [{"finish_reason": "stop", "message": {"content": ignored_content}}],
+                    "usage": {"completion_tokens": 12},
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {"finish_reason": "stop", "message": {"content": '{"steps": [2], "reason": "ok"}'}}
+                ],
+                "usage": {"completion_tokens": 15},
+            },
+        )
+
+    reader = Reader(
+        store,
+        "http://x/v1",
+        f"m-{len(ignored_content)}",
+        client=httpx.AsyncClient(transport=httpx.MockTransport(server)),
+    )
+
+    async def run():
+        a = await reader.ask("q1", schema, "responsible")
+        b = await reader.ask("q2", schema, "responsible")
+        c = await reader.ask("q3", schema, "responsible")
+        return a, b, c
+
+    with caplog.at_level(logging.INFO, logger="songe.reading.client"):
+        a, b, c = asyncio.run(run())
+    assert a == b == c == {"steps": [2], "reason": "ok"}
+    assert reader.structured is False
+    assert getattr(reader, "errors", 0) == 0
+    # q1: structured + plain; q2: structured (2nd miss -> switch) + plain; q3: plain directly.
+    assert [bool("response_format" in x) for x in bodies] == [True, False, True, False, False]
+    assert "The JSON must match this schema:" in bodies[1]["messages"][0]["content"]
+    assert "The JSON must match this schema:" in bodies[4]["messages"][0]["content"]
+    switch_logs = [r.getMessage() for r in caplog.records if "reader_no_structured" in r.getMessage()]
+    assert len(switch_logs) == 1
+    assert reader.tokens_out == 12 + 15 + 12 + 15 + 15
+
+
+def test_mlx_reader_starts_in_plain_mode(store):
+    """Live (mlx_lm.server 0.32.2): mlx-lm ignores response_format with 200, so
+    Reader(server='mlx') starts in plain schema-in-prompt mode."""
+    bodies = []
+
+    def server(request):
+        body = json.loads(request.content)
+        bodies.append(body)
+        return httpx.Response(
+            200,
+            json={"choices": [{"finish_reason": "stop", "message": {"content": '{"steps": [1], "reason": "r"}'}}]},
+        )
+
+    reader = Reader(
+        store,
+        "http://x/v1",
+        "m-mlx",
+        server="mlx",
+        client=httpx.AsyncClient(transport=httpx.MockTransport(server)),
+    )
+    assert reader.structured is False
+    ans = asyncio.run(reader.ask("q", {"type": "object"}, "responsible"))
+    assert ans == {"steps": [1], "reason": "r"}
+    assert len(bodies) == 1 and "response_format" not in bodies[0]
+    assert "The JSON must match this schema:" in bodies[0]["messages"][0]["content"]
+
+
 def test_the_client_asks_for_a_plain_reply_the_way_a_user_does(store):
     """reply(): the served model's next message in a conversation, with no
     schema and none of the reasoning switches the reader's questions set."""
@@ -560,8 +763,8 @@ ANSWERS = {
                             "type": "correction", "text": "No, you changed the wrong file."}]},
     "turn": {"standing": "yes", "kind": "once", "wish": ""},
     "responsible": {"steps": [2], "reason": "wrong file"},
-    "lesson": {"lesson": "Check the file first.", "instance": "x.py", "generality": "kind",
-               "verifiable": None},
+    "lesson": {"lesson": "Check the file first.", "short": "Check the file first.",
+               "instance": "x.py", "generality": "kind", "verifiable": None},
     "review": {"signals": []},
     "dream": None,  # filled below
     "matters": {"why": "it is about this file", "answer": "A"},

@@ -462,6 +462,86 @@ async def test_vllm_base_route_survives_a_check_from_another_request(tmp_path):
     assert await checking
 
 
+async def test_llamacpp_base_route_survives_a_check_from_another_request(tmp_path):
+    # Each request checks the base again. The check used to drop the route
+    # before asking the user's llama-server, so requests sent at the same
+    # moment went to the owned port and the agent got 502.
+    weights = tmp_path / "Qwen3.8-27B-UD-Q4_K_M.gguf"
+    weights.write_bytes(b"")
+    asked, answer = asyncio.Event(), asyncio.Event()
+
+    async def handler(request):
+        assert request.url.host == "user"
+        if request.url.path == "/props":
+            asked.set()
+            await answer.wait()
+            return httpx.Response(200, json={"model_path": str(weights)})
+        return httpx.Response(200, json={"data": [{"id": weights.name}]})
+
+    upstream = LlamaCPP(
+        SimpleNamespace(
+            upstream="llamacpp",
+            upstream_url="http://owned/v1",
+            server_source_url="http://user/v1",
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+    version = {
+        "id": "base",
+        "kind": "gguf-full",
+        "identifier": weights.name,
+        "artifact": str(weights),
+    }
+    answer.set()
+    await upstream.load(version)
+    assert upstream.request_url(version) == "http://user/v1"
+
+    asked.clear()
+    answer.clear()
+    checking = asyncio.create_task(upstream.load(version))
+    await asked.wait()
+    assert upstream.request_url(version) == "http://user/v1"
+    answer.set()
+    await checking
+    assert upstream.request_url(version) == "http://user/v1"
+
+
+async def test_mlx_base_route_survives_a_check_from_another_request(tmp_path):
+    from songe.upstream.mlx import MLX
+
+    weights = tmp_path / "Qwen3.8-27B-4bit"
+    weights.mkdir()
+    asked, answer = asyncio.Event(), asyncio.Event()
+
+    async def handler(request):
+        assert request.url.host == "user"
+        asked.set()
+        await answer.wait()
+        return httpx.Response(200, json={"data": [{"id": str(weights)}]})
+
+    upstream = MLX(
+        SimpleNamespace(
+            upstream="mlx",
+            upstream_url="http://owned/v1",
+            server_source_url="http://user/v1",
+        ),
+        tmp_path,
+    )
+    upstream.transport = httpx.MockTransport(handler)
+    version = {"id": "base", "identifier": str(weights), "artifact": str(weights)}
+    answer.set()
+    await upstream.load(version)
+    assert upstream.request_url(version) == "http://user/v1"
+
+    asked.clear()
+    answer.clear()
+    checking = asyncio.create_task(upstream.load(version))
+    await asked.wait()
+    assert upstream.request_url(version) == "http://user/v1"
+    answer.set()
+    await checking
+
+
 async def test_llamacpp_unregistered_adapter_and_missing_supervisor_fail_closed(
     tmp_path,
 ):
@@ -535,3 +615,34 @@ async def test_llamacpp_publication_load_restarts_parked_endpoint(tmp_path, kind
     with pytest.raises(httpx.ConnectError):
         await unmanaged.load(version)
     assert restarts == [version]
+
+
+async def test_ollama_lists_what_it_holds_so_background_work_never_loads_a_model():
+    """Reported by Jack in a test on 11-24: Songe could not tell what Ollama
+    had loaded, took every model as loaded, and Quick Dream's before and
+    after examples loaded an 8B (6 GB) beside the conversion for training."""
+    from songe.schedule import ModelScheduler
+
+    running = []
+
+    def handler(request):
+        if request.url.path == "/api/ps":
+            return httpx.Response(200, json={"models": running})
+        return httpx.Response(404)
+
+    upstream = Ollama(config("ollama"), transport=httpx.MockTransport(handler))
+
+    class Scheduler:
+        installation_config = SimpleNamespace(upstream_url="http://test/v1", server_source_url="")
+        answered_running = False
+        loaded_listing = ModelScheduler.loaded_listing
+        loaded_identifiers = ModelScheduler.loaded_identifiers
+
+    scheduler = Scheduler()
+    scheduler.upstream = upstream
+    assert await scheduler.loaded_identifiers() == set()  # nothing loaded: work waits
+    running.append({"name": "qwen3:8b", "model": "qwen3:8b"})
+    running.append({"name": "llama3:latest", "model": "llama3:latest"})
+    upstream.routes["songe/qwen3-8b"] = "qwen3:8b"  # the user's model, reused
+    assert await scheduler.loaded_identifiers() == {
+        "qwen3:8b", "llama3", "llama3:latest", "songe/qwen3-8b"}

@@ -2494,7 +2494,9 @@ class ModelScheduler(Scheduler):
         way the proxy sends an agent's request (#27). A routed version goes
         where its route says. The base is served by the user's own server,
         which is always up; the owned server runs only while Songe needs it.
-        A learned version without a route yet is on the owned server."""
+        On mlx-lm only a route says a server of the user's serves the base:
+        without one, Songe's own server does. A learned version without a
+        route yet is on the owned server."""
         upstream = self.upstream
         if (
             version
@@ -2505,6 +2507,10 @@ class ModelScheduler(Scheduler):
         config = self.installation_config
         if version and not (version["id"] == "base" or version["id"].startswith("base-")):
             return config.upstream_url, identifier
+        if version and config.upstream == "mlx" and hasattr(upstream, "request_url"):
+            # Live: reading asked mlx-lm's default port, where nothing
+            # listened, while the agent's requests went to Songe's own server.
+            return upstream.request_url(version), upstream.request_model(version)
         return config.server_source_url or config.upstream_url, identifier
 
     async def review_model(self):

@@ -141,6 +141,8 @@ OWNED_ENTRIES = frozenset(
         "cloud-key",
         "config.toml",
         "context-summaries",
+        "converter",
+        "converter-install.log",
         "manifests",
         "missing-model",
         "models",

@@ -728,3 +728,44 @@ def test_frozen_undoes_in_place_conv_and_recurrent_state_writes():
     assert "update_recurrent_state" not in vars(state)
     state.update_conv_state(torch.full((1, 2, 2), 9.0))
     assert not torch.equal(state.conv_states[0], conv)  # writes again after
+
+
+def test_a_resumed_paged_optimizer_gets_paged_states_again(monkeypatch):
+    """torch.load brings a paged state back flagged is_paged in ordinary
+    memory; bitsandbytes would then prefetch it as managed memory and the
+    process dies (Inkling-2-Mini, a Deep Dream resumed after a slice
+    deadline)."""
+    import sys
+    from types import ModuleType, SimpleNamespace
+
+    torch = pytest.importorskip("torch")
+    from songe.backends.torch import repage
+
+    made = []
+
+    def get_paged(*shape, dtype, device):
+        tensor = torch.zeros(*shape, dtype=dtype, device=device)
+        tensor.is_paged, tensor.page_deviceid = True, 0
+        made.append(tensor)
+        return tensor
+
+    functional = ModuleType("bitsandbytes.functional")
+    functional.get_paged = get_paged
+    monkeypatch.setitem(sys.modules, "bitsandbytes", ModuleType("bitsandbytes"))
+    monkeypatch.setitem(sys.modules, "bitsandbytes.functional", functional)
+    stale = torch.arange(6, dtype=torch.uint8)
+    stale.is_paged = True  # as torch.load restores it
+    small = torch.ones(3)
+    optimizer = SimpleNamespace(state={"p": {"step": 2, "state1": stale, "absmax1": small}})
+    repage(optimizer)
+    state = optimizer.state["p"]
+    assert state["state1"] is made[0] and torch.equal(state["state1"], stale)
+    assert state["absmax1"] is small and state["step"] == 2
+
+    # Without paged memory (no bitsandbytes build) the flag goes instead.
+    monkeypatch.setitem(sys.modules, "bitsandbytes.functional", ModuleType("bitsandbytes.functional"))
+    stale = torch.arange(6, dtype=torch.uint8)
+    stale.is_paged = True
+    optimizer = SimpleNamespace(state={"p": {"state1": stale}})
+    repage(optimizer)
+    assert optimizer.state["p"]["state1"] is stale and not stale.is_paged
