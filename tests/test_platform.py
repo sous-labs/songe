@@ -324,3 +324,41 @@ def test_a_later_gguf_learner_gets_the_converter_runtime_once(tmp_path, monkeypa
     # CUDA/ROCm runtimes already carry torch; nothing is installed there.
     cuda = SimpleNamespace(accelerators=lambda: [SimpleNamespace(kind="cuda")])
     assert install.converter_python(Rooted(cuda, tmp_path)) == sys.executable
+
+
+@pytest.mark.parametrize(
+    "commit_available,system_free,expected",
+    [
+        (8e9, 20e9, "normal"),  # plenty of both
+        (0.5e9, 20e9, "normal"),  # the page file can grow on a roomy drive
+        (0.5e9, 5e9, "warn"),  # 1.5 GB of room left before the stop line
+        (0.5e9, 3e9, "critical"),  # the drive is past the stop line
+        (6e9, 1e9, "normal"),  # committed room exists without growing
+        (1e9, None, "normal"),  # drive unreadable: load-based pressure only
+    ],
+)
+def test_windows_commit_charge_counts_the_drive_the_page_file_grows_on(
+    commit_available, system_free, expected
+):
+    from songe.platform.windows import commit_pressure
+
+    assert commit_pressure(commit_available, system_free) == expected
+
+
+def test_windows_memory_stops_before_the_page_file_fills_the_system_drive(tmp_path):
+    """Measuring a 1.7B model on a 31 GB laptop: free RAM looked fine (load
+    under 80%) while commit charge grew the page file until the system drive
+    had 0.0 GB free (reported by Jack in a test on 11-24)."""
+
+    class Committed(Kernel):
+        def GlobalMemoryStatusEx(self, pointer):
+            info = pointer._obj
+            info.total, info.available, info.load = 31_000_000_000, 9_000_000_000, 70
+            info.page_total, info.page_available = 40_500_000_000, 300_000_000
+            return 1
+
+    platform = Windows(tmp_path, {"SystemDrive": "C:"}, Committed(), User())
+    platform.system_free = lambda: 3_000_000_000
+    assert platform.memory().pressure == "critical"
+    platform.system_free = lambda: 30_000_000_000
+    assert platform.memory().pressure == "normal"
