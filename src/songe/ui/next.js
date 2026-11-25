@@ -695,11 +695,13 @@ function modelView(id, ml, inv, paused = false) {
     }
     // While the new Quick Dream is the card on top, the row opens on the
     // Dream before it, so its report is not shown twice.
+    // When that card is the only Dream, the row has nothing else to open.
     const chosen = dreams.find(d => d.id === selectedDream[id]) || (card && dreams[1]) || dreams[0];
-    node.append(
+    const twice = card && chosen.id === latest.id;
+    node.append(...[
       el('section', {class: 'dreams'}, el('h3', {class: 'section-title'}, W.dreams_title), dreamRow(id, dreams, chosen.id)),
-      el('section', {class: 'chosen-report'}, rowReport(id, ml, chosen)),
-      nowLine(id, ml));
+      twice ? null : el('section', {class: 'chosen-report'}, rowReport(id, ml, chosen)),
+      nowLine(id, ml)].filter(Boolean));
   }
   if (!unsupported && ml?.versions?.length) node.append(versionsView(id, ml.versions));
   return node;
