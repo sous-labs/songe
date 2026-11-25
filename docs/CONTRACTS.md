@@ -63,6 +63,9 @@ agent's chosen model; only that model's learned serving identity is substituted.
 `--model` can pre-enable a local base. A server whose local weight paths are not
 available can still forward and record. Newly requested ids are registered on
 first use; local discovery and guarded conversion/calibration happen while idle.
+A `songe/` name not registered yet is looked up among the models found on this
+machine, so a model pulled while Songe runs answers to the name Songe gives it;
+a name no model has is forwarded as asked and never registered.
 No architecture or size-name exclusion is allowed. Selecting `new` or `all` on an unsupported model requests a fresh measured check. Support is `pending` until
 measured, then `trainable` or `unsupported` with the observed reason. CPU-only
 serving policy and missing local weight paths are reported explicitly.
