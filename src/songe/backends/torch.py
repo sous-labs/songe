@@ -137,6 +137,31 @@ def free_memory(torch, device):
     return psutil.virtual_memory().available
 
 
+def repage(optimizer):
+    """After a bitsandbytes paged optimizer loads a checkpoint.
+
+    torch.save keeps a tensor's Python attributes, so a state saved from paged
+    (managed) memory comes back flagged `is_paged` although torch.load put it
+    in ordinary device memory. The optimizer then prefetches it as managed
+    memory and the CUDA call fails: "Error invalid argument at line 578 in file
+    pythonInterface.cpp", which ends the process (an Inkling-2-Mini Deep Dream
+    resumed after a slice deadline). Such states are copied into paged memory
+    again, or lose the flag where paged memory cannot be had."""
+    for values in optimizer.state.values():
+        for key, value in values.items():
+            if not getattr(value, "is_paged", False):
+                continue
+            try:
+                from bitsandbytes.functional import get_paged
+
+                paged = get_paged(*value.shape, dtype=value.dtype, device=value.device)
+                paged.copy_(value)
+            except Exception:
+                paged = value
+                paged.is_paged = False
+            values[key] = paged
+
+
 def needs_4bit(parameter_count, available_bytes, memory_fraction):
     if available_bytes <= 0 or not 0 < memory_fraction <= 1:
         raise ValueError(
