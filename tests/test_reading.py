@@ -800,6 +800,165 @@ async def test_quick_dream_with_only_new_signals_under_memory_pressure_says_so(c
     assert learner.get("quick_checked")["error"] == "memory"
 
 
+def pressed_setup(config, store, monkeypatch, tmp_path, upstream, *, available=90_000, ollama=None):
+    """A learner with one unread conversation and a base version, a scheduler
+    on `upstream`, the reader's answers faked; `ollama` answers /api/*."""
+    from types import SimpleNamespace
+
+    from songe import schedule
+    from songe.platform import Memory
+    from songe.upstream import protection
+
+    config.learning = "dreams"
+    registry.migrate(config, store)
+    registry.observe(config, store, "learner")
+    registry.set_learning(store, "learner", "all")
+    record_session(store)
+    learner = store.scoped("learner")
+    learner.add_version({"id": "base-learner", "identifier": "learner", "artifact": str(tmp_path / "model"),
+                         "adapter": None, "created": 0, "night": 0, "kind": "gguf-full"})
+    learner.swap("base-learner", None)
+    asked = []
+
+    def route(request):
+        if request.url.path.startswith("/api/"):
+            return ollama(request)
+        body = json.loads(request.content)
+        name = (body.get("response_format") or {}).get("json_schema", {}).get("name")
+        asked.append((body["model"], name))
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(ANSWERS.get(name, {}))}}]})
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **k: REAL_CLIENT(**(k | {"transport": httpx.MockTransport(route)})))
+    memory = SimpleNamespace(
+        name="test", memory=lambda: Memory(100_000, available), accelerators=lambda: [],
+        on_ac_power=lambda: True, idle_seconds=lambda: None, thermal=lambda: None,
+        process_bytes=lambda pid: 100,
+    )
+    monkeypatch.setattr(protection, "current", lambda: memory)
+    pressure = SimpleNamespace(pressure="normal")
+    scheduler = schedule.ModelScheduler(config, store, upstream, platform=SimpleNamespace(memory=lambda: pressure))
+    return scheduler, learner, asked
+
+
+def fake_ollama(tmp_path, running):
+    """Ollama's API as Songe uses it: /api/ps lists what is in memory, an
+    empty /api/generate loads (keep_alive 0 unloads)."""
+    import hashlib
+    from types import SimpleNamespace
+
+    from songe.upstream.ollama import Ollama
+
+    (tmp_path / "model").write_bytes(b"gguf weights")
+    digest = hashlib.sha256(b"gguf weights").hexdigest()
+    generated = []
+
+    def handler(request):
+        if request.url.path == "/api/ps":
+            return httpx.Response(200, json={"models": [{"name": n, "model": n} for n in running]})
+        if request.url.path == "/api/show":
+            return httpx.Response(200, json={"modelfile": f"FROM /blobs/sha256-{digest}"})
+        if request.url.path == "/api/generate":
+            body = json.loads(request.content)
+            generated.append(body)
+            if body.get("keep_alive") == 0:
+                running[:] = [n for n in running if n != body["model"] + ":latest"]
+            elif body["model"] + ":latest" not in running:
+                running.append(body["model"] + ":latest")
+            return httpx.Response(200, json={"done": True})
+        return httpx.Response(404)
+
+    upstream = Ollama(SimpleNamespace(upstream_url="http://ollama.test/v1", upstream_timeout=5,
+                                      guard_min_interval=0.01, guard_grace_seconds=1))
+    return upstream, handler, generated
+
+
+async def test_a_pressed_quick_dream_loads_the_ollama_model_and_releases_it(config, store, monkeypatch, tmp_path):
+    """Background reading never loads a model; a pressed Quick Dream loads the
+    learner's model with Ollama's own load and releases it once it is done."""
+    running = []
+    upstream, handler, generated = fake_ollama(tmp_path, running)
+    scheduler, learner, asked = pressed_setup(config, store, monkeypatch, tmp_path, upstream, ollama=handler)
+    assert await scheduler.read_sessions() == 0  # background: waits, loads nothing
+    assert generated == [] and asked == []
+    assert await scheduler.quick_now("learner") == 1
+    # Loaded with Ollama's empty-prompt warm, no keep_alive of Songe's own.
+    assert generated[0] == {"model": "learner", "prompt": "", "stream": False}
+    await scheduler.dream_task
+    assert ("learner", "classify") in asked  # it read with the learner's model
+    # Released after this Quick Dream, confirmed gone from /api/ps.
+    assert generated[-1]["keep_alive"] == 0 and running == []
+    assert scheduler.press_loads == {} and upstream.owned == {}
+
+
+async def test_a_pressed_quick_dream_never_releases_the_users_ollama_model(config, store, monkeypatch, tmp_path):
+    running = ["learner:latest"]  # the user loaded it
+    upstream, handler, generated = fake_ollama(tmp_path, running)
+    scheduler, learner, asked = pressed_setup(config, store, monkeypatch, tmp_path, upstream, ollama=handler)
+    assert await scheduler.quick_now("learner") == 1
+    await scheduler.dream_task
+    assert ("learner", "classify") in asked
+    assert generated == [] and running == ["learner:latest"]
+    # Even a load request reuses the user's instance and never claims it.
+    assert await scheduler.load_for_press("learner") is None
+    await scheduler.release_press_load("learner")
+    assert generated == [] and running == ["learner:latest"]
+
+
+async def test_a_model_the_agent_used_meanwhile_is_left_to_the_server(config, store, monkeypatch, tmp_path):
+    """Loaded for a press, then the user's agent asked for it: it is the
+    user's now, and Ollama's own keep-alive decides when it goes."""
+    running = []
+    upstream, handler, generated = fake_ollama(tmp_path, running)
+    scheduler, learner, asked = pressed_setup(config, store, monkeypatch, tmp_path, upstream, ollama=handler)
+    assert await scheduler.load_for_press("learner") is None and running == ["learner:latest"]
+    scheduler.traffic()
+    scheduler.serving_model = "learner"
+    await scheduler.release_press_load("learner")
+    assert running == ["learner:latest"] and all("keep_alive" not in g for g in generated)
+
+
+async def test_a_pressed_quick_dream_without_the_memory_waits_and_says_why(config, store, monkeypatch, tmp_path):
+    from songe import quick
+
+    running = []
+    upstream, handler, generated = fake_ollama(tmp_path, running)
+    scheduler, learner, asked = pressed_setup(
+        config, store, monkeypatch, tmp_path, upstream, available=0, ollama=handler)
+    answer = await scheduler.dream("learner", "quick")
+    assert not answer["started"] and "not enough free memory to load the model" in answer["message"]
+    assert generated == [] and running == [] and asked == []
+    assert getattr(scheduler, "dream_task", None) is None
+    assert learner.get("quick_checked")["error"] == "load_memory"
+    assert (learner.get(quick.HISTORY) or [])[-1]["error"] == "load_memory"
+
+
+async def test_a_pressed_quick_dream_loads_and_releases_on_lm_studio(config, store, monkeypatch, tmp_path):
+    from tests.test_lmstudio import FakeLMS
+
+    upstream = FakeLMS(tmp_path, appear_after=1)
+    scheduler, learner, asked = pressed_setup(config, store, monkeypatch, tmp_path, upstream)
+    with store.connect() as db:  # LM Studio's own copy of the model
+        db.execute("UPDATE versions SET artifact=? WHERE id='base-learner'",
+                   (str(tmp_path / "lmstudio-community/granite-4.2-3b-MLX-4bit"),))
+    assert await scheduler.read_sessions() == 0  # background: waits, loads nothing
+    assert upstream.calls == [] and asked == []
+    assert await scheduler.quick_now("learner") == 1
+    assert [c[0] for c in upstream.calls if c[0] in {"load", "unload"}] == ["load"]
+    await scheduler.dream_task
+    assert ("learner", "classify") in asked
+    assert [c[0] for c in upstream.calls if c[0] in {"load", "unload"}] == ["load", "unload"]
+    assert upstream.ps == []
+    # A model the user loaded in LM Studio is read with and never unloaded.
+    record_session(store, ask="fix the other failing test")
+    upstream.ps.append({"identifier": "learner", "path": "lmstudio-community/granite-4.2-3b-MLX-4bit",
+                        "instanceReference": "users"})
+    upstream.calls.clear()
+    assert await scheduler.quick_now("learner") == 1
+    await scheduler.dream_task
+    assert not any(c[0] in {"load", "unload"} for c in upstream.calls)
+    assert [m["identifier"] for m in upstream.ps] == ["learner"]
+
+
 def test_a_pi_compaction_is_not_a_conversation_and_its_continuation_joins(store):
     """Live demo: pi's summarise calls were read as separate sessions and the
     user's conversation was split from its continuation."""

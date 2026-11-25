@@ -651,7 +651,7 @@ def record(store, result, at, examples=None, **run):
     """Every finished Quick Dream joins the Dream history, also one that
     added nothing or could not read (live: a run read 5 conversations, found
     9 moments, added nothing, and left no trace). run: read, found, error
-    (unreadable, no_model, memory). Returns the entry."""
+    (unreadable, no_model, memory, load_memory). Returns the entry."""
     history = store.get(HISTORY) or []
     entry = {
         "id": f"q-{(history[-1]['n'] if history else 0) + 1:04d}",

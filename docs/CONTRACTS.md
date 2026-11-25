@@ -91,7 +91,17 @@ or by auto-dream:
   them in one call (merges same-meaning lessons, drops ones that fit only one
   kind of task, rewrites each as one short instruction; the candidates as they
   are if its answer is unusable), at most `prompt_lessons` and about 150
-  tokens. Quick Dream waits when the learner's model is not loaded. The proxy
+  tokens. Background work never loads a model: an automatic Quick Dream
+  waits when the learner's model is not loaded. A pressed Quick Dream on
+  Ollama or LM Studio loads it with the server's own load (Ollama: an
+  empty-prompt `/api/generate`; LM Studio: its load) when the memory
+  admission Songe uses for its own versions allows, and releases it as soon
+  as that Quick Dream is done (Ollama `keep_alive: 0`, confirmed by
+  `/api/ps`; LM Studio unload) unless the agent used that model meanwhile. A
+  model that was already loaded is the user's and is never released; Songe's
+  own requests send no `keep_alive`, so the user's setting applies. Without
+  the memory, the press waits and says so (`load_memory`); on other servers
+  it waits for the model as before (`no_model`). The proxy
   adds them to the end of the system message of each new session; a session
   keeps the lessons it started with (`LessonPins`), and the recorded request
   stays the agent's own. Removed lessons (`remove_lesson`) never return. The
