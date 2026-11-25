@@ -183,8 +183,11 @@ or by auto-dream:
   conversations for at most `quick_read_seconds`, then the prompt lessons; a
   backlog is worked through by successive Quick Dreams and by Deep Dream);
   after `deep_quiet_seconds` (until gap prediction decides it), or when Deep
-  Dream was pressed, Deep Dream reads what is left and writes practice, then
-  trains. A Deep Dream under way resumes in any pause.
+  Dream was pressed, Deep Dream reads what is left, writes the prompt lessons
+  of what it read as a Quick Dream would, and writes practice, then trains.
+  So the version it trains is checked against the prompt the user will have,
+  with the lessons of every conversation read. A Deep Dream under way resumes
+  in any pause.
 - The cycle section carries `lessons` ([{id, text, count, added_at}]), `quick`
   (the last Quick Dream: {at, added, lessons, version, consolidated}) and
   `waiting` ({total, lessons: [{text, count}]}: lessons not in the prompt and

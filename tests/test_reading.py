@@ -645,6 +645,32 @@ async def test_idle_reading_uses_the_learners_own_loaded_model(config, store, mo
     assert practice.counts(learner)["written"] == 3
 
 
+async def test_a_deep_dreams_reading_writes_the_notes_before_practice(config, store, monkeypatch):
+    """Only a Quick Dream wrote the prompt lessons. A Deep Dream that read
+    conversations no Quick Dream had read (pressed early, or a backlog) wrote
+    practice and trained, and its version was checked against a prompt that
+    did not hold those lessons yet (live: 8 notes for four of eight habits;
+    the rest arrived with the next Quick Dream, after the gate)."""
+    from songe import quick
+
+    config.learning = "dreams"
+    registry.migrate(config, store)
+    registry.observe(config, store, "learner")
+    registry.set_learning(store, "learner", "all")
+    # The same correction in two conversations: a lesson for the prompt.
+    record_session(store, ask="fix the other failing test")
+    record_session(store)
+    learner = store.scoped("learner")
+    scheduler, _ = scheduler_for(config, store, monkeypatch, loaded=["learner"])
+    assert quick.active(learner) == []
+    assert await scheduler.read_sessions(practice=True) > 2  # two conversations read, scenes written
+    assert [lesson["text"] for lesson in quick.active(learner)] == ["Check the file first."]
+    # Nothing new was read since: the lessons stand, no second entry.
+    history = len(learner.get(quick.HISTORY) or [])
+    await scheduler.read_sessions(practice=True, force=True)
+    assert len(learner.get(quick.HISTORY) or []) == history
+
+
 async def test_idle_reading_is_off_under_hindsight_learning(config, store, monkeypatch):
     registry.migrate(config, store)
     registry.observe(config, store, "learner")

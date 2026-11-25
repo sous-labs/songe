@@ -2593,7 +2593,8 @@ class ModelScheduler(Scheduler):
         model being trained does the reading. practice: also write practice
         scenes (Deep Dream's first step; never in short pauses). seconds: a
         reading budget (Quick Dream). quick: publish the prompt lessons after
-        reading. Never loads a model; a learner whose model is not loaded
+        reading (a Deep Dream's reading does too, before it writes practice).
+        Never loads a model; a learner whose model is not loaded
         waits. Returns how many sessions were read and scenes written."""
         if self.installation_config.learning != "dreams":
             return 0
@@ -2739,6 +2740,17 @@ class ModelScheduler(Scheduler):
                             # prompt: said with what it read (live: 5 read, 9
                             # moments, 0 lessons; then just "nothing new").
                             learner.set("quick_checked", checked | {"read": read, "found": activity.get("found_count", 0)})
+                    elif practice:
+                        # A Deep Dream that read conversations no Quick Dream
+                        # had read (pressed early, or a backlog) writes their
+                        # lessons into the prompt as a Quick Dream would,
+                        # before practice and the check. Live: a Dream read
+                        # the rest of the chats, trained on their lessons and
+                        # was checked against a prompt holding 8 notes for
+                        # four of the eight habits; the other notes arrived
+                        # with the next Quick Dream, after the gate. Nothing
+                        # new since the last Quick Dream: nothing happens.
+                        await self.quick_dream(model, reader=reader)
                     failed = getattr(reader, "failed_sessions", None)
                     if failed:
                         # The model's answers could not be read: said on the
