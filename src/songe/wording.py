@@ -794,3 +794,64 @@ def flow_line(stage, text):
             else "measuring smaller sizes"
         )
     return text
+
+
+# Learn with a cloud model (songe.cloud). Raise the version when the
+# substance changes: everyone who turned it on accepts the new text again.
+CLOUD_DISCLAIMER_VERSION = 1
+CLOUD_DISCLAIMER_TITLE = "Learn with a cloud model"
+
+
+def cloud_disclaimer(terms_url=""):
+    """What is sent, to whom and why, in plain words (CLI and page)."""
+    terms = (
+        f"The provider's terms apply ({terms_url})."
+        if terms_url
+        else "The provider's terms apply."
+    )
+    return [
+        "This is optional and off unless you turn it on.",
+        "Your agent keeps running on your own model; only the nightly Dream uses the"
+        " cloud model.",
+        "During a Dream, Songe sends the moments it learns from to the provider you"
+        " choose: the conversation up to that moment, your feedback, and your agent's"
+        " answers. The cloud model explains what went wrong and checks whether the new"
+        " version does better.",
+        "Before anything is sent, keys, tokens and passwords are removed and your home"
+        " folder is shown as ~. Code and file contents in those moments are sent.",
+        "Spending stops at a nightly budget you set. Every call is listed in the"
+        " Dream's record.",
+        terms + " Some providers restrict using their outputs to train other models;"
+        " Songe trains your local model on what it learns. You decide whether that"
+        " fits.",
+        "Turning it off stops all calls at once.",
+    ]
+
+
+def money(usd):
+    if usd is None:
+        return "cost unknown"
+    return f"${usd:.2f}" if usd >= 0.01 or usd == 0 else "<$0.01"
+
+
+def context_size(tokens):
+    if not tokens:
+        return ""
+    if tokens >= 1_000_000:
+        return f"{round(tokens / 1_000_000, 1):g}M context"
+    return f"{round(tokens / 1000):g}k context"
+
+
+def cloud_line(cloud):
+    """`songe status`: one line while cloud learning is on (or why Songe
+    turned it off), else None."""
+    if not cloud or not cloud.get("enabled"):
+        if cloud and cloud.get("off_reason"):
+            return f"Cloud learning off · {cloud['off_reason']}"
+        return None
+    tonight = cloud.get("tonight") or {}
+    spent = money(tonight.get("usd", 0.0)) if tonight.get("cost_known", True) else "cost unknown"
+    return (
+        f"Cloud learning on · {cloud.get('model')} via {cloud.get('provider_label')}"
+        f" · {spent} of {money(cloud.get('budget_usd'))} tonight"
+    )

@@ -228,6 +228,53 @@ async def test_vllm_dynamic_lora_sleep_and_restore(tmp_path):
     await upstream.close()
 
 
+async def test_vllm_starts_its_own_endpoint_for_the_first_adapter(tmp_path):
+    # The user's server answers the base, so Songe's own endpoint is not
+    # running when the first trained version is to be loaded. The swap asked
+    # that port, got a refused connection, and waited "for the model server"
+    # again every few minutes: no Dream could be adopted on such a setup.
+    started, loads = [], []
+
+    def handler(request):
+        if request.url.host == "user":
+            return httpx.Response(200, json={"data": [{"id": "/base", "root": "/base"}]})
+        if not started:
+            raise httpx.ConnectError("refused", request=request)
+        if request.url.path == "/v1/load_lora_adapter":
+            loads.append(json.loads(request.content))
+            return httpx.Response(200, text="Success")
+        return httpx.Response(
+            200,
+            json={"data": [{"id": "/base", "root": "/base"}] + [
+                {"id": b["lora_name"], "root": b["lora_path"], "parent": "/base"} for b in loads
+            ]},
+        )
+
+    def owned():
+        return VLLM(
+            SimpleNamespace(upstream="vllm", upstream_url="http://owned/v1", server_source_url="http://user/v1"),
+            transport=httpx.MockTransport(handler),
+        )
+
+    version = {"id": "night-1", "identifier": "songe/night-1", "artifact": str(tmp_path / "adapter")}
+    # A server Songe does not start (no command was found for it): closed is closed.
+    with pytest.raises(httpx.ConnectError):
+        await owned().load(version)
+
+    async def restart(candidate):
+        started.append(candidate["identifier"])
+
+    upstream = owned()
+    upstream.supervisor = SimpleNamespace(restart=restart, process=None)
+    assert await upstream.resident(version) is False and not started
+    await upstream.load(version)
+    assert started == ["songe/night-1"]
+    assert [b["lora_name"] for b in loads] == ["songe/night-1"]
+    assert await upstream.resident(version) is True
+    await upstream.load(version)
+    assert len(started) == 1 and len(loads) == 1
+
+
 async def test_vllm_without_sleep_refuses_parking_before_unloading():
     calls = []
 
@@ -319,6 +366,8 @@ async def test_llamacpp_reports_the_context_the_users_server_runs_with():
     def handler(request):
         if request.url.host != "user":
             raise httpx.ConnectError("owned server is down", request=request)
+        if request.url.path == "/running":  # llama-swap only
+            return httpx.Response(404)
         assert request.url.path == "/v1/models"
         return httpx.Response(
             200,

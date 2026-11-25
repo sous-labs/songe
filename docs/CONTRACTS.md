@@ -75,12 +75,15 @@ or by auto-dream:
   within `quick_read_seconds` (the older backlog is left to Deep), then
   publishes the prompt lessons (`quick.py`): lessons read as applying to any
   task, and rules the user stated (a sentence of theirs that starts like a
-  rule, used verbatim and kept first); other feedback waits for Deep Dream.
+  rule, used verbatim and kept first); other lessons with the evidence a note
+  needs (see practice below) wait for Deep Dream.
   Reading writes each lesson twice: `lesson` (one or two sentences, the Deep
   Dream teacher's note) and `short` (one instruction of at most 15 words, the
   prompt's form); Quick Dream uses `short`, and trims `lesson` by text only for
   signals read before `short` existed.
-  Published lessons keep their wording; near-duplicates as one,
+  Published lessons keep their wording; near-duplicates as one, and so are
+  notes reading found to be one wish said in other words (the place then
+  keeps each wording, see `same_notes` below),
   most recurrent then most recent first; the served model then consolidates
   them in one call (merges same-meaning lessons, drops ones that fit only one
   kind of task, rewrites each as one short instruction; the candidates as they
@@ -130,13 +133,48 @@ or by auto-dream:
   practice no longer see it, and it stays retired when its conversation is
   read again. The order conversations are read in does not matter; answers
   come from the reader's cache unless the list of earlier sentences changed.
+- People repeat themselves. Then each note for the prompt is shown to the
+  served model with the notes before it, oldest first (`same_note`: which of
+  them could be the same wish?), and each one it names again with it alone,
+  both ways round (`same_wish`: the model says each note again as an
+  instruction, then "same" or "different"). A note that repeats an earlier
+  one both times ("Celsius
+  please, I don't think in Fahrenheit." after "In metric please.") is folded
+  into it (`same_notes` in the learner's state: signal -> the first signal of
+  that wish). Folded notes are one lesson and take one place in the prompt,
+  which keeps each wording, the most recent first, as long as they fit in one
+  lesson; a change wanted once counts in every conversation it came up in,
+  however it was worded. No wording is chosen and no signal is retired, so a
+  wrong answer costs a place or shares one and never drops a note.
 - Every user message that follows an answer is judged once by the served
   model (`turn`, with thinking): a standing wish about how this user wants
   things, a change wanted for this answer only, new work, or a reaction. Only
   a standing wish becomes a note in the prompt at once, also when the split
   into parts read it as a new task. A change wanted once becomes a note when
-  the same wish comes up in a second conversation. New work and reactions do
-  not become notes. A sentence shaped like a rule stays a rule.
+  the same wish comes up in a second conversation; it is stored as a
+  correction for that, also when the split read it as a new task. After a plain
+  answer (no tool call), a turn the split read as saying something is wrong
+  or missing while the turn question read new work or a question (a
+  reminder: "Where's my ...?") waits the same way. Other new work and
+  reactions do not become notes. The verdict also holds for a sentence shaped
+  like a rule in that message: inside new work or a reaction it is not a
+  note, and inside a change wanted once it waits for the second conversation.
+  A preference stated about oneself keeps its own check. Messages that were
+  not judged (the opening one, "continue") are handled as before.
+  The wish and the lesson for such a message are the model's wording of what
+  the user wrote, checked in code (`rules.voiced`): one that names nothing
+  the user wrote is not used, and the user's own sentence, when the message
+  is one short sentence, is the note or the lesson in its place.
+- Practice needs the same evidence as a note (`quick.admitted`, one bar for
+  both; training is harder to undo than a note). Where the user's turn was
+  judged, Deep Dream writes scenes for a standing wish and for a rule of
+  theirs at once, for a change wanted once only when the same wish has come
+  up in a second conversation, and for nothing the user took out of the
+  prompt. The bar is about evidence, not about what a lesson applies to: a
+  lesson too narrow for the prompt (one kind of task), or one from the work
+  itself (a tool's output), is practised as before. Scenes already written
+  for a lesson that does not meet the bar are kept and not trained
+  (`practice.pool.not_admitted`).
 - Deep Dream (2–3 hours, skills): reads what is left, writes practice, trains,
   checks. When one is adopted, the lessons whose signals it trained leave the
   prompt (`quick.absorb`); an undo lets them come back.
@@ -145,8 +183,11 @@ or by auto-dream:
   conversations for at most `quick_read_seconds`, then the prompt lessons; a
   backlog is worked through by successive Quick Dreams and by Deep Dream);
   after `deep_quiet_seconds` (until gap prediction decides it), or when Deep
-  Dream was pressed, Deep Dream reads what is left and writes practice, then
-  trains. A Deep Dream under way resumes in any pause.
+  Dream was pressed, Deep Dream reads what is left, writes the prompt lessons
+  of what it read as a Quick Dream would, and writes practice, then trains.
+  So the version it trains is checked against the prompt the user will have,
+  with the lessons of every conversation read. A Deep Dream under way resumes
+  in any pause.
 - The cycle section carries `lessons` ([{id, text, count, added_at}]), `quick`
   (the last Quick Dream: {at, added, lessons, version, consolidated}) and
   `waiting` ({total, lessons: [{text, count}]}: lessons not in the prompt and
@@ -384,7 +425,9 @@ contexts or performing model inference.
 
 ## 8. Local API (for GUI, TUI, CLI) — served by the proxy on loopback
 
-`GET /api/state`, `GET /api/nights`, `GET /api/nights/{id}`, `GET /api/scoreboard`, `GET /api/settings`, `GET /api/cycles`, `GET /api/cycles/{id}` (draft, see Learning cycle), `POST /api/control` `{action: pause|resume|sleep_now|dream|undo|forget|model, ...}` (JSON + Origin check as today), `PATCH /api/settings` for the few user-facing settings (model, schedule default, upstream). The CLI and TUI use the same endpoints when the service runs, and the store directly when it does not.
+`GET /api/state`, `GET /api/nights`, `GET /api/nights/{id}`, `GET /api/scoreboard`, `GET /api/settings`, `GET /api/cycles`, `GET /api/cycles/{id}` (draft, see Learning cycle), `POST /api/control` `{action: pause|resume|sleep_now|dream|undo|forget|model, ...}` (JSON + Origin check as today), `PATCH /api/settings` for the few user-facing settings (model, schedule default, upstream, `cloud`). The CLI and TUI use the same endpoints when the service runs, and the store directly when it does not.
+
+Learn with a cloud model (`songe/cloud/`, optional, off by default): `settings.cloud` summarises it (enabled, provider, model, budget, the key as `{set, tail, source}` only, tonight's calls and cost). `PATCH /api/settings {cloud: {enabled, provider, base_url, model, budget_usd, api_key, accept_disclaimer}}`: `api_key` is write-only (it goes to the OS keychain, or a 0600 file without one); `enabled: true` needs the current disclaimer accepted and runs the probe first, and stays off with a 400 and the probe's plain result if it fails. `GET /api/cloud`: summary, disclaimer text and version, suggested models, the latest night's calls. `POST /api/cloud/test`: probe the saved settings. Every call is a row in `cloud_calls` (purpose, model, redacted size and preview, tokens, cost, ok/error); a full cycle record lists its Dream's calls as `cloud_calls`. Only the Dream may call it; the proxy's upstream stays local.
 
 `POST /api/control` accepts `{action:"model", model:<upstream id>, level:"off"|"new"|"all"}`
 (legacy `enabled:<bool>` maps true → `new`, false → `off`)
@@ -586,7 +629,7 @@ status lines.
 // Practice: one line per scene, so surfaces can list them plainly.
 {
   "written": 137, "kept": 112, "dropped": 25,
-  "dropped_by": {"<check code>": 25},   // built | decision | parses | not_copy | matters
+  "dropped_by": {"<check code>": 25},   // built | decision | parses | not_copy | matters | changes
   "recent": [PracticeLine]        // newest 5; all in the full record
 }
 // PracticeLine
@@ -747,11 +790,12 @@ most a one-line label on an example.
   lessons (never trained on, one scene each, fixed order) fill the places up
   to `min_heldout` (5). Each unit's last 3 moments, 24 at most. At each moment
   the version in use and the candidate answer deterministically (384 tokens);
-  the same action is a tie; a different one goes to the original base model
-  (blind A/B: request, the user's feedback or the lesson, both answers):
-  win, loss or tie. "Both", "neither", a pick that changes with the order
-  or a reply that cannot be read is a tie; the teacher's preference, which
-  training fits, never breaks it.
+  the same action is a tie; of two different ones each goes on its own to
+  the original base model (request, the user's feedback or the lesson, one
+  answer: does it do what the feedback asks, yes or no; never which of two
+  it prefers). A win when only the candidate's does, a loss when only the
+  answer in use does; both, neither or a reply that cannot be read is a tie;
+  the teacher's preference, which training fits, never breaks it.
   Each moment is one unit (win +1, loss −1, tie 0), resampled per moment
   (user decision: per conversation, 5 units left the lower bound at 0); at
   least `min_heldout` conversations must be present. Adopt only if wins >
@@ -803,8 +847,13 @@ Training follows DESIGN 3 (OPSD). The student is base + LoRA on the exact logged
 context c; the teacher is the version the cycle started from (the original base in
 the first cycle), frozen, on the same c plus a marked hindsight block: the logged
 observations, then the idle review's "What went wrong" and "Lesson" when the reply
-was reviewed, then "Respond now with your own action." General anchors carry no
-hindsight and keep the original base as teacher. Forward KL over the full
+was reviewed, then "Respond now with your own action." A practice scene's
+hindsight is one note Songe wrote (the lesson and the feedback it came from), so
+its teacher gets that note as an aside instead: not part of the conversation,
+shown only to it, to follow where it applies and not to mention. The aside asks
+for "the reply to the message above" when the scene has no tools and, when it
+has, for "your own action" as a real step's block does. General anchors
+carry no hindsight and keep the original base as teacher. Forward KL over the full
 vocabulary, each vocabulary entry's contribution clipped at `vocab_clip`
 (provisional 1.0 until measured), is evaluated on the student's freshly sampled
 action tokens only. Prompt, user, tool and historical assistant tokens never
@@ -843,8 +892,27 @@ on-policy distillation, but the pool changes: the student's context is a
 practice scene (a generated conversation ending where a lesson matters, built
 on the logged system prompt and tool schemas), and the teacher's hindsight is
 that scene's teacher note ("Note from an earlier, different task (it may not
-apply here)", the feedback and the lesson). Real contexts are never trained on;
+apply here)", the feedback and the lesson). A lesson from a plain chat (a
+request without tools) gets a different scene: one new opening message of the
+same kind as the one the user sent before their feedback, written without
+sight of the lesson, under the logged system prompt if there was one. It is
+kept by the `changes` check instead of the forced choice between two lessons:
+the served model answers it with and without the note, and the base, asked in
+both orders, must find that the answer with the note does what the user's
+feedback asks. On a server whose reasoning leaves no room for those answers
+they are asked again with reasoning switched off, then with more room. Real contexts are never trained on;
 replay draws from earlier practice scenes. Anchors and the gate are unchanged.
+
+A scene counts as practised once a Deep Dream that trained it is adopted
+(`practice_revisions`). A Dream that is not adopted, rejected by the gate or
+never loaded by the model server, practised nothing: its scenes are kept under
+`rejected_practice` and trained again, in full, by the next Dream that has a
+new scene, after the scenes no Dream has tried when the Dream is capped. On
+their own they wait, since the same scenes alone would be rejected again. A
+scene trained by three Dreams that were not adopted counts as practised from
+then on and comes back as replay only. Forgetting, a change of a model's
+learning level and a switch of learning mode clear `rejected_practice` together
+with `practice_revisions`.
 
 References: [Thinking Machines, On-Policy Distillation (2025)](https://thinkingmachines.ai/blog/on-policy-distillation/);
 [OPSD (2601.18734)](https://arxiv.org/abs/2601.18734);

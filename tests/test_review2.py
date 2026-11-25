@@ -84,6 +84,37 @@ def test_only_the_selected_accelerator_is_required(config, monkeypatch):
         snapshot(selected)
 
 
+@pytest.mark.parametrize("override", [{}, {"device_name": "llvmpipe"}, {"simulated": 1}])
+def test_linux_mlx_uses_selected_unified_gpu_telemetry(monkeypatch, override):
+    from songe import memory
+
+    apple = {
+        "device_name": "Apple M1 Max (G13C C0)",
+        "architecture": "honeykrisp",
+        "unified_memory": 1,
+    }
+    monkeypatch.setattr(
+        memory, "linux_mlx_accelerator", memory.linux_mlx_accelerator.__wrapped__
+    )
+    monkeypatch.setattr(
+        memory.subprocess, "check_output", lambda *args, **kwargs: json.dumps(apple | override)
+    )
+    platform = SimpleNamespace(
+        name="linux",
+        accelerators=lambda: [Accel("cuda", "unrelated eGPU", 1000, 0)],
+        memory=lambda: Memory(2000, 1500, "warn"),
+    )
+    config = Config(backend="mlx")
+    if override:
+        with pytest.raises(OSError, match="MLX"):
+            memory.TrainingPlatform(platform, config).accelerators()
+        return
+    selected = memory.TrainingPlatform(platform, config)
+    assert [a.name for a in selected.accelerators()] == [apple["device_name"]]
+    sample = snapshot(selected)
+    assert (sample.available, sample.pressure, sample.vram) == (1500, "warn", ())
+
+
 @pytest.mark.parametrize("parser", [False, True])
 def test_complete_tool_framing_rejects_malformed_extra_call(parser):
     from songe.sleep.evaluate import health

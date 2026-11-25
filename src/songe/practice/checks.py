@@ -13,7 +13,14 @@ parsed.
   another session, the model picks its own. Asked about a single lesson,
   the model said yes to every scene. With no other session's lesson to
   compare with (a first session), a stock lesson stands in, so the check
-  always runs.
+  always runs. Not asked of a plain chat's scenes: they never state the
+  lesson, and the model then picked "neither" for 165 of 183 good ones.
+- changes (a plain chat's scenes): the served model answers the scene twice,
+  alone and with the scene's note, and a judge is asked in both orders
+  which answer does what the user's feedback asks. Kept when it picks the
+  answer with the note in at least one order and the other answer in
+  none: the scene is one where the lesson changes what the model does.
+  That answer is stored with the scene.
 
 Drop codes are the first failed check, in this order (docs/CONTRACTS.md).
 """
@@ -48,7 +55,22 @@ B: {b}
 Which lesson is about the agent's next action in this situation? Answer "neither" if neither applies.
 Answer with JSON: why (one sentence), then answer (A, B or neither)."""
 
-ORDER = ("built", "decision", "parses", "not_copy", "matters")
+ORDER = ("built", "decision", "parses", "not_copy", "matters", "changes")
+
+# Each of the two answers of the changes check, in tokens at most: the same
+# room the gate gives an answer it judges (sleep/judged.py).
+ANSWER_TOKENS = 384
+# A server that reasons first can spend all of that reasoning and return no
+# reply. The two answers are then asked again with the reader's reasoning
+# switches off, and, where the server ignores those, the way its users ask
+# with this much more room. (HOW_ASKED, in the order tried.)
+REASONING_ROOM = 2048
+HOW_ASKED = ({}, {"think": False}, {"max_tokens": ANSWER_TOKENS + REASONING_ROOM})
+FOLLOWS_SCHEMA = {
+    "type": "object",
+    "properties": {"follows": {"type": "string", "enum": ["A", "B", "both", "neither"]}},
+    "required": ["follows"],
+}
 
 # Stand-ins for "a lesson from another session" when there is none yet: plain
 # coding-agent advice on unrelated subjects.
@@ -165,8 +187,86 @@ def placebo_for(practice_id, signal, lessons):
     return others[h % len(others)], h % 2 == 0
 
 
-async def check(row, signal, items, reader, lessons):
-    """The check results of one scene, its drop code (None when kept) and why."""
+async def teacher_reply(reader, row, **how):
+    """The served model's answer to the scene with its note shown."""
+    import httpx
+
+    from ..sleep.prompts import practice_messages
+
+    how = {"max_tokens": ANSWER_TOKENS} | how
+    try:
+        return await reader.reply(practice_messages(row["messages"], row["teacher_note"]), **how)
+    except httpx.HTTPStatusError as exc:
+        if not 400 <= exc.response.status_code < 500:
+            raise
+        # A chat template that takes no second user message in a row.
+        return await reader.reply(practice_messages(row["messages"], row["teacher_note"], merged=True), **how)
+
+
+def lost_in_reasoning(answer):
+    """The reply was cut off with reasoning in it and nothing to show."""
+    from ..quick import visible
+
+    return answer["reasoned"] and not answer["finished"] and not visible(answer["content"])
+
+
+async def two_answers(row, reader):
+    """(the served model's answer to the scene, its answer with the note
+    shown), asked the way its users ask.
+
+    On a server that reasons first the reasoning can take all of
+    ANSWER_TOKENS, and an empty reply made every scene look unchanged: such
+    a server got no plain-chat practice at all. Both answers are then asked
+    again down HOW_ASKED, and the reader remembers what worked for the scenes
+    that follow. An answer asked any other way than the first counts as
+    reasoned, so it is judged and not stored to train along."""
+    first = getattr(reader, "reply_how", 0)
+    for how in range(first, len(HOW_ASKED)):
+        plain = await reader.reply(row["messages"], **({"max_tokens": ANSWER_TOKENS} | HOW_ASKED[how]))
+        taught = await teacher_reply(reader, row, **HOW_ASKED[how])
+        if not (lost_in_reasoning(plain) or lost_in_reasoning(taught)):
+            break
+    reader.reply_how = how
+    return plain, taught | {"reasoned": taught["reasoned"] or how > 0}
+
+
+async def changes(row, signal, reader):
+    """(kept, why, the answer with the note): does the scene's note change
+    what the served model answers, towards the lesson?"""
+    from ..quick import verdict_of, visible
+    from ..sleep.judged import shown
+    from .prompts import CHANGES
+
+    plain, taught = await two_answers(row, reader)
+    before, after = ({"text": a["content"], "tool_calls": []} for a in (plain, taught))
+    why = {"plain": shown(before, 300), "taught": shown(after, 300)}
+    if not visible(after["text"]) or visible(before["text"]) == visible(after["text"]):
+        return False, why | {"changes": "same"}, taught
+    # The user's own words when there are any: the lesson is a model's
+    # reading of them, and a 4B reader's can miss the point ("Just the code."
+    # became "ensure all explanatory text is complete").
+    guide = clip(signal.get("text") or "", 400).strip() or signal["lesson"]
+    request = clip(str(row["messages"][-1].get("content") or ""), 600)
+    picks = []
+    for swap in (False, True):
+        a, b = (after, before) if swap else (before, after)
+        answer = await reader.ask(
+            CHANGES.format(request=request, guide=guide, a=shown(a), b=shown(b)),
+            FOLLOWS_SCHEMA,
+            "changes",
+            max_tokens=200,
+        )
+        picks.append(verdict_of(json.dumps(answer), swap))
+    why["changes"] = picks
+    # One order may come back "neither" or "both" (a 4B judge is unsure in
+    # one order for one scene in ten); an order that prefers the answer
+    # without the note, or the same position twice, drops the scene.
+    return "after" in picks and "before" not in picks, why, taught
+
+
+async def check(row, signal, items, reader, lessons, *, plain=False):
+    """The check results of one scene, its drop code (None when kept) and why.
+    plain: a plain chat's scene (see the module docstring)."""
     scene, c = row["scene"], {}
     c["built"] = "error" not in scene and not row.get("problems")
     messages = row.get("messages") or []
@@ -178,9 +278,17 @@ async def check(row, signal, items, reader, lessons):
     requests, code = source_of(items)
     evidence = copy_evidence(scene, files, requests, code) if c["built"] else []
     c["not_copy"] = not evidence
-    c["matters"] = None
+    c["matters"] = c["changes"] = None
     why = {"parse_errors": errors, "copy_evidence": evidence}
-    if all(c[k] for k in ORDER[:4]):
+    if plain and all(c[k] for k in ORDER[:4]):
+        c["changes"], found, taught = await changes(row, signal, reader)
+        why.update(found)
+        # What a Deep Dream can train this scene along: the answer with the
+        # note, unless the server reasons first (the scene's own prompt does
+        # not lead into that reasoning).
+        if c["changes"] and not taught["reasoned"]:
+            row["teacher_answer"] = {"content": taught["content"], "finished": taught["finished"]}
+    elif all(c[k] for k in ORDER[:4]):
         placebo, real_first = placebo_for(row["id"], signal, lessons)
         real = signal["lesson"]
         a, b = (real, placebo) if real_first else (placebo, real)

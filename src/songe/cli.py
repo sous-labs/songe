@@ -96,6 +96,24 @@ def parser():
         ("resume", "Resume learning"),
     ):
         commands.add_parser(name, help=text)
+    cloud = commands.add_parser(
+        "cloud", help="Learn with a cloud model (optional) · on|off|status|test"
+    )
+    cloud.add_argument(
+        "action", nargs="?", default="status", choices=("on", "off", "status", "test")
+    )
+    cloud.add_argument("--provider", choices=("openrouter", "custom"))
+    cloud.add_argument("--base-url", help="Custom OpenAI-compatible endpoint")
+    cloud.add_argument("--model", help="Model id at the provider")
+    cloud.add_argument("--budget", type=float, help="Nightly budget in USD")
+    cloud.add_argument(
+        "--accept-disclaimer",
+        action="store_true",
+        help="Accept what is sent without asking (scripts)",
+    )
+    cloud.add_argument(
+        "--forget-key", action="store_true", help="off: also delete the saved key"
+    )
     sleep = commands.add_parser("sleep", help="Learn now instead of waiting")
     sleep.add_argument("--now", action="store_true")
     sleep.add_argument("--dry-run", action="store_true")
@@ -328,6 +346,19 @@ def initialize(args, root):
                 ids = upstream_model_ids(url)
             except (OSError, ValueError, httpx.HTTPError):
                 continue
+            swap_note = None
+            swapped = discovery.llamaswap_loaded(url) if name == "llamacpp" else None
+            if swapped is not None:
+                # llama-swap without weights Songe can read, and a llama.cpp
+                # setup without Songe's own endpoint would fail only at
+                # publish, after training: forward until init sees some.
+                name = None
+                swap_note = (
+                    "llama-swap's loaded models name no weights Songe can read"
+                    " (an absolute -m path to a .gguf file)"
+                    if swapped
+                    else "llama-swap has no model loaded · run songe init again while one runs"
+                )
             # An embedding model can never chat: not offered to agents (#72).
             ids = [i for i in ids if not embedding_name(i)]
             if ids:
@@ -351,6 +382,9 @@ def initialize(args, root):
                         ("Data", str(root)),
                         ("Service", service_fact(args)),
                         ("Replace", "loaded copy when a better version is ready"),
+                        *(
+                            [("Learning", swap_note)] if swap_note else []
+                        ),
                     ]
                 )
                 console().print()
@@ -453,15 +487,22 @@ def initialize(args, root):
 
     # A model already offered under its songe/ name is not added again.
     offered = set(config.exposed_models)
+    swapped = (
+        llamaswap_offered(config, endpoints.get((ref.upstream, ref.serving_id)))
+        if ref.upstream == "llamacpp"
+        else []
+    )
     config.exposed_models = list(
         dict.fromkeys(
             [
                 *config.exposed_models,
                 *(
-                    r.serving_id
-                    for r in catalog_refs
-                    if r.upstream == ref.upstream
-                    and public_name(r.serving_id) not in offered
+                    serving_id
+                    for serving_id in [
+                        *(r.serving_id for r in catalog_refs if r.upstream == ref.upstream),
+                        *swapped,
+                    ]
+                    if public_name(serving_id) not in offered
                 ),
             ]
         )
@@ -589,6 +630,10 @@ def initialize(args, root):
         rows.append(("Learning", "new conversations · starts when idle"))
     if config.server_owned:
         rows.append(("Server", f"{server} · {config.upstream_url}"))
+        binary = (config.server_command or [""])[0]
+        if config.upstream == "llamacpp" and not (shutil.which(binary) or Path(binary).is_file()):
+            # llama-swap's own llama-server is not one Songe can start.
+            rows.append(("Learned", "need llama-server on PATH to be served"))
     if commands:
         rows.append(("Download", "training runtime"))
     rows.append(("Replace", "loaded copy when a better version is ready"))
@@ -687,6 +732,22 @@ def initialize(args, root):
         config, args, root, changes,
         lambda: agents.proposed(config, default=default_choice(args), opencode_v2=v2, root=root),
     )
+
+
+def llamaswap_offered(config, endpoint=None):
+    """llama-swap's chat models, loaded or not: they are offered too and
+    forwarded, and their weights are found once llama-swap runs them."""
+    from .models import discovery
+    from .models.library import embedding_name
+
+    # On re-init upstream_url is Songe's own port; llama-swap is the source.
+    url = endpoint or config.server_source_url or config.upstream_url
+    try:
+        ids = discovery.llamaswap_models(url)
+    except (httpx.HTTPError, ValueError):
+        return []
+    # An embedding model can never chat: not offered to agents (#72).
+    return [i for i in ids if not embedding_name(i)]
 
 
 def preenable_model(args, root, config, ref, refs):
@@ -1020,6 +1081,12 @@ def main(argv=None):
                     if waiting
                     else f"Learning requested · {NAME} status"
                 )
+        elif command == "cloud":
+            if not (root / "config.toml").exists():
+                raise ValueError(f"Uninitialized · {NAME} init")
+            from .cloud.command import main as cloud_main
+
+            return cloud_main(args, Store(private_dir(root)))
         elif command == "forget":
             if confirm("Delete experience and examples?", args.yes):
                 local.control("forget", confirm=True)
@@ -1066,6 +1133,10 @@ def main(argv=None):
                     keep = {"serve.lock", "worker.lock", "experience.lock"} | (
                         {"backups", "agent-backups.json"} if conflicts else set()
                     )
+                    # The cloud API key, wherever it is kept.
+                    from .cloud.keys import delete as delete_cloud_key
+
+                    delete_cloud_key(root)
                     # This process's own open database handles go first.
                     from .log import close_connections
 
@@ -1112,6 +1183,9 @@ def main(argv=None):
                         ("Originals", "retained in backups"),
                     ]
                 )
+            notes = [(a.name, a.after_uninstall(Path.home())) for a in agents.ADAPTERS]
+            if any(note for _, note in notes):
+                facts([(name, note) for name, note in notes if note])
             result("Songe uninstalled")
             if not purged:
                 facts(

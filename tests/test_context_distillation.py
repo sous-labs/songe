@@ -355,3 +355,118 @@ def test_the_users_own_rules_make_a_capped_dream_first(config):
     pool = [experience() | {"id": f"practice:{i}", "source_id": i, "stated": i in (8, 9)} for i in range(1, 10)]
     chosen, _ = bounded_batch(pool, config, seconds=None, step_seconds=0, whole=True)
     assert {s["id"] for s in chosen} >= {"practice:8", "practice:9"}
+
+
+def test_prompts_are_rendered_the_way_the_users_server_sends_them(store):
+    """Live (vLLM serving Qwen3.5-4B with thinking off): the template's
+    default starts every answer inside <think>, so a Deep Dream trained on
+    128 tokens of reasoning that this server never produces, and its check
+    compared two pieces of reasoning."""
+    from songe.sleep import prompts
+
+    class Template:
+        def apply_chat_template(self, messages, **kwargs):
+            self.switches = {k: v for k, v in kwargs.items() if k == "enable_thinking"}
+            return [1, 2, 3]
+
+    def record(message):
+        store.record(
+            "/v1/chat/completions",
+            {"model": "m", "messages": [{"role": "user", "content": "hi"}]},
+            {"choices": [{"message": {"role": "assistant"} | message}]},
+        )
+
+    def switches(**own):
+        prompts.serve_as(prompts.served_switches(store))
+        prompts.render(tokenizer, [{"role": "user", "content": "x"}], None, **own)
+        return tokenizer.switches
+
+    tokenizer = Template()
+    try:
+        # Nothing recorded yet: the template's default.
+        assert switches() == {}
+        # The server answers directly, in text or with a tool call.
+        record({"content": "4"})
+        call = {"id": "c", "type": "function", "function": {"name": "read", "arguments": "{}"}}
+        record({"content": "", "tool_calls": [call]})
+        assert switches() == {"enable_thinking": False}
+        # A caller's own switch still wins.
+        assert switches(enable_thinking=True) == {"enable_thinking": True}
+        # The server reasons first (either field name, or <think> text).
+        record({"content": "4", "reasoning": "two and two"})
+        assert switches() == {}
+    finally:
+        prompts.serve_as({})
+    assert prompts.reasoned({"reasoning_content": "plan"})
+    assert prompts.reasoned({"content": "<think>plan</think>4"})
+    assert not prompts.reasoned({"content": "4", "reasoning": " "})
+
+
+def test_each_model_is_rendered_by_its_own_recorded_answers(store):
+    """One installation, a model that reasons and one that answers directly:
+    read together, the last twenty answers of both decided for each."""
+    from songe.sleep.prompts import served_switches
+
+    def record(binding, message):
+        store.record(
+            "/v1/chat/completions",
+            {"model": "any", "messages": [{"role": "user", "content": "hi"}]},
+            {"choices": [{"message": {"role": "assistant"} | message}]},
+            binding=binding,
+        )
+
+    store.set("primary_model", "thinker")
+    thinker, plain = store.scoped("thinker"), store.scoped("plain")
+    thinker.add_version({"id": "base", "identifier": "thinker", "artifact": "", "adapter": None, "created": 0, "night": 0})
+    plain.add_version({"id": "night-3", "identifier": "plain-3", "artifact": "", "adapter": None, "created": 0, "night": 3})
+    record("base", {"content": "4", "reasoning": "two and two"})
+    record("plain:base", {"content": "4"})
+    record("night-3", {"content": "5"})
+    assert served_switches(thinker) == {}
+    assert served_switches(plain) == {"enable_thinking": False}
+    # The unscoped view of a one-model installation reads every answer.
+    assert served_switches(store) == {}
+    # A model with no answer of its own: the template's default.
+    assert served_switches(store.scoped("new")) == {}
+
+
+def test_streamed_answers_from_before_the_reasoning_was_kept_decide_nothing(tmp_path):
+    """Before this version a streamed vLLM answer was recorded without its
+    reasoning. Right after an upgrade those recordings must not turn
+    reasoning off for a model that reasons: a streamed answer with no
+    reasoning from before the store's mark is unknown, not direct."""
+    from songe.log import Store
+    from songe.sleep.prompts import served_switches
+
+    def record(store, message, stream):
+        store.record(
+            "/v1/chat/completions",
+            {"model": "m", "stream": stream, "messages": [{"role": "user", "content": "hi"}]},
+            {"choices": [{"message": {"role": "assistant"} | message}]},
+        )
+
+    def before_the_mark(root, *answers):
+        old = Store(root)
+        with old.connect() as db:  # As a version without the mark left it.
+            db.execute("DELETE FROM state WHERE key='streamed_reasoning_from'")
+        for message, stream in answers:
+            record(old, message, stream)
+        return Store(root)
+
+    upgraded = before_the_mark(tmp_path / "streamed", ({"content": "4"}, True), ({"content": "5"}, True))
+    assert served_switches(upgraded) == {}
+    # What it records from now on counts.
+    record(upgraded, {"content": "6"}, True)
+    assert served_switches(upgraded) == {"enable_thinking": False}
+    record(upgraded, {"content": "7", "reasoning": "three and four"}, True)
+    assert served_switches(upgraded) == {}
+    # An old answer that was not streamed never lost anything, and old reasoning is still reasoning.
+    assert served_switches(before_the_mark(tmp_path / "whole", ({"content": "4"}, False))) == {"enable_thinking": False}
+    kept = before_the_mark(tmp_path / "kept", ({"content": "4", "reasoning_content": "two and two"}, True))
+    record(kept, {"content": "5"}, True)
+    assert served_switches(kept) == {}
+    # A new store has nothing from before.
+    fresh = Store(tmp_path / "fresh")
+    record(fresh, {"content": "4"}, True)
+    assert served_switches(fresh) == {"enable_thinking": False}
+

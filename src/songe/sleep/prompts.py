@@ -6,10 +6,96 @@ class UnusableStep(ValueError):
     pass
 
 
+# Template switches that reproduce how the user's server prompts this model,
+# where that differs from the chat template's default (see served_switches).
+# Every prompt rendered in this process gets them.
+SERVED = {}
+
+
+def serve_as(switches):
+    SERVED.clear()
+    SERVED.update(switches or {})
+
+
+def reasoned(message):
+    """Whether a recorded answer carries reasoning: its own field (servers
+    name it reasoning_content or reasoning) or <think> text in the content."""
+    if any(
+        isinstance(message.get(k), str) and message[k].strip()
+        for k in ("reasoning_content", "reasoning")
+    ):
+        return True
+    content = message.get("content")
+    return isinstance(content, str) and "<think>" in content
+
+
+def served_switches(store, recent=20):
+    """The template switches the recorded answers call for.
+
+    A reasoning model's template starts every answer inside its reasoning
+    unless a switch says otherwise. A server told not to reason (vLLM
+    --default-chat-template-kwargs, LM Studio's toggle, a client that sends
+    enable_thinking false) answers directly instead. Rendered with the
+    template's default, training and the check would then run on reasoning
+    text that this server never produces, from a prompt it never sends.
+
+    The last recorded answers say which it is: when none of them carries
+    reasoning, prompts are rendered with enable_thinking=False. Templates
+    without that switch ignore it, so a model that never reasons is rendered
+    as before. No recorded answer, or any with reasoning: the default.
+
+    Only this learner's own answers count (a scoped store: the answers its
+    versions gave), so a model that reasons and one that does not, served by
+    one installation, do not decide each other's setting. And a streamed
+    answer without reasoning says nothing when it was recorded before the
+    proxy kept a stream's reasoning under either field name (the store's
+    streamed_reasoning_from mark): vLLM's was dropped then, and right after
+    an upgrade a reasoning model would be rendered as one that does not."""
+    from .. import parts
+
+    mine = ""
+    names = ()
+    if store.model_key:
+        # What the proxy records as the binding: the version that answered,
+        # or "<model>:base" before the model had one.
+        names = (*sorted(v["id"] for v in store.versions()), f"{store.model_key}:base")
+        mine = f" AND binding IN ({','.join('?' * len(names))})"
+    with store.connect() as db:
+        rows = db.execute(
+            "SELECT * FROM exchanges WHERE status=200 AND response IS NOT NULL"
+            f" AND path LIKE '%chat/completions'{mine} ORDER BY id DESC LIMIT ?",
+            (*names, recent),
+        ).fetchall()
+        mark = db.execute("SELECT value FROM state WHERE key='streamed_reasoning_from'").fetchone()
+        mark = int(mark[0]) if mark and str(mark[0]).isdigit() else 0
+        answers = with_reasoning = 0
+        for row in rows:
+            try:
+                message = json.loads(row["response"])["choices"][0]["message"]
+            except (ValueError, LookupError, TypeError):
+                continue
+            if not isinstance(message, dict) or not (
+                message.get("content") or message.get("tool_calls") or reasoned(message)
+            ):
+                continue
+            if row["id"] <= mark and not reasoned(message):
+                try:
+                    streamed = bool(parts.request(db, row).get("stream"))
+                except (ValueError, LookupError, TypeError, AttributeError):
+                    streamed = True
+                if streamed:
+                    continue
+            answers += 1
+            with_reasoning += reasoned(message)
+    return {"enable_thinking": False} if answers and not with_reasoning else {}
+
+
 def render(tokenizer, messages, tools, **template):
     """The chat template's tokens; `template` passes extra template switches
     (enable_thinking=False for a short judge's answer; templates ignore
-    switches they do not know)."""
+    switches they do not know). The switches of the user's server (SERVED)
+    apply unless the caller sets its own."""
+    template = SERVED | template
     try:
         return tokenizer.apply_chat_template(
             messages,
@@ -89,6 +175,48 @@ def review_note(step):
     return ("\n".join(parts) + "\n") if parts else ""
 
 
+def practice_aside(note, tools=False):
+    """The teacher's extra message on a practice scene.
+
+    A scene's hindsight is one note Songe wrote (the lesson and the feedback
+    it came from), not evidence that followed the step. Shown as quoted
+    observations, the teacher often answered the note instead of the scene
+    ("I acknowledge the lesson: ...") and followed it less often (Qwen3.5-4B,
+    134 scenes: 34 answers spoke of the note and 61 of 92 followed their
+    lesson; as this aside, 6 and 79).
+
+    Those scenes were plain chats, and "write the reply" is asked only where
+    the conversation has no tools. An agent's scene often ends on a tool
+    result and its next step is a tool call, so with tools the aside closes
+    with the line a real step's teacher has always had."""
+    ask = "Respond now with your own action." if tools else "Now write the reply to the message above."
+    return {
+        "role": "user",
+        "content": "(Not part of the conversation. A note from an earlier session"
+        " with this user, shown only to you:\n"
+        + note
+        + "\n"
+        + ask
+        + " Follow the note where it applies and do not mention it.)",
+    }
+
+
+def practice_messages(scene, note, *, merged=False):
+    """A practice scene as its teacher is asked it: the scene, then the note
+    as an aside. merged: for a chat template that takes no second user
+    message in a row, the aside goes at the end of the last user message
+    (as paired_prompts does when rendering fails)."""
+    aside = practice_aside(note)
+    if not merged:
+        return [*scene, aside]
+    messages = copy.deepcopy(scene)
+    last = next((m for m in reversed(messages) if m.get("role") == "user"), None)
+    if last is None or not isinstance(last.get("content"), str):
+        return [*scene, aside]
+    last["content"] = last["content"] + "\n\n" + aside["content"]
+    return messages
+
+
 def paired_prompts(
     tokenizer,
     step,
@@ -137,6 +265,8 @@ def paired_prompts(
         + (review_note(step) if h else "")
         + "Respond now with your own action.",
     }
+    if h and step.get("practice"):
+        note = practice_aside(str(budgeted(tokenizer, h, config)[-1].get("content") or ""), tools=bool(tools))
 
     def pair():
         student = render(tokenizer, messages, tools)

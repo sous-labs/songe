@@ -298,6 +298,84 @@ async def retire_replaced(store, reader):
     return len(gone)
 
 
+# {signal id: the first signal that noted the same wish}, in the learner's state.
+SAME = "same_notes"
+
+
+async def one_wish(reader, a, b):
+    """Whether the model takes notes a and b for one wish, shown in this order."""
+    from . import prompts as P
+
+    sure = await reader.ask(P.SAME_WISH.format(a=a, b=b), P.SAME_WISH_SCHEMA, "same_wish")
+    return isinstance(sure, dict) and sure.get("kind") == "same"
+
+
+async def fold_same(store, reader):
+    """People repeat themselves in other words: "In metric please." in one
+    conversation, "Celsius please, I don't think in Fahrenheit." in the next.
+    Each becomes a note, and the ten places of the prompt fill up with three
+    habits. Each note for the prompt is shown to the model with the notes
+    before it (which could be the same wish?), and each one named is shown
+    again with it alone, both ways round (one wish, noted twice?). A note
+    that repeats an earlier one both times is folded into it: both count for
+    one lesson (how often it
+    came up, in how many conversations) and take one place, which keeps each
+    of their wordings (quick.joined). Nothing is retired and no wording is
+    dropped, so a wrong answer costs a place or shares one, never a note.
+    Returns how many notes are folded, None when stopped.
+
+    Every note is gone through each time, oldest first, as in retire_replaced:
+    all questions but the ones for a new note are answered from the cache."""
+    from .. import quick
+    from . import prompts as P
+
+    found = sorted((s for s in await asyncio.to_thread(signals, store) if quick.suitable(s)), key=said_at)
+    groups = []  # {"text": the first wording, "rule", "said": every wording, "ids": the signals, first one first}
+    try:
+        for s in found:
+            text, rule = quick.wording(s)
+            # The same sentence, or what Quick Dream already takes for the
+            # same lesson by its words: no question.
+            home = next((g for g in groups if any(quick.normal(text) == quick.normal(t) for t in g["said"])
+                         or not rule and not g["rule"] and quick.similar(text, g["text"])), None)
+            # A place holds what fits in one lesson, each wording whole: a
+            # group with no room for this one is not offered.
+            shown = [] if home else [
+                g for g in groups if len(". ".join([*g["said"], text])) < quick.LESSON_CHARS
+            ][-SHOWN:]
+            named = []
+            if shown:
+                answer = await reader.ask(
+                    P.SAME.format(notes="\n".join(f"{n}. {g['text']}" for n, g in enumerate(shown, 1)), note=text),
+                    P.SAME_SCHEMA,
+                    "same_note",
+                )
+                named = answer.get("same") if isinstance(answer, dict) else None
+            numbers = [n for n in named if type(n) is int and 1 <= n <= len(shown)] if isinstance(named, list) else []
+            for n in dict.fromkeys(numbers):
+                # Asked both ways round, and folded only when both answers say
+                # one wish. Live (Qwen3.5-4B): with "uv please." as note 1 the
+                # model said "Same thing without the comments." again as "Use
+                # uv without comments", and a place held three habits. Over
+                # 40 replays of four readings: 9 notes joined a place of
+                # another habit asked one way, 4 asked both ways.
+                earlier = shown[n - 1]["text"]
+                if await one_wish(reader, earlier, text) and await one_wish(reader, text, earlier):
+                    home = shown[n - 1]
+                    break
+            if home is None:
+                groups.append({"text": text, "rule": rule, "said": [text], "ids": [s["id"]]})
+            else:
+                home["said"].append(text)
+                home["ids"].append(s["id"])
+    except Stopped:
+        return None  # the user is back: what was found before stands, the rest is asked next time
+    same = {i: g["ids"][0] for g in groups for i in g["ids"][1:]}
+    if same != (store.get(SAME) or {}):
+        await asyncio.to_thread(store.set, SAME, same)
+    return len(same)
+
+
 def retire(store, ids):
     """Retire signals a newer preference replaced. Their rows stay, so a
     session that is read again does not bring them back."""
@@ -357,4 +435,5 @@ async def read(store, reader, *, limit=None, on_session=None, newest=False, seco
             on_session(session, found)
     if not stopped:
         await retire_replaced(store, reader)
+        await fold_same(store, reader)
     return done

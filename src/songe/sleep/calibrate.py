@@ -524,6 +524,9 @@ def _measure(config, root, lengths):
 
     policy = replace(config)
     store = Store(root).scoped(config.model_key) if config.model_key else Store(root)
+    from .prompts import serve_as, served_switches
+
+    serve_as(served_switches(store))  # sizes are measured on the prompts trained on
     collect_calibration(root, store, leased=True)
     platform = Rooted(TrainingPlatform(current(), policy), root)
     hardware = probe(platform)

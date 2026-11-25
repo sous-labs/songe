@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import sys
 from pathlib import Path
 
@@ -255,9 +256,98 @@ def _get(url, transport=None, timeout=5.0):
         return response.json()
 
 
+def llamaswap_running(root, transport=None):
+    """llama-swap's loaded models ({"model", "cmd", ...}), or None when the
+    server is not llama-swap. Reading it never loads a model."""
+    try:
+        data = _get(root + "/running", transport)
+    except (httpx.HTTPError, ValueError):
+        return None
+    running = data.get("running") if isinstance(data, dict) else None
+    return running if isinstance(running, list) else None
+
+
+def command_flag(command, *names, windows=None):
+    """A flag's value in a llama-server command line, as /running shows it."""
+    windows = os.name == "nt" if windows is None else windows
+    try:
+        # POSIX splitting reads a Windows path's backslashes as escapes.
+        words = shlex.split(command or "", posix=not windows)
+    except ValueError:
+        return None
+    if windows:
+        words = [w[1:-1] if len(w) > 1 and w[0] == w[-1] and w[0] in "\"'" else w for w in words]
+    for index, word in enumerate(words):
+        for name in names:
+            if word == name and index + 1 < len(words):
+                return words[index + 1]
+            if word.startswith(name + "="):
+                return word.split("=", 1)[1]
+    return None
+
+
+def llamaswap_models(url, transport=None):
+    """Every model llama-swap serves, loaded or not; [] for other servers."""
+    root = url.rstrip("/").removesuffix("/v1")
+    if llamaswap_running(root, transport) is None:
+        return []
+    data = _get(root + "/v1/models", transport).get("data", [])
+    return [m["id"] for m in data if isinstance(m.get("id"), str)]
+
+
+def llamaswap_loaded(url, transport=None):
+    """The ids llama-swap has loaded now, or None when the server is not
+    llama-swap."""
+    running = llamaswap_running(url.rstrip("/").removesuffix("/v1"), transport)
+    if running is None:
+        return None
+    return [
+        entry["model"]
+        for entry in running
+        if isinstance(entry, dict) and isinstance(entry.get("model"), str)
+    ]
+
+
+def llamaswap_waiting(url, transport=None):
+    """llama-swap's models that are not loaded now; empty for other servers."""
+    root = url.rstrip("/").removesuffix("/v1")
+    running = llamaswap_running(root, transport)
+    if running is None:
+        return set()
+    try:
+        listed = llamaswap_models(url, transport)
+    except (httpx.HTTPError, ValueError):
+        return set()
+    return set(listed) - {e.get("model") for e in running if isinstance(e, dict)}
+
+
 def llamacpp(url, transport=None):
     root = url.rstrip("/").removesuffix("/v1")
-    props = _get(root + "/props", transport)
+    try:
+        props = _get(root + "/props", transport)
+    except httpx.HTTPStatusError:
+        # llama-swap has no /props of its own: its loaded models' commands
+        # name their weights. A model that is not loaded is found once it is;
+        # asking it for /props would load it and swap out the user's model.
+        running = llamaswap_running(root, transport)
+        if running is None:
+            raise
+        refs = []
+        for entry in running:
+            if not isinstance(entry, dict):
+                continue
+            path = command_flag(entry.get("cmd"), "-m", "--model")
+            # A relative path is relative to llama-swap's directory, not ours.
+            if not path or not entry.get("model") or not Path(path).is_absolute():
+                continue
+            if not Path(path).is_file():
+                continue
+            info = readable(Path(path), lambda path=Path(path): read_gguf(path))
+            if info:
+                refs.append(
+                    ModelRef("llamacpp", entry["model"], "gguf", Path(path), info.architecture)
+                )
+        return refs
     path = Path(props["model_path"])
     models = _get(root + "/v1/models", transport).get("data", [])
     identifier = models[0]["id"] if models else str(path)
@@ -344,6 +434,8 @@ def identify(url):
         return "ollama"
     for name, path, key in (
         ("llamacpp", "/props", "model_path"),
+        # llama-swap: llama-server processes behind one proxy.
+        ("llamacpp", "/running", "running"),
         ("vllm", "/version", "version"),
         ("lmstudio", "/api/v0/models", "data"),
     ):

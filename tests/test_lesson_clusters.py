@@ -66,3 +66,65 @@ def test_a_cluster_keeps_the_scenes_it_has(store):
     # A rule in different words is a different lesson.
     add(store, "else", "c", "Never rename public functions in this project.", rule=True, revision=3)
     assert [s["id"] for s, _ in practice.wanted(store, 3)] == ["else"]
+
+
+def test_practice_takes_only_lessons_with_the_evidence_a_note_needs(store):
+    """Live, Qwen3.5-4B: "Just the code.", judged a one-off, was read as
+    "Always include the exact file pattern requested by the user.", got 24
+    practice scenes and was trained; Quick Dream had kept it out of the
+    prompt. One evidence bar for both (quick.admitted): a standing wish at
+    once, a correction wanted once when the same wish comes up in another
+    conversation, and nothing the user took out of the prompt. The bar is
+    about evidence, not about what a lesson applies to: a lesson from the
+    work itself that is too narrow for the prompt is practised as before."""
+    from songe import quick
+    from songe.practice import pool
+
+    def add(sid, session, lesson, **fields):
+        payload = {"id": sid, "session": session, "type": "correction", "source": "user", "lesson": lesson,
+                   "text": "Just the code.", "exchanges": {"1": 1}, "revision": 1} | fields
+        with store.connect() as db:
+            db.execute("INSERT INTO signals VALUES (?,?,?,?,?,NULL)",
+                       (sid, store.model_id, session, 1, json.dumps(payload)))
+
+    add("once", "s1", "Always include the exact file pattern requested by the user.", turn_kind="once", generality="always")
+    add("lasting", "s2", "Use pnpm, never npm.", turn_kind="lasting", generality="always")
+    add("task", "s3", "Rename the helper in utils before the test.", source="songe", type="tool_error", generality="task")
+    add("tool", "s4", "The test runner needs the venv activated first.", source="songe", type="tool_error", generality="always")
+
+    add("kind", "s6", "Run the migration before the integration tests.", source="songe", type="tool_error", generality="kind")
+
+    def practised():
+        return sorted(s["id"] for s in practice.lesson_signals(store))
+
+    def in_prompt():
+        return sorted(i for c in quick.candidates(store, 10, 1) for i in c["signals"])
+
+    # The one-off waits for both. The lessons from the work are practised
+    # whatever they apply to; only the one for any task fits the prompt.
+    assert in_prompt() == ["lasting", "tool"]
+    assert practised() == ["kind", "lasting", "task", "tool"]
+    assert sorted(s["id"] for s, _ in practice.wanted(store, 2)) == ["kind", "lasting", "task", "tool"]
+    # Scenes an earlier version wrote for the one-off are kept and not trained.
+    for sid in ("once", "lasting"):
+        with store.connect() as db:
+            db.execute('INSERT INTO practice(id,model_id,signal_id,payload,kept,"drop",created) VALUES (?,?,?,?,1,NULL,0)',
+                       (f"{sid}#v1", store.model_id, sid, json.dumps(
+                           {"id": f"{sid}#v1", "signal_id": sid, "messages": [{"role": "user", "content": "x"}],
+                            "teacher_note": "n"})))
+    steps = pool.practice_steps(store) + pool.practice_steps(store, split="held_out")
+    assert [s["signal_id"] for s in steps] == ["lasting"]
+    # The same wish in a second conversation: now it is a lesson, for both.
+    add("again", "s5", "Always include the exact file pattern the user requested.", turn_kind="once", generality="always")
+    assert in_prompt() == ["again", "lasting", "once", "tool"]
+    assert practised() == ["again", "kind", "lasting", "once", "task", "tool"]
+    steps = pool.practice_steps(store) + pool.practice_steps(store, split="held_out")
+    assert sorted(s["signal_id"] for s in steps) == ["lasting", "once"]
+    # A lesson the user took out of the prompt is not practised either.
+    state = quick.state(store) | {"removed": ["Use pnpm, never npm."]}
+    store.set(quick.KEY, state)
+    assert "lasting" not in practised() and "lasting" not in in_prompt()
+    # What an adopted Dream absorbed leaves the prompt and stays a practised lesson.
+    store.set("absorbed_signals", ["tool"])
+    assert "tool" in practised() and "tool" not in in_prompt()
+

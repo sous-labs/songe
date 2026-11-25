@@ -13,6 +13,7 @@ import re
 
 from . import prompts as P
 from .rules import extract as rule_signals
+from .rules import voiced
 from .views import (
     call_line,
     events,
@@ -25,6 +26,18 @@ from .views import (
 )
 
 SIGNAL_TYPES = ("correction", "retry", "approval", "tool_error", "failed_result", "outcome")
+
+
+def in_json(text):
+    """The user's words as the model is shown them where it copies them into
+    a JSON string: straight double quotation marks as single ones.
+
+    Structured output ends a string at the first double quote that is not
+    escaped, so a sentence that quoted the user came back cut there (live,
+    Qwen3.5-4B on vLLM: for 'Always start your reply with "Yes, chef."' the
+    feedback part was "Always start your reply with " and the wish "Always
+    start your reply with", which became a lesson)."""
+    return str(text).replace('"', "'")
 
 
 def tools_of(rows):
@@ -55,6 +68,8 @@ def workdir_of(rows):
 
 # Command results the review shows in full: the turn's last ones.
 REVIEW_FULL = 8
+# Steps of an attempt shown, one line each, when the conversation ended on a failure.
+ATTEMPT_LINES = 40
 # A reply that only says to go on carries no feedback ("ok" or "yes" can be
 # approvals, so they are still classified).
 KEEP_GOING = re.compile(
@@ -92,6 +107,7 @@ class Session:
             next((i for i, it in enumerate(items) if it["kind"] == "user"), 0)
         ]
         self.signals = []
+        self.turn_kinds = {}  # user item -> what the turn question made of it
         self.user_events = []
 
     def short(self, text):
@@ -130,6 +146,12 @@ class Session:
         lines = [re.sub(r"^STEP \d+:", "- later:", line) for line in lines]
         return self.short("\n".join(lines[:limit])) or "(nothing; the conversation ended)"
 
+    def acted(self, signal):
+        """Whether the steps a signal holds responsible called a tool: then
+        its lesson is about what the agent did, not only about an answer."""
+        steps = set(signal.get("responsible_steps") or [])
+        return any(it.get("tool_calls") for it in self.items if it["kind"] == "action" and it["step"] in steps)
+
     def fallback(self, type_, item, steps, allowed):
         """When the model names no valid step: the last edit before a failed
         check; for a user correction, the turn's edits and its last step."""
@@ -152,6 +174,26 @@ class Session:
                 {s for s in edits if s in in_turn} | ({max(in_turn)} if in_turn else set())
             )
         return [edits[-1]] if edits else list(steps)
+
+    def tool_notes(self, source, type_, item):
+        """What the lesson question adds for feedback that is a tool's output."""
+        if source != "tool":
+            return ""
+        # The attempt ended on this result when all that follows is the agent's
+        # own closing words. A call still waiting for its result, a request
+        # that failed, or nothing at all after the result is a session in
+        # progress: read then, it would be told "the task was not completed",
+        # and a Quick Dream could publish that before the session is read again.
+        later = self.items[item + 1 :]
+        stopped = bool(later) and all(
+            it["kind"] == "action" and not it.get("tool_calls") and not it.get("failed") for it in later
+        )
+        if type_ not in ("failed_result", "tool_error") or not stopped:
+            return P.TOOL_FACT
+        lines = step_lines(self.items, self.task_start(item) + 1, item + 1).splitlines()
+        if len(lines) > ATTEMPT_LINES:
+            lines = [f"(the first {len(lines) - ATTEMPT_LINES} steps are left out)", *lines[-ATTEMPT_LINES:]]
+        return P.ENDED.format(attempt=self.short("\n".join(lines)))
 
     async def add(self, source, type_, item, steps, text, where):
         signal = {
@@ -251,11 +293,13 @@ class Session:
             P.LESSON.format(
                 task=self.task_text(item),
                 steps=self.short(shown),
-                feedback=self.short(text[:1500]) + about,
+                feedback=in_json(self.short(text[:1500])) + about,
                 reason=signal["reason"],
                 after=self.after_view(item),
-                # The user's own words can hold a wish to keep as they said it.
-                wish=P.USER_WISH if source == "user" else "",
+                # The user's own words can hold a wish to keep as they said it;
+                # a tool's output can hold a fact to keep as it said it; and a
+                # failure the conversation ended on is about the whole attempt.
+                wish=P.USER_WISH if source == "user" else self.tool_notes(source, type_, item),
             ),
             P.LESSON_SCHEMA,
             "lesson",
@@ -286,30 +330,56 @@ class Session:
                     P.CLASSIFY.format(
                         earlier=self.short("\n".join(user_messages(items, e["item"]))),
                         steps=self.short(step_lines(items, turn + 1, e["item"])),
-                        message=e["text"],
+                        message=in_json(e["text"]),
                     ),
                     P.CLASSIFY_SCHEMA,
                     "classify",
                 )
                 parts = [p for p in answer.get("parts") or [] if isinstance(p, dict)]
+                for p in parts:
+                    # A part is the user's exact words: with their own marks again.
+                    at = in_json(e["text"]).find(p["text"]) if isinstance(p.get("text"), str) and p["text"] else -1
+                    if at >= 0:
+                        p["text"] = e["text"][at : at + len(p["text"])]
                 # What the turn is, judged on its own: a standing wish about
                 # how this user wants things, a change wanted once, new work,
                 # or a reaction. A standing wish the split above did not read
                 # as feedback ("i want in russian", read as a new task) is a
-                # correction all the same.
+                # correction all the same, and so is a change wanted once
+                # ('Say "Yes, chef." first.', read as a new task): it waits
+                # for the same wish in a second conversation (quick.candidates),
+                # which it cannot do when nothing is stored for it.
                 verdict, wish = ("task", "") if len(e["text"]) > P.TURN_CHARS else P.turn_verdict(
                     await self.model.ask(
                         P.TURN.format(
                             earlier=self.short("\n".join(user_messages(items, e["item"]))),
                             steps=self.short(step_lines(items, turn + 1, e["item"])),
-                            message=e["text"],
+                            message=in_json(e["text"]),
                         ),
                         P.TURN_SCHEMA,
                         "turn",
                     ),
                     e["text"],
+                    "\n".join(user_messages(items, e["item"])),
                 )
-                if verdict == "lasting" and not any(
+                if (
+                    verdict == "task"
+                    and any(
+                        p.get("kind") == "feedback" and p.get("type") == "correction" and p.get("says_something_is_wrong")
+                        for p in parts
+                    )
+                    and not any(it.get("tool_calls") for it in items[turn + 1 : e["item"]] if it["kind"] == "action")
+                ):
+                    # The two questions disagree about a turn that follows a
+                    # plain answer: the split read a part that says something
+                    # is wrong or missing, the turn question read new work or
+                    # a question ('Where's my "Yes, chef."?'). Such a turn
+                    # waits like a change wanted once: it is a note only when
+                    # the same wish comes up in a second conversation, and a
+                    # reminder is one of the ways it does. After work with
+                    # tools the turn question's "new work" stands.
+                    verdict = "once"
+                if verdict in ("lasting", "once") and not any(
                     p.get("kind") == "feedback" and p.get("type") in P.TYPES for p in parts
                 ):
                     parts = parts + [{"says_something_is_wrong": True, "kind": "feedback",
@@ -332,12 +402,25 @@ class Session:
                             p.get("text") or e["text"],
                             f"as the user's message after step {e['after_step']}",
                         )
+                self.turn_kinds[e["item"]] = verdict
                 for signal in self.signals[before:]:
                     signal["turn_kind"] = verdict  # quick.suitable reads it
                     if wish:
                         # The standing wish, as the turn question worded it,
                         # is the lesson and the note.
                         signal.update(lesson=wish, short=wish, generality="always")
+                    elif signal.get("lesson") and not self.acted(signal) and voiced(signal["lesson"], e["text"]) < 0.5:
+                        # The agent only wrote an answer, so what to do
+                        # differently can come from nowhere but what the user
+                        # said about it. A lesson with less than half of its
+                        # words from there is the model's guess at what was
+                        # wrong (live, Qwen3.5-4B: "Just the code." became
+                        # "Always include the exact file pattern requested by
+                        # the user.", and a Deep Dream practised that). When
+                        # the user wanted the answer changed, their own words
+                        # are the lesson; otherwise there is none.
+                        own = P.own_words(e["text"]) if verdict in ("lasting", "once") else ""
+                        signal.update(lesson=own or None, short=own or None, unvoiced=True)
                 if any(p.get("kind") == "new_task" for p in parts):
                     self.task_starts.append(e["item"])
                 e["classified"] = parts
@@ -517,6 +600,9 @@ async def read_session(session, items, rows, model):
                 "generality": "always",
                 "evidence_steps": [about["step"]] if about and about.get("step") else [],
                 "placed": True,
+                # What the turn it stands in was judged to be decides for it
+                # too (quick.suitable).
+                "turn_kind": reading.turn_kinds.get(item),
             }
         )
     # A preference the user states about themself ("I avoid dairy.") is kept in

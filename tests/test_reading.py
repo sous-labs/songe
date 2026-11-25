@@ -39,9 +39,11 @@ def reply(message):
     return {"choices": [{"message": message}]}
 
 
-def record_session(store, *, more=False, started=None, reply_text="No, you changed the wrong file."):
+def record_session(store, *, more=False, started=None, reply_text="No, you changed the wrong file.",
+                   ask="fix the failing test"):
     """Ask, run the tests (1 failed), edit, run again (passed), done; then the
-    user corrects. With more=True the session continues one more turn."""
+    user corrects. With more=True the session continues one more turn. Another
+    `ask` makes another conversation (the same opening is the same one)."""
     t1 = {"role": "assistant", "content": "", "tool_calls": [call("a", "shell", command="pytest")]}
     r1 = {"role": "tool", "tool_call_id": "a", "content": "1 failed, 2 passed\nExit code: 1"}
     t2 = {"role": "assistant", "content": "", "tool_calls": [call("b", "edit", filePath="x.py", oldString="a", newString="b")]}
@@ -49,7 +51,7 @@ def record_session(store, *, more=False, started=None, reply_text="No, you chang
     t3 = {"role": "assistant", "content": "", "tool_calls": [call("c", "shell", command="pytest")]}
     r3 = {"role": "tool", "tool_call_id": "c", "content": "3 passed\nExit code: 0"}
     done = {"role": "assistant", "content": "Fixed."}
-    user = {"role": "user", "content": "fix the failing test"}
+    user = {"role": "user", "content": ask}
     history = [SYSTEM, user]
     for action, result in ((t1, r1), (t2, r2), (t3, r3)):
         store.record("/v1/chat/completions", {"messages": history, "tools": TOOLS}, reply(action), started=started)
@@ -155,11 +157,67 @@ def test_a_standing_wish_read_as_new_work_is_still_a_correction(store):
     assert wish["lesson"] == wish["short"] == "Answer in Russian." and wish["generality"] == "always"
 
 
-@pytest.mark.parametrize("kind", ["once", "task", "reaction"])
+@pytest.mark.parametrize("kind", ["task", "reaction"])
 def test_a_turn_that_is_no_standing_wish_adds_nothing(store, kind):
     record_session(store, reply_text="could you add a paragraph on costs?")
     read(store, Judging("no", kind))
     assert [s for s in reading.signals(store) if s["type"] == "correction"] == []
+
+
+def test_a_change_wanted_once_read_as_new_work_waits_for_a_second_conversation(store):
+    """Live (Qwen3.5-4B): the split called 'Say "Yes, chef." first.' new work,
+    the turn question a change wanted once, and nothing was stored. The same
+    wish in the next conversation then had nothing to meet, in any number of
+    conversations."""
+    from songe import quick
+
+    first, again = 'Say "Yes, chef." first.', 'Say "Yes, chef." first, please.'
+    record_chat(store, ("Give me one tip for staying focused.", "Turn off notifications."), (first, "Yes, chef. Turn off notifications."))
+    read(store, Judging("no", "once"))
+    waiting = [s for s in reading.signals(store) if s["type"] == "correction"]
+    # A correction, for the prompt only once the wish recurs.
+    assert [(s["text"], s["turn_kind"], bool(s["lesson"])) for s in waiting] == [(first, "once", True)]
+    assert quick.candidates(store, 30, 2) == []
+    record_chat(store, ("What is the capital of Australia?", "Canberra."), (again, "Yes, chef. Canberra."))
+    read(store, Judging("no", "once"))
+    assert [len(c["signals"]) for c in quick.candidates(store, 30, 2)] == [2]
+
+
+class Disagreeing(FakeReader):
+    """The split reads every turn as a correction (FakeReader); the turn
+    question reads new work."""
+
+    async def ask(self, prompt, schema, name):
+        answer = await super().ask(prompt, schema, name)
+        if name == "lesson" and "Yes, chef." in prompt:
+            # A lesson in the user's words, the same for both reminders.
+            return dict(answer, lesson='Start every reply with "Yes, chef."', short='Start every reply with "Yes, chef."')
+        return {"standing": "no", "kind": "task", "wish": ""} if name == "turn" else answer
+
+
+def test_a_reminder_read_as_a_question_waits_like_a_change_wanted_once(store):
+    """Live (Qwen3.5-4B): the split read 'Where's my "Yes, chef."?' as a part
+    that says something is missing, the turn question as a question (new
+    work). It was stored as new work, so it never met 'You forgot the "Yes,
+    chef."' from another conversation, and the habit never got a note."""
+    from songe import quick
+
+    record_chat(store, ("What is the capital of Australia?", "Canberra."), ('Where\'s my "Yes, chef."?', "Yes, chef. Canberra."))
+    read(store, Disagreeing())
+    reminder = next(s for s in reading.signals(store) if s["type"] == "correction")
+    assert reminder["turn_kind"] == "once" and quick.suitable(reminder)
+    assert quick.candidates(store, 30, 2) == []  # waits for a second conversation
+    record_chat(store, ("What's a good name for a cat?", "Whiskers."), ('You forgot the "Yes, chef."', "Yes, chef. Whiskers."))
+    read(store, Disagreeing())
+    assert [len(c["signals"]) for c in quick.candidates(store, 30, 2)] == [2]
+
+
+def test_after_work_with_tools_the_turn_question_decides_what_is_new_work(store):
+    # "The tests still fail" after edits and test runs: the split calls it a
+    # correction, the turn question new work. That stays new work.
+    record_session(store, reply_text="the tests still fail")
+    read(store, Disagreeing())
+    assert [s["turn_kind"] for s in reading.signals(store) if s["type"] == "correction"] == ["task"]
 
 
 def test_a_long_message_is_work_and_is_not_asked_about(store):
@@ -178,6 +236,165 @@ def test_an_example_of_the_question_pasted_back_is_not_the_users_wish():
     assert P.turn_verdict(pasted, "reply me in chinese") == ("lasting", "Answer in Chinese.")
     assert P.turn_verdict(pasted, "请用中文回答") == ("lasting", "Answer in Chinese.")
     assert P.turn_verdict({"standing": "yes", "kind": "once", "wish": "Use metric units."}, "everything in metric")[0] == "lasting"
+
+
+def test_a_rule_sentence_carries_what_its_turn_was(store):
+    # The rules find "Always ..." in the user's message by its shape; the
+    # verdict on the turn it stands in goes with it (quick.suitable).
+    record_session(store, reply_text="Always keep the old entry point working.")
+    read(store, Judging("no", "task"))
+    rule = next(s for s in reading.signals(store) if s.get("from") == "rules" and s["source"] == "user")
+    assert (rule["text"], rule["turn_kind"]) == ("Always keep the old entry point working.", "task")
+
+
+def test_a_wish_that_says_nothing_the_user_wrote_is_not_used():
+    """Live (Qwen3.5-4B): the turn question returned the wish "Speak French."
+    for a user who wrote 'Always start your reply with "Yes, chef."'."""
+    from songe.reading import prompts as P
+
+    said, cat = 'Always start your reply with "Yes, chef."', "[U1] What's a good name for a cat?"
+    french = {"standing": "yes", "kind": "once", "wish": "Speak French."}
+    # The model's wording is dropped; the user's own message is the note.
+    assert P.turn_verdict(french, said, cat) == ("lasting", said)
+    # Several sentences (which one is the wish?), too long to stay whole as a
+    # note, or a single word: no wish from this question.
+    assert P.turn_verdict(french, "That was wrong. " + said, cat) == ("lasting", "")
+    assert P.turn_verdict(french, "start your reply with yes chef and " + "then go on " * 8, cat) == ("lasting", "")
+    assert P.turn_verdict(french, "again", cat) == ("lasting", "")
+    # Words that only point back at the conversation are left off the note.
+    assert P.own_words("Same thing without the comments.") == "Without the comments."
+    assert P.own_words("Same thing but no em dashes please.") == "No em dashes please."
+    assert P.own_words("Again, properly.") == ""
+    # A wish worded from the user's words stays as the model worded it,
+    # also when the user said it in an earlier message of the conversation.
+    chef = {"standing": "yes", "kind": "once", "wish": "Start every reply with 'Yes, chef.'"}
+    assert P.turn_verdict(chef, said, cat) == ("lasting", chef["wish"])
+    assert P.turn_verdict(chef, "Again, properly.", f"{cat}\n[U2] {said}") == ("lasting", chef["wish"])
+    # One word of an earlier message is not enough. Live: a page pasted
+    # earlier had a button in it, and a remark about quotation marks came
+    # back as the question's own example.
+    green = {"standing": "yes", "kind": "once", "wish": "Make the buttons green."}
+    quotes = "you output the wrong type of quotations"
+    assert P.turn_verdict(green, quotes, '[U1] <button class="buy">Buy</button>') == ("lasting", quotes)
+    russian = {"standing": "yes", "kind": "task", "wish": "Answer in Russian."}
+    assert P.turn_verdict(russian, "i want in russian") == ("lasting", "Answer in Russian.")
+    # One of the user's words is enough for a wish: this one is right.
+    imperial = {"standing": "yes", "kind": "task", "wish": "Use imperial units, not metric."}
+    assert P.turn_verdict(imperial, "why are you giving me answers in the metric system") == ("lasting", imperial["wish"])
+
+
+class Guessing(FakeReader):
+    """Judges every turn a change wanted once and writes the lesson given."""
+
+    def __init__(self, lesson, turn=None):
+        super().__init__()
+        self.lesson, self.turn = lesson, turn or {"standing": "no", "kind": "once", "wish": ""}
+
+    async def ask(self, prompt, schema, name):
+        answer = await super().ask(prompt, schema, name)
+        if name == "lesson":
+            return dict(answer, lesson=self.lesson, short=self.lesson, generality="always")
+        return self.turn if name == "turn" else answer
+
+
+def test_a_lesson_that_guesses_what_was_wrong_with_an_answer_is_no_lesson(store):
+    """Live (Qwen3.5-4B, a plain chat): "Just the code." was stored as the
+    lesson below, and a Deep Dream practised it."""
+    record_chat(store, ("Write a bash one-liner that counts the lines in every .py file here.", "Sure! Here it is: ..."),
+                ("Just the code.", "find . -name '*.py' | xargs wc -l"))
+    read(store, Guessing("Always include the exact file pattern requested by the user."))
+    guess = next(s for s in reading.signals(store) if s["type"] == "correction")
+    # The user wanted the answer changed: their own words are the lesson.
+    assert (guess["turn_kind"], guess["lesson"], guess["short"], guess["unvoiced"]) == ("once", "Just the code.", "Just the code.", True)
+
+
+@pytest.mark.parametrize("kind", ["task", "reaction"])
+def test_a_guess_about_a_turn_that_asked_for_no_change_is_no_lesson(store, kind):
+    record_chat(store, ("When was the first iPhone released?", "It was announced on January 9, 2007."),
+                ("And the first iPad?", "April 3, 2010."))
+    # The split finds feedback but nothing wrong in it, as for a follow-up
+    # question: the turn question's verdict stands (a part that says something
+    # is wrong after a plain answer would wait like a change wanted once).
+    reader = Guessing("Always use the public availability date, not the announcement date.", {"standing": "no", "kind": kind, "wish": ""})
+    ask = reader.ask
+
+    async def nothing_wrong(prompt, schema, name):
+        answer = await ask(prompt, schema, name)
+        if name == "classify":
+            answer = {"parts": [dict(p, says_something_is_wrong=False) for p in answer["parts"]]}
+        return answer
+
+    reader.ask = nothing_wrong
+    read(store, reader)
+    guess = next(s for s in reading.signals(store) if s["type"] == "correction")
+    assert (guess["lesson"], guess["short"], guess["unvoiced"]) == (None, None, True)
+    from songe.practice.store import lesson_signals
+    assert lesson_signals(store) == []  # nothing to practise
+
+
+def test_a_lesson_in_the_users_words_stays(store):
+    record_chat(store, ("Write a bash one-liner that counts the lines in every .py file here.", "Sure! Here it is: ..."),
+                ("Just the code.", "find . -name '*.py' | xargs wc -l"))
+    read(store, Guessing("Write just the code."))
+    kept = next(s for s in reading.signals(store) if s["type"] == "correction")
+    assert kept["lesson"] == kept["short"] == "Write just the code." and "unvoiced" not in kept
+
+
+def test_a_lesson_about_what_the_agent_did_need_not_be_in_the_users_words(store):
+    # After tool calls the lesson is about the agent's steps: "No, you changed
+    # the wrong file." says nothing of tests, and the advice stays.
+    record_session(store)
+    read(store, Guessing("Check which file the failing test covers before editing."))
+    advice = next(s for s in reading.signals(store) if s["type"] == "correction")
+    assert advice["lesson"].startswith("Check which file") and "unvoiced" not in advice
+
+
+def test_a_wish_the_model_invented_is_stored_in_the_users_own_words(store):
+    said = 'Always start your reply with "Yes, chef."'
+    record_chat(store, ("What's a good name for a cat?", "Whiskers."), (said, "Yes, chef. Whiskers."))
+    read(store, Guessing("Always confirm the direct answer first.", {"standing": "yes", "kind": "once", "wish": "Speak French."}))
+    wish = next(s for s in reading.signals(store) if s["type"] == "correction")
+    assert wish["turn_kind"] == "lasting" and wish["lesson"] == wish["short"] == said
+
+
+def test_voiced_is_the_share_of_content_words_the_user_wrote():
+    from songe.reading.rules import voiced
+
+    assert voiced("Answer in Russian.", "i want in russian") == 1
+    assert voiced("Do not apologize.", "can you stop apologizing all the time") == 1  # endings ignored
+    assert voiced("Use Polars, not pandas.", "no pandas, polars only") == 1
+    assert voiced("Speak French.", 'Always start your reply with "Yes, chef."') == 0
+    assert voiced("Always use the public availability date, not the announcement date.", "Date as 2007-06-29 please.") == 0.25
+    assert voiced("Always include the requested phrase exactly as the user named it.", "You forgot the 'Yes, chef.'") == 0
+    assert voiced("Answer in Chinese.", "请用中文回答") == 1  # words cannot show it
+    assert voiced("Answer.", "restart the duel") == 1  # no content word to compare
+
+
+def test_words_the_user_put_in_quotation_marks_are_not_cut_off(store):
+    """Live (Qwen3.5-4B on vLLM, structured output): a JSON string ends at the
+    first double quote the model does not escape, and it copied the user's."""
+    said = 'Always start your reply with "Yes, chef."'
+
+    def as_json_string(text):
+        return text.split('"')[0]  # what structured output leaves of it
+
+    class Copying(FakeReader):
+        async def ask(self, prompt, schema, name):
+            answer = await super().ask(prompt, schema, name)
+            if name == "classify":
+                text = prompt.rsplit("New user message:\n", 1)[1].split("\n")[0]
+                return {"parts": [{"says_something_is_wrong": True, "kind": "feedback", "type": "correction",
+                                   "text": as_json_string(text)}]}
+            if name == "turn":
+                text = prompt.rsplit("The user's next message:\n", 1)[1].split("\n")[0]
+                return {"standing": "yes", "kind": "once", "wish": as_json_string(text)}
+            return answer
+
+    record_session(store, reply_text=said)
+    read(store, Copying())
+    wish = next(s for s in reading.signals(store) if s["type"] == "correction" and s.get("turn_kind"))
+    assert wish["text"] == said  # the user's exact words, with their marks
+    assert wish["lesson"] == "Always start your reply with 'Yes, chef.'"
 
 
 def test_what_the_turn_was_is_kept_with_its_signals(store):
@@ -300,6 +517,34 @@ def test_the_client_falls_back_when_structured_output_is_refused(store):
     assert reader.cached == 1
 
 
+def test_the_client_asks_for_a_plain_reply_the_way_a_user_does(store):
+    """reply(): the served model's next message in a conversation, with no
+    schema and none of the reasoning switches the reader's questions set."""
+    sent = []
+
+    def server(request):
+        sent.append(json.loads(request.content))
+        message = {"role": "assistant", "content": "uv add numpy"}
+        if len(sent) == 2:
+            message["reasoning"] = "The user wants uv."
+        return httpx.Response(200, json={"choices": [{"message": message, "finish_reason": "stop"}]})
+
+    reader = Reader(store, "http://x/v1", "m", server="vllm",
+                    client=httpx.AsyncClient(transport=httpx.MockTransport(server)))
+    messages = [{"role": "user", "content": "How do I add numpy?"}]
+    first = asyncio.run(reader.reply(messages, max_tokens=384))
+    assert first == {"content": "uv add numpy", "finished": True, "reasoned": False}
+    assert sent[0] == {"model": "m", "messages": messages, "temperature": 0, "max_tokens": 384, "stream": False}
+    # A server that reasons first says so (either field name, or <think> text).
+    assert asyncio.run(reader.reply(messages, max_tokens=384))["reasoned"] is True
+    away = Reader(store, "http://x/v1", "m", still_idle=lambda: False, client=reader.client)
+    try:
+        asyncio.run(away.reply(messages, max_tokens=384))
+    except Stopped:
+        return
+    raise AssertionError("expected Stopped")
+
+
 def test_the_client_stops_when_the_user_returns(store):
     reader = Reader(store, "http://x/v1", "m", still_idle=lambda: False,
                     client=httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(500))))
@@ -313,7 +558,7 @@ def test_the_client_stops_when_the_user_returns(store):
 ANSWERS = {
     "classify": {"parts": [{"says_something_is_wrong": True, "kind": "feedback",
                             "type": "correction", "text": "No, you changed the wrong file."}]},
-    "turn": {"standing": "no", "kind": "once"},
+    "turn": {"standing": "yes", "kind": "once", "wish": ""},
     "responsible": {"steps": [2], "reason": "wrong file"},
     "lesson": {"lesson": "Check the file first.", "instance": "x.py", "generality": "kind",
                "verifiable": None},
@@ -378,7 +623,10 @@ async def test_idle_reading_uses_the_learners_own_loaded_model(config, store, mo
     registry.migrate(config, store)
     registry.observe(config, store, "learner")
     registry.set_learning(store, "learner", "all")
+    # The correction in two conversations: wanted once, it is a lesson to
+    # practise only when it comes up again.
     record_session(store)
+    record_session(store, ask="fix the other failing test")
     learner = store.scoped("learner")
     scheduler, asked = scheduler_for(config, store, monkeypatch, loaded=["someone-else"])
     assert await scheduler.read_sessions() == 0  # its own model is not loaded
@@ -387,14 +635,40 @@ async def test_idle_reading_uses_the_learners_own_loaded_model(config, store, mo
     from songe.practice import store as practice
 
     # Short pauses only read; practice is Deep Dream's first step.
-    assert await scheduler.read_sessions() == 1
+    assert await scheduler.read_sessions() == 2
     assert practice.counts(learner)["written"] == 0
-    # Deep: practice_per_signal scenes for its one lesson (the correction).
+    # Deep: practice_per_signal scenes for its one lesson (the correction, said twice).
     assert await scheduler.read_sessions(practice=True) == config.practice_per_signal == 24
     assert {model for model, _ in asked} == {"learner"}
     assert {s["type"] for s in reading.signals(learner)} == {"correction", "success"}
     assert reading.pending(learner) == []
     assert practice.counts(learner)["written"] == 24
+
+
+async def test_a_deep_dreams_reading_writes_the_notes_before_practice(config, store, monkeypatch):
+    """Only a Quick Dream wrote the prompt lessons. A Deep Dream that read
+    conversations no Quick Dream had read (pressed early, or a backlog) wrote
+    practice and trained, and its version was checked against a prompt that
+    did not hold those lessons yet (live: 8 notes for four of eight habits;
+    the rest arrived with the next Quick Dream, after the gate)."""
+    from songe import quick
+
+    config.learning = "dreams"
+    registry.migrate(config, store)
+    registry.observe(config, store, "learner")
+    registry.set_learning(store, "learner", "all")
+    # The same correction in two conversations: a lesson for the prompt.
+    record_session(store, ask="fix the other failing test")
+    record_session(store)
+    learner = store.scoped("learner")
+    scheduler, _ = scheduler_for(config, store, monkeypatch, loaded=["learner"])
+    assert quick.active(learner) == []
+    assert await scheduler.read_sessions(practice=True) > 2  # two conversations read, scenes written
+    assert [lesson["text"] for lesson in quick.active(learner)] == ["Check the file first."]
+    # Nothing new was read since: the lessons stand, no second entry.
+    history = len(learner.get(quick.HISTORY) or [])
+    await scheduler.read_sessions(practice=True, force=True)
+    assert len(learner.get(quick.HISTORY) or []) == history
 
 
 async def test_idle_reading_is_off_under_hindsight_learning(config, store, monkeypatch):
@@ -613,8 +887,10 @@ def test_practice_is_written_for_the_users_rules_first(store):
 
     with store.connect() as db:
         for i, origin in enumerate([None, None, "rules"]):
+            # The stated rule in the user's words: only a sentence shaped like a rule is one.
             payload = {"id": f"s{i}", "session": "x", "type": "correction", "source": "user", "lesson": f"Lesson {i}.",
-                       "exchanges": {"1": 1}, "revision": 1, **({"from": origin} if origin else {})}
+                       "exchanges": {"1": 1}, "revision": 1,
+                       **({"from": origin, "text": "Always run the tests before a commit."} if origin else {})}
             db.execute("INSERT INTO signals VALUES (?,?,?,?,?,NULL)", (f"s{i}", store.model_id, "x", 1, json.dumps(payload)))
     assert [s["id"] for s, _ in wanted(store, 1)][0] == "s2"
 
@@ -629,7 +905,9 @@ async def test_a_failing_practice_scene_is_retried_then_skipped_and_only_repeate
     signals_ = [({"id": f"s{i}", "session": "x", "lesson": "L."}, [1]) for i in range(5)]
     monkeypatch.setattr(ps, "RETRY_WAITS", (0, 0))
     monkeypatch.setattr(ps, "wanted", lambda store, n: signals_)
-    monkeypatch.setattr(ps, "source", lambda store, s: ({"messages": [{"role": "user", "content": "hi"}]}, []))
+    # An agent's request (it has tools): each scene is written on its own.
+    request = {"messages": [{"role": "user", "content": "hi"}], "tools": TOOLS}
+    monkeypatch.setattr(ps, "source", lambda store, s: (request, []))
     saved = []
     monkeypatch.setattr(ps, "save", lambda store, row: saved.append(row["id"]))
     calls = {}
@@ -1042,13 +1320,30 @@ def test_a_preference_said_after_an_answer_is_published_as_the_user_said_it(conf
     from songe import quick
 
     said = "I'm allergic to peanuts."
+
+    class Allergic(Judge):
+        async def ask(self, prompt, schema, name):
+            answer = await super().ask(prompt, schema, name)
+            return dict(answer, lesson="Never suggest peanuts: the user is allergic.") if name == "lesson" else answer
+
     record_chat(store, ("Suggest a snack.", "Peanut butter on toast."), (f"{said} Anything else works.", "Apple slices."))
-    assert read(store, Judge(about_me={said})) == 1
+    assert read(store, Allergic(about_me={said})) == 1
     # One signal: the model's reading of the message, which now carries the sentence.
     (signal,) = [s for s in reading.signals(store) if s["source"] == "user"]
-    assert signal["preference"] == said and signal["lesson"].startswith("Check which file")
+    assert signal["preference"] == said and signal["lesson"].startswith("Never suggest peanuts")
     quick.quick_dream(store, config)
     assert [lesson["text"] for lesson in quick.active(store)] == [said]
+
+
+def test_a_preference_whose_lesson_was_a_guess_is_practised_in_the_users_words(store):
+    # The lesson the model wrote for the message says nothing the user said
+    # (the canned one is about a failing test): it is dropped, and the
+    # sentence is the lesson a Deep Dream practises.
+    said = "I'm allergic to peanuts."
+    record_chat(store, ("Suggest a snack.", "Peanut butter on toast."), (f"{said} Anything else works.", "Apple slices."))
+    read(store, Judge(about_me={said}))
+    kept = [s for s in reading.signals(store) if s["source"] == "user" and s.get("lesson")]
+    assert [(s["lesson"], s.get("preference")) for s in kept] == [(said, said)]
 
 
 def test_not_every_sentence_in_the_first_person_is_a_preference(config, store):
@@ -1202,6 +1497,55 @@ def test_a_new_preference_retires_the_one_it_replaces(config, store):
     assert {lesson["text"] for lesson in quick.active(store)} == {other, new}
 
 
+class Repeating(Changing):
+    """Also asked which kept notes a new note could repeat (the numbers given
+    for it) and whether two notes are one wish (the pairs given are)."""
+
+    def __init__(self, about_me=(), same=None, one_wish=(), **changes):
+        super().__init__(about_me, **changes)
+        self.same, self.one_wish, self.one_way, self.listed, self.pairs = same or {}, set(one_wish), set(), [], []
+
+    async def ask(self, prompt, schema, name):
+        if name == "same_note":
+            self.listed.append(prompt)
+            return {"same": self.same.get(prompt.split("A new note:\n", 1)[1].split("\n")[0], [])}
+        if name == "same_wish":
+            pair = (prompt.split("Note 1: ", 1)[1].split("\n")[0], prompt.split("Note 2: ", 1)[1].split("\n")[0])
+            self.pairs.append(pair)
+            return {"note_1_asks": pair[0], "note_2_asks": pair[1], "kind": "same" if pair in self.one_wish or pair[::-1] in self.one_wish - self.one_way else "different"}
+        return await super().ask(prompt, schema, name)
+
+
+def test_a_preference_said_again_shares_one_place_and_a_changed_one_still_leaves(config, store):
+    """A preference said again in other words is not a change of mind and not
+    a second preference: both sentences stay, word for word, in one place.
+    A preference that replaces an earlier one still retires it, and that is
+    settled first: folding only sees what is still true of the user."""
+    from songe import quick
+    from songe.reading import prompts as P
+
+    dairy, again = "I avoid dairy.", "I avoid milk and cheese."
+    window, aisle = "I prefer window seats when I fly.", "I prefer aisle seats now."
+    record_chat(store, (f"{dairy} What can I cook tonight?", "A lentil curry."))
+    record_chat(store, (f"{window} Find me a flight to Oslo.", "The 9:40 has window seats."))
+    record_chat(store, (f"{again} Any dessert ideas?", "A fruit salad."))
+    record_chat(store, (f"{aisle} Find me a flight to Rome.", "The 7:15 has aisle seats."))
+    reader = Repeating(
+        about_me={dairy, again, window, aisle}, replaces={aisle: [2]}, not_both={(window, aisle)},
+        same={again: [1], aisle: [1]}, one_wish={(dairy, again)},
+    )
+    assert read(store, reader) == 4
+    assert [s["preference"] for s in reading.signals(store)] == [dairy, again, aisle]
+    # The retired sentence is not among the notes shown; the seat preference
+    # the model named for the dairy note is a different wish, and stays apart.
+    assert reader.listed == [P.SAME.format(notes=f"1. {dairy}", note=again), P.SAME.format(notes=f"1. {dairy}", note=aisle)]
+    assert reader.pairs == [(dairy, again), (again, dairy), (dairy, aisle)]
+    quick.quick_dream(store, config)
+    lessons = {lesson["text"]: lesson for lesson in quick.active(store)}
+    assert set(lessons) == {f"{again} {dairy}", aisle}
+    assert lessons[f"{again} {dairy}"]["count"] == 2 and lessons[f"{again} {dairy}"]["rule"]
+
+
 def test_the_order_conversations_are_read_in_does_not_decide_which_preference_stays(config, store):
     from songe import quick
     from songe.reading import prompts as P
@@ -1284,3 +1628,120 @@ def test_the_results_of_an_agents_own_tools_are_reviewed(store):
     assert "These are the commands the agent ran in one turn, with their output:\ns\n" in asked
     assert 'compile checks like "syntax OK", or any error message (those are handled elsewhere).\n' in asked
     assert "{" not in asked.replace("JSON", "")
+
+
+class LessonQuestions(FakeReader):
+    """Keeps the lesson questions it is asked."""
+
+    def __init__(self):
+        super().__init__()
+        self.questions = []
+
+    async def ask(self, prompt, schema, name):
+        if name == "lesson":
+            self.questions.append(prompt)
+        return await super().ask(prompt, schema, name)
+
+
+def tool_step(cid, name, result, **args):
+    """An agent's call and the tool's answer to it."""
+    return ({"role": "assistant", "content": "", "tool_calls": [call(cid, name, **args)]},
+            {"role": "tool", "tool_call_id": cid, "content": result})
+
+
+def test_the_lesson_question_for_a_tools_output_keeps_what_it_named(store):
+    """Live (Qwen3.5-4B and 9B on vLLM, 30 coding tasks, issue #144): "pytest:
+    command not found" was stored as "Install missing dependencies before
+    running tests." and the next task ran the same failing command. The
+    question now says that what a tool's output names is the lesson. And a
+    failed result the conversation ended on (a build that never passed, a
+    lost game) is asked about as a whole attempt, with all its steps."""
+    from songe.reading import prompts as P
+
+    Recording, step = LessonQuestions, tool_step
+
+    def record(first, steps, last):
+        history = [SYSTEM, {"role": "user", "content": first}]
+        for action, result in steps:
+            store.record("/v1/chat/completions", {"messages": history, "tools": TOOLS}, reply(action))
+            history = history + [action, result]
+        store.record("/v1/chat/completions", {"messages": history, "tools": TOOLS},
+                     reply({"role": "assistant", "content": last}))
+
+    edit = dict(filePath="x.py", oldString="a", newString="b")
+    # Fails, is fixed, passes: the failure is one step of a task that went on.
+    record("fix the parser", [step("a", "edit", "Edited x.py", **edit),
+                              step("b", "shell", "1 failed, 2 passed\nExit code: 1", command="pytest"),
+                              step("c", "edit", "Edited x.py", **edit),
+                              step("d", "shell", "3 passed\nExit code: 0", command="pytest")], "Fixed.")
+    # Fails and stops there: the task was not completed.
+    record("fix the lexer", [step("e", "edit", "Edited y.py", **edit),
+                             step("f", "shell", "/bin/bash: line 1: pytest: command not found\nExit code: 127", command="pytest")],
+           "I could not run the tests.")
+    store.reconstruct()
+    reader = Recording()
+    assert read(store, reader) == 2
+    went_on, ended = sorted(reader.questions, key=lambda q: "command not found" in q)
+    assert P.TOOL_FACT in went_on and P.TOOL_FACT not in ended
+    assert "name exactly what the output named" in P.TOOL_FACT
+    # What worked is advice only when it is the ordinary way: live, a pip that refused to install into the
+    # system Python left "Use '--break-system-packages' when pip refuses to install." as the one note.
+    assert "A way around a refusal or a warning that protects something" in P.TOOL_FACT
+    assert "is never part of the lesson" in P.TOOL_FACT
+    # How far a fact reaches is judged as for any lesson. Live, a line that made a fact about the tool or the
+    # machine "always" sent 13 to 16 of 16 to 19 lessons to every session (8 of 18 without it), among them a
+    # module missing in one project.
+    assert "generality" not in P.TOOL_FACT
+    assert "the conversation ended with it" not in went_on
+    assert "the conversation ended with it" in ended and "names it exactly as written" in ended
+    attempt = ended.split("All steps of the attempt, one line each:\n", 1)[1]
+    assert "STEP 1: edit" in attempt and "STEP 2: shell pytest" in attempt and "Exit code: 127" in attempt
+    # The user's own words are asked about as before.
+    record_session(store, started=None)
+    reader = Recording()
+    read(store, reader)
+    assert any(P.USER_WISH in q for q in reader.questions)
+    assert all(P.TOOL_FACT not in q for q in reader.questions if P.USER_WISH in q)
+    # A shape pasted back with its placeholders is no lesson.
+    assert P.copied_example("<NAME> is not installed here; use <WORKED>.")
+    assert not P.copied_example("pytest is not installed here; use python -m pytest.")
+
+
+def test_a_failure_ends_an_attempt_only_once_the_agent_has_stopped(store):
+    """A session can be read while it is going on: a Quick Dream starts when
+    the model server has been quiet for a while, and one long command is
+    quiet that long. The newest failed result is then not the end of
+    anything, the agent's next call is waiting for its result. It is asked
+    about like any other output, and as a whole attempt ("the task was not
+    completed") only when the agent's own closing words follow it."""
+    from songe.reading import prompts as P
+
+    edit = dict(filePath="y.py", oldString="a", newString="b")
+    missing = "/bin/bash: line 1: pytest: command not found\nExit code: 127"
+    history = [SYSTEM, {"role": "user", "content": "fix the lexer"}]
+    for action, result in (tool_step("a", "edit", "Edited y.py", **edit),
+                           tool_step("b", "shell", missing, command="pytest")):
+        store.record("/v1/chat/completions", {"messages": history, "tools": TOOLS}, reply(action))
+        history = history + [action, result]
+    # The agent tries another way; that call has no result yet.
+    again, no_module = tool_step("c", "shell", "/usr/bin/python: No module named pytest\nExit code: 1",
+                                 command="python -m pytest")
+    store.record("/v1/chat/completions", {"messages": history, "tools": TOOLS}, reply(again))
+    store.reconstruct()
+    reader = LessonQuestions()
+    assert read(store, reader) == 1
+    (question,) = reader.questions
+    assert "command not found" in question and P.TOOL_FACT in question
+    assert "the conversation ended with it" not in question
+    # The result comes, it failed too, and the agent gives up: now the attempt has ended, on that result.
+    history = history + [again, no_module]
+    store.record("/v1/chat/completions", {"messages": history, "tools": TOOLS},
+                 reply({"role": "assistant", "content": "I could not run the tests."}))
+    store.reconstruct()
+    reader = LessonQuestions()
+    assert read(store, reader) == 1
+    went_on = [q for q in reader.questions if P.TOOL_FACT in q]
+    ended = [q for q in reader.questions if "the conversation ended with it" in q]
+    assert len(went_on) == 1 and len(ended) == 1 and len(reader.questions) == 2
+    assert "command not found" in went_on[0]
+    assert "No module named pytest" in ended[0]

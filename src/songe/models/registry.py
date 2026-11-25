@@ -165,6 +165,7 @@ def set_learning(store, model, level):
         for key in (
             "experience_watermark",
             "practice_revisions",
+            "rejected_practice",
             "score_watermark",
             "unfit_samples",
             "teacher_gain",

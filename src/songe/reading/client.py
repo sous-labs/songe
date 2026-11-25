@@ -29,6 +29,42 @@ FORCE_CONTEXT = 6000
 FORCE_TOKENS = 4096
 # Asked of every reader question.
 BRIEF = "\nKeep your reasoning short. Answer with the JSON only."
+# (server url, model) that refused thinking_token_budget: not sent it again.
+NO_BUDGET = set()
+# (server url, model) -> the model's whole window in tokens, once the server
+# named it in a refusal (send): no request asks for more.
+WINDOW = {}
+# vLLM, asked for more tokens than the model's window: "max_tokens=6000 cannot
+# be greater than max_model_len=4096".
+OVER_WINDOW = re.compile(r"max_model_len=(\d+)")
+# vLLM names the window and the prompt's tokens when the two do not fit:
+# 0.34.0, a prompt longer than the window: "This model's maximum context
+# length is 4096 tokens. However, your prompt contains at least 4097 input
+# tokens"; older releases also when the prompt fits but max_tokens does not:
+# "This model's maximum context length is 4096 tokens and your request has 100
+# input tokens (6000 > 4096 - 100)", "However, you requested 6100 tokens (100
+# in the messages, 6000 in the completion)", "However, you requested 5000
+# tokens in the messages".
+CONTEXT = re.compile(r"maximum context length is (\d+) tokens")
+PROMPT_TOKENS = re.compile(r"(\d+) input tokens|\((\d+) in the messages|requested (\d+) tokens in the messages")
+
+
+def room(refusal):
+    """(window, prompt tokens) a refusal names, else None."""
+    window, prompt = CONTEXT.search(refusal), PROMPT_TOKENS.search(refusal)
+    if not window or not prompt:
+        return None
+    return int(window[1]), int(next(g for g in prompt.groups() if g))
+
+
+def over_window(response):
+    """The prompt alone is longer than the model's window. Only then: a
+    refusal for max_tokens that the prompt leaves no room for (older vLLM
+    words it the same way) is not a reason to give the moment up for good."""
+    if response.status_code != 400:
+        return False
+    named = room(response.text)
+    return bool(named) and named[1] >= named[0]
 
 
 class Stopped(Exception):
@@ -87,6 +123,9 @@ class Reader:
         self.forced = self.cut_off = self.tokens_out = 0
         self.seconds = 0.0
         self.structured = True
+        # vLLM takes thinking_token_budget only when it was started with a
+        # reasoning parser (see send); a server that refused it is remembered.
+        self.budget = (self.url, self.model) not in NO_BUDGET
 
     def log_stats(self, stage):
         """What a stage cost so far (cumulative), for comparing models and
@@ -138,7 +177,7 @@ class Reader:
             # writes its answer (probed live on Inkling-2-Mini: 1,024 halved
             # the generated tokens and the time, JSON complete). Effort "none"
             # alone did not bound reasoning on long prompts (~8,100 tokens).
-            if self.server == "vllm":
+            if self.server == "vllm" and self.budget:
                 body["thinking_token_budget"] = THINKING_BUDGET[think]
         started = time.monotonic()
         # max_tokens caps the reasoning and the answer together: a model that
@@ -150,7 +189,13 @@ class Reader:
         # the next read does not pay for it again).
         answer, finish, used, thought = await self.post(body, prompt + BRIEF, schema, name)
         self.tokens_out += used
-        if "error" in answer and finish == "length":
+        if finish == "window":
+            # The question alone is longer than the model's window: no answer
+            # can come, now or on a later read. Live (Phi-3-mini-4k, window
+            # 4,096): one such session stopped all reading for 3 users of 20.
+            answer = {"error": "the question is longer than the model's window", "gave_up": True}
+            logger.warning("reader_gave_up %s: the question is longer than the model's window", name)
+        elif "error" in answer and finish == "length":
             self.cut_off += 1
             self.forced += 1
             forced_prompt = (
@@ -183,30 +228,129 @@ class Reader:
         return answer
 
 
+    async def reply(self, messages, *, max_tokens, temperature=0, think=None):
+        """The served model's own next message in a conversation, asked the
+        way its users ask: no schema and none of the reasoning switches the
+        reader's questions set. think=False sets those switches, for a server
+        whose reasoning left no room for the reply. Not cached.
+        {"content", "finished", "reasoned"}."""
+        if self.still_idle is not None and not self.still_idle():
+            raise Stopped()
+        body = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stream": False,
+        }
+        if think is False:
+            body["reasoning_effort"] = "none"
+            if self.template_switch:
+                body["chat_template_kwargs"] = {"enable_thinking": False}
+        started = time.monotonic()
+        response = await self.client.post(self.url + "/chat/completions", json=body)
+        response.raise_for_status()
+        choice = (response.json().get("choices") or [{}])[0]
+        message = choice.get("message") or {}
+        self.calls += 1
+        self.seconds += time.monotonic() - started
+        self.tokens_out += usage(response)
+        content = message.get("content")
+        content = content if isinstance(content, str) else ""
+        return {
+            "content": content,
+            "finished": choice.get("finish_reason") == "stop",
+            # Reasoning in its own field (servers name it either way) or
+            # left in the text.
+            "reasoned": "<think>" in content
+            or any(
+                isinstance(message.get(k), str) and message[k].strip()
+                for k in ("reasoning_content", "reasoning")
+            ),
+        }
+
+    async def send(self, payload):
+        """One request to the model server. A request vLLM refuses for
+        something this server or model does not take is asked again in a form
+        it takes, and that is remembered for this server and model:
+        - thinking_token_budget, on a server started without a reasoning
+          parser (400, "thinking_token_budget is set but reasoning_config is
+          not configured"). Live (vLLM 0.34.0 with its defaults,
+          Mistral-7B-Instruct-v0.2): every reader question was refused, the
+          first refusal was taken for "no structured output", the plain
+          question was refused as well, and no session was ever read.
+        - more tokens than the model's whole window (400, "max_tokens=6000
+          cannot be greater than max_model_len=4096"). Live (same server,
+          Phi-3-mini-4k, window 4,096): the same end. Up to the window the
+          server takes any number and gives what the prompt leaves.
+        A model with a small window and no reasoning parser is refused for
+        both, one after the other: three requests at most.
+        Older vLLM refuses max_tokens beyond what the prompt leaves ("your
+        request has 100 input tokens (6000 > 4096 - 100)"): that request is
+        asked again for what is left (for this prompt only)."""
+        for _ in range(3):
+            payload = self.fitted(payload)
+            response = await self.client.post(self.url + "/chat/completions", json=payload)
+            if response.status_code != 400:
+                break
+            payload = self.learn(payload, response.text)
+            if payload is None:
+                break
+        return response
+
+    def fitted(self, payload):
+        """The request without what this server and model refused before."""
+        if not self.budget and "thinking_token_budget" in payload:
+            payload = {k: v for k, v in payload.items() if k != "thinking_token_budget"}
+        window = WINDOW.get((self.url, self.model))
+        if window and payload.get("max_tokens", 0) > window:
+            payload = payload | {"max_tokens": window}
+        return payload
+
+    def learn(self, payload, refusal):
+        """The request to ask again when a refusal named something to leave
+        out or to lower, else None."""
+        if "thinking_token_budget" in payload and "thinking_token_budget" in refusal:
+            self.budget = False
+            NO_BUDGET.add((self.url, self.model))
+            logger.info("reader_no_thinking_budget the model server refused thinking_token_budget; asking without it")
+            return payload
+        window = OVER_WINDOW.search(refusal)
+        if window and 0 < int(window.group(1)) < payload.get("max_tokens", 0):
+            WINDOW[(self.url, self.model)] = int(window.group(1))
+            logger.info("reader_window the model's window is %s tokens; asking for no more", window.group(1))
+            return payload
+        named = room(refusal)
+        if named and 0 < named[0] - named[1] < payload.get("max_tokens", 0):
+            return payload | {"max_tokens": named[0] - named[1]}
+        return None
+
     async def post(self, body, prompt, schema, name):
         """One question: (answer, finish reason, generated tokens, reasoning
         text). Structured output when the
-        server takes it, else asked plainly with the schema in the prompt."""
+        server takes it, else asked plainly with the schema in the prompt.
+        A prompt longer than the model's window comes back as an error with
+        the finish reason "window"."""
         if self.structured:
-            response = await self.client.post(
-                self.url + "/chat/completions",
-                json=body
+            response = await self.send(
+                body
                 | {
                     "response_format": {
                         "type": "json_schema",
                         "json_schema": {"name": name, "strict": True, "schema": schema},
                     }
-                },
+                }
             )
+            if over_window(response):
+                return {"error": "longer than the model's window"}, "window", 0, ""
             if 400 <= response.status_code < 500:
                 # This server does not take structured output; ask plainly.
                 self.structured = False
             else:
                 response.raise_for_status()
                 return read(response), finish_reason(response), usage(response), reasoning_of(response)
-        response = await self.client.post(
-            self.url + "/chat/completions",
-            json=body
+        response = await self.send(
+            body
             | {
                 "messages": [
                     {
@@ -214,8 +358,10 @@ class Reader:
                         "content": prompt + "\nThe JSON must match this schema: " + json.dumps(schema),
                     }
                 ]
-            },
+            }
         )
+        if over_window(response):
+            return {"error": "longer than the model's window"}, "window", 0, ""
         response.raise_for_status()
         return read(response), finish_reason(response), usage(response), reasoning_of(response)
 

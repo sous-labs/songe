@@ -5,6 +5,7 @@ be registered with --lora/--lora-init-without-apply. A new base or actual memory
 reclamation needs a supervisor, never a pretend unload by setting scale=0.
 """
 
+import asyncio
 from pathlib import Path
 
 import httpx
@@ -30,6 +31,7 @@ class LlamaCPP:
         self.restart, self.stop, self.memory_probe = restart, stop, memory_probe
         self.identifiers = {}
         self.applied = set()
+        self.answered_running = False
         self.routes = {}
 
     def discover(self):
@@ -50,11 +52,64 @@ class LlamaCPP:
             response = await client.get(url + "/models")
             response.raise_for_status()
             models = response.json().get("data", [])
-        return {
+        served = {
             m["id"]: int(m["meta"]["n_ctx"])
             for m in models
             if isinstance(m.get("meta"), dict) and m["meta"].get("n_ctx")
         }
+        # llama-swap: each loaded model's command says its -c. Without one,
+        # the fallback stays rather than a guess at llama.cpp's default.
+        root = url.removesuffix("/v1")
+        running = await asyncio.to_thread(
+            discovery.llamaswap_running, root, self.transport
+        )
+        for entry in running or []:
+            if not isinstance(entry, dict):
+                continue
+            context = discovery.command_flag(entry.get("cmd"), "-c", "--ctx-size")
+            if entry.get("model") and context and context.isdigit() and int(context):
+                served.setdefault(entry["model"], int(context))
+        return served
+
+    async def listing(self):
+        """What is loaded now when the user's server is llama-swap: its models
+        from /running, and the versions Songe's own llama-server is serving.
+        None for a plain llama-server, whose one model is always loaded.
+        Background work for a model that is not loaded would swap out the
+        user's, or read with another learner's weights."""
+        url = getattr(self.config, "server_source_url", "") or self.url
+        loaded = await asyncio.to_thread(discovery.llamaswap_loaded, url, self.transport)
+        if loaded is None and not self.answered_running:
+            return None
+        # Once it has answered, a failed /running means nothing is loaded.
+        self.answered_running = True
+        loaded = loaded or []
+        return [{"identifier": i, "type": "llm"} for i in loaded + await self.serving()]
+
+    async def serving(self):
+        """Identifiers of the versions Songe's own llama-server serves right
+        now: its base and the adapters applied on it; [] while it is stopped."""
+        if not self.owns_server():
+            return []
+        try:
+            props = await self._request("GET", "/props")
+            adapters = await self._request("GET", "/lora-adapters")
+        except httpx.HTTPError:
+            return []
+        base = str(Path((props or {}).get("model_path", "")).resolve())
+        found = [self.identifiers[base]] if base in self.identifiers else []
+        # Ask the server, not self.applied: a restart onto another base drops
+        # adapters applied before it.
+        for adapter in adapters if isinstance(adapters, list) else []:
+            if not isinstance(adapter, dict):
+                continue
+            scale = adapter.get("scale")
+            if not isinstance(scale, (int, float)) or scale <= 0:
+                continue
+            path = str(Path(adapter.get("path", "")).resolve())
+            if path in self.identifiers and self.identifiers[path] not in found:
+                found.append(self.identifiers[path])
+        return found
 
     async def _request(self, method, path, **kwargs):
         async with httpx.AsyncClient(
@@ -145,6 +200,7 @@ class LlamaCPP:
                         "A new llama.cpp base requires a supervised restart"
                     )
                 await self.restart(version)
+            self.identifiers[str(artifact.resolve())] = version["identifier"]
             if self.applied:
                 adapters = await self._request("GET", "/lora-adapters")
                 await self._request(

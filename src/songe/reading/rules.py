@@ -325,6 +325,45 @@ def preference_sentences(text, limit=3):
     return out[:limit]
 
 
+# Words an instruction is built from whatever it is about ("Always include
+# ...", "Keep answers ...", "Use ... instead of ..."): every note has them,
+# so they do not show whose wish a sentence is.
+FRAME = frozenset(
+    """a an the to of and or in on for with by from at as is are be it its this that these those there here
+    i me my we our you your they them their he she his her not no nor do does did don dont doesn done
+    will would can could should may might must am was were been being has have had if when then than so
+    such what which who how why where all each every any some both either only just very more most less
+    much many few own same other another into over under up down out off about again once also but too
+    always never ever please now use uses using used avoid keep make give provide include write answer
+    answers reply replies respond response responses say tell show put add ensure sure instead rather
+    without want wants need needs like user users assistant agent ai model request requested asked ask
+    exactly thing things time times""".split()
+)
+
+
+def voiced(text, said):
+    """How much of a sentence the model worded is what the user wrote: the
+    share of its content words (the words every instruction is built from
+    left out, endings ignored) that are in `said`, the user's own words.
+
+    1.0 when words cannot show it: `said` is not written in Latin letters
+    ("请用中文回答" asks for Chinese without the word), or the sentence has no
+    content word."""
+    import unicodedata
+
+    from ..quick import _tokens, stem
+
+    if any(ch.isalpha() and not unicodedata.name(ch, "").startswith("LATIN") for ch in str(said)):
+        return 1.0
+    content = {stem(w) for w in _tokens(text) if w not in FRAME and len(w) > 1} - FRAME
+    theirs = {stem(w) for w in _tokens(said)}
+    found = sum(
+        any(w == t or (min(len(w), len(t)) >= 4 and (w.startswith(t) or t.startswith(w))) for t in theirs)
+        for w in content
+    )
+    return found / len(content) if content else 1.0
+
+
 def stated_sentence(signal):
     """The sentence of the user's that a signal keeps word for word: a
     preference of their own (judged lasting by the model when it was read;

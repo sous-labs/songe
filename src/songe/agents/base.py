@@ -7,6 +7,7 @@ and work on any file a codec can read as a tree.
 """
 
 import json
+import re
 
 
 class NotEditable(ValueError):
@@ -24,6 +25,8 @@ class JSONCodec:
         # config; an empty file or one with a BOM is left alone too.
         try:
             return json.loads(raw.decode("utf-8"))
+        except UnicodeDecodeError:
+            raise NotEditable("it is not UTF-8") from None
         except json.JSONDecodeError:
             raise NotEditable("it has comments or trailing commas") from None
 
@@ -31,7 +34,62 @@ class JSONCodec:
         return (json.dumps(data, indent=2, ensure_ascii=False) + "\n").encode()
 
 
+class YAMLListCodec:
+    """A YAML list of entries, read as a map keyed by one field, so field-level
+    edit tracking applies (Aider's model settings, keyed by `name`)."""
+
+    def __init__(self, key):
+        self.key = key
+        self.name = f"yaml-list:{key}"
+
+    def load(self, raw):
+        import yaml
+
+        try:
+            text = raw.decode("utf-8") if isinstance(raw, bytes) else (raw or "")
+        except UnicodeDecodeError:
+            raise NotEditable("it is not UTF-8") from None
+        # A comment is the user's own writing; dumping would drop it.
+        if re.search(r"(^|\s)#", text):
+            raise NotEditable("it has comments")
+        try:
+            items = yaml.safe_load(text)
+        except yaml.YAMLError:
+            raise NotEditable("it is not valid YAML") from None
+        # An empty file is an empty list; `{}`, `0` or `false` is not one.
+        items = [] if items is None else items
+        if not isinstance(items, list) or not all(
+            isinstance(item, dict) and isinstance(item.get(self.key), str)
+            for item in items
+        ):
+            raise NotEditable(f"it is not a list of entries with a {self.key}")
+        names = [item[self.key] for item in items]
+        repeated = next((n for n in names if names.count(n) > 1), None)
+        if repeated is not None:
+            # Keyed by name, one of them would be lost for good.
+            raise NotEditable(f"it has two entries named {repeated}")
+        return {item[self.key]: item for item in items}
+
+    def dump(self, data):
+        import yaml
+
+        items = [{self.key: key, **{k: v for k, v in entry.items() if k != self.key}}
+                 for key, entry in data.items()]
+        return yaml.safe_dump(items, sort_keys=False, allow_unicode=True).encode()
+
+
 JSON = JSONCodec()
+
+
+def codec_named(name):
+    """The codec a backup manifest entry was written with ("json",
+    "yaml-list:name")."""
+    if name == JSON.name:
+        return JSON
+    if name.startswith("yaml-list:"):
+        return YAMLListCodec(name.split(":", 1)[1])
+    # Written by a later Songe: kept as a conflict, never guessed at.
+    raise NotEditable(f"it was written with a codec this Songe does not know ({name})")
 
 
 class Agent:
@@ -66,6 +124,15 @@ class Agent:
     def on_songe(self, home):
         """Its default model is a songe/ one."""
         return False
+
+    def stale(self, path, key, config):
+        """A top-level entry Songe wrote for a model it no longer serves
+        (for files keyed by model name; opencode and pi use legacy_models)."""
+        return False
+
+    def after_uninstall(self, home):
+        """A note for what uninstall cannot undo, or None."""
+        return None
 
     # How the user picks a Songe model there ("choose one with <pick>").
     pick = "a Songe model"

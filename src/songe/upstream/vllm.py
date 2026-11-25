@@ -66,6 +66,22 @@ class VLLM:
     async def _models(self):
         return (await self._request("GET", "/v1/models"))["data"]
 
+    async def _own_models(self, version=None):
+        """What Songe's own endpoint serves. While the user's server answers
+        the base, that endpoint is not started until an adapter needs it:
+        nothing is loaded there before, and a load (version given) starts it.
+        Without it the swap asked a port nobody listens on, every time, and a
+        trained version waited "for the model server" for good."""
+        try:
+            return await self._models()
+        except httpx.ConnectError:
+            if not hasattr(self, "supervisor"):
+                raise
+            if version is None:
+                return []
+            await self.supervisor.restart(version)
+            return await self._models()
+
     async def resident(self, version):
         if version.get("id") == "base" or version.get("kind") == "base":
             from .reuse import served_base
@@ -83,7 +99,8 @@ class VLLM:
             self.routes.pop(version["identifier"], None)
             return False
         existing = next(
-            (m for m in await self._models() if m["id"] == version["identifier"]), None
+            (m for m in await self._own_models() if m["id"] == version["identifier"]),
+            None,
         )
         if existing is None:
             return False
@@ -109,7 +126,12 @@ class VLLM:
             return
         adapter = str(Path(version.get("adapter") or version["artifact"]).resolve())
         existing = next(
-            (m for m in await self._models() if m["id"] == version["identifier"]), None
+            (
+                m
+                for m in await self._own_models(version)
+                if m["id"] == version["identifier"]
+            ),
+            None,
         )
         if existing:
             if not existing.get("parent") or Path(

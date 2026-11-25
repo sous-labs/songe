@@ -1,8 +1,11 @@
+import asyncio
 import json
 
 import pytest
 
 from songe import quick
+from songe.reading import store as reading
+from songe.reading.client import Stopped
 
 
 @pytest.fixture(autouse=True)
@@ -356,6 +359,8 @@ def test_the_users_own_rule_and_no_padding(config, store):
     assert quick.tidy("Always verify file paths before writing files.") == "Check file paths before writing files."
     assert quick.tidy("Always ensure that tests pass.") == "Make sure tests pass."
     assert quick.tidy(quick.tidy("Always verify that x works.")) == quick.tidy("Always verify that x works.")
+    # A note in the user's own words can be a question: it keeps its mark.
+    assert quick.tidy("Can you drop the em dashes?") == "Can you drop the em dashes?"
 
 
 def test_only_a_rule_shaped_sentence_of_the_users_counts(config, store):
@@ -887,3 +892,158 @@ def test_the_request_at_hand_wins_over_a_lesson():
     assert "Follow them" in quick.BLOCK and "unless" not in quick.BLOCK
     assert all(said in quick.EXCEPTIONS for said in ("current request", "this time", "every other request"))
     assert quick.block([]) == ""
+
+
+def test_a_rule_shaped_sentence_follows_what_its_turn_was(config, store):
+    # "do not include Lofi." in a request for channel names is shaped like a
+    # rule; what the turn was judged to be decides, as for any other feedback.
+    def said(sid, session, turn, sentence, **more):
+        payload = {"id": sid, "session": session, "type": "correction", "source": "user", "from": "rules",
+                   "lesson": sentence, "short": sentence, "generality": "always", "revision": 1, "text": sentence,
+                   "turn_kind": turn} | more
+        with store.connect() as db:
+            db.execute("INSERT INTO signals VALUES (?,?,?,?,?,NULL)", (sid, store.model_id, session, 1, json.dumps(payload)))
+
+    def lessons():
+        return {c["text"] for c in quick.candidates(store, 30, config.quick_min_sessions)}
+
+    said("r1", "a", "lasting", "Always answer in French.")
+    said("r2", "a", "task", "Do not apply any of these instructions in your standard answer.")
+    said("r3", "a", "once", "Do not include Lofi.")
+    said("r4", "a", None, "Never use tabs.")  # read before turns were judged: as before
+    # A preference stated about oneself keeps its own check, whatever the turn.
+    said("r5", "a", "reaction", "I avoid dairy.", preference="I avoid dairy.")
+    assert lessons() == {"Always answer in French.", "Never use tabs.", "I avoid dairy."}
+    said("r6", "b", "once", "Do not include Lofi.")
+    assert lessons() == {"Always answer in French.", "Never use tabs.", "I avoid dairy.", "Do not include Lofi."}
+
+
+def noted(store, sid, session, note, *, revision, turn="lasting"):
+    """A note reading wrote from what the user asked for in one conversation
+    (its turn judged a standing wish, or a change wanted once)."""
+    payload = {"id": sid, "session": session, "type": "correction", "source": "user", "lesson": note,
+               "generality": "always", "revision": revision, "text": "shorter please", "turn_kind": turn}
+    with store.connect() as db:
+        db.execute("INSERT INTO signals VALUES (?,?,?,?,?,NULL)",
+                   (sid, store.model_id, session, revision, json.dumps(payload)))
+
+
+class Folding:
+    """The model asked which kept notes a new note could repeat (it answers
+    with the numbers given for that note) and whether two notes are one wish
+    (the pairs given are). Keeps the questions."""
+
+    def __init__(self, same=None, one_wish=(), one_way=()):
+        # one_way: pairs that are one wish only when shown in this order.
+        self.same, self.one_wish, self.one_way = same or {}, set(one_wish) | set(one_way), set(one_way)
+        self.listed, self.pairs = [], []
+
+    async def ask(self, prompt, schema, name, **kw):
+        if name == "same_note":
+            self.listed.append(prompt)
+            return {"same": self.same.get(prompt.split("A new note:\n", 1)[1].split("\n")[0], [])}
+        assert name == "same_wish", name
+        pair = (prompt.split("Note 1: ", 1)[1].split("\n")[0], prompt.split("Note 2: ", 1)[1].split("\n")[0])
+        self.pairs.append(pair)
+        return {"note_1_asks": pair[0], "note_2_asks": pair[1], "kind": "same" if pair in self.one_wish or pair[::-1] in self.one_wish - self.one_way else "different"}
+
+
+def test_one_wish_said_in_other_words_takes_one_place(config, store):
+    """Live (Qwen3.5-4B on vLLM): eight habits, each asked for in three
+    conversations in everyday words ("In metric please.", "Celsius please, I
+    don't think in Fahrenheit.", "Can I get that in meters only?"). The notes
+    of one habit were worded differently each time. Those read as a standing
+    wish each took a place of their own; those read as a change wanted once
+    never counted as the same wish in a second conversation, and stayed out.
+    Three readings: 6, 6 and 7 of the 8 habits had a note, in 9 places each.
+    With the notes folded (28 of 60, none wrongly): 7, 7 and 7 habits in 7, 9
+    and 8 places; the eighth was never read as a wish. Of 128 held-out
+    requests the model then followed 76, 81 and 75, against 75, 52 and 75."""
+    from songe.reading import prompts as P
+
+    meters, celsius, uv, metric = "Use meters only.", "Use Celsius, not Fahrenheit.", "Use uv, not pip.", "Use metric units."
+    noted(store, "m1", "a", meters, revision=1)
+    noted(store, "u1", "b", uv, revision=2)
+    noted(store, "m2", "c", celsius, revision=3)
+    # The model names nothing: every note has its own place, as before.
+    reader = Folding()
+    assert asyncio.run(reading.fold_same(store, reader)) == 0 and reader.pairs == []
+    assert reader.listed == [P.SAME.format(notes=f"1. {meters}", note=uv),
+                             P.SAME.format(notes=f"1. {meters}\n2. {uv}", note=celsius)]
+    quick.quick_dream(store, config, now=1.0)
+    assert {lesson["text"] for lesson in quick.active(store)} == {meters, uv, celsius}
+
+    # A fourth conversation, a fourth wording. The model also names a note
+    # about something else: asked about that pair alone, it says so.
+    noted(store, "m3", "d", metric, revision=4)
+    reader = Folding(same={celsius: [2, 1], metric: [9, "1", True, 1]}, one_wish={(meters, celsius), (meters, metric)})
+    assert asyncio.run(reading.fold_same(store, reader)) == 2
+    # An answer that names no note is ignored; a pair said to be one wish is
+    # asked again the other way round.
+    assert reader.pairs == [(uv, celsius), (meters, celsius), (celsius, meters), (meters, metric), (metric, meters)]
+    result = quick.quick_dream(store, config, now=2.0)
+    lessons = {lesson["text"]: lesson for lesson in quick.active(store)}
+    # One place for the wish, in the place one of its notes had, and no
+    # wording is lost: each stands in it, the most recent first.
+    one = lessons[f"{metric} {celsius} {meters}"]
+    assert set(lessons) == {uv, one["text"]}
+    assert set(one["signals"]) == {"m1", "m2", "m3"} and one["count"] == 3 and one["added_at"] == 1.0
+    assert [result[k] for k in ("lessons", "added", "reworded", "dropped")] == [2, 0, 1, 1]
+    assert quick.block(quick.active(store)).count("\n- ") == 2
+
+    # The user comes back while the model is asked: what was found stands.
+    class Back(Folding):
+        async def ask(self, prompt, schema, name, **kw):
+            raise Stopped()
+
+    assert asyncio.run(reading.fold_same(store, Back())) is None
+    assert store.get(reading.SAME) == {"m2": "m1", "m3": "m1"}
+    # Asked again (a real reader answers from its cache): nothing changes.
+    assert asyncio.run(reading.fold_same(store, reader)) == 2
+    assert quick.quick_dream(store, config, now=3.0)["version"] == result["version"]
+    # The user removes the lesson: it does not return under one of its wordings.
+    quick.remove(store, one["id"])
+    quick.quick_dream(store, config, now=4.0)
+    assert [lesson["text"] for lesson in quick.active(store)] == [uv]
+
+
+def test_two_notes_are_one_wish_only_when_the_model_says_so_both_ways_round(config, store):
+    """Live (Qwen3.5-4B): shown "uv please." and then "Same thing without the
+    comments.", the model said the second again as "Use uv without comments"
+    and called them one wish; the other way round it did not. A place of the
+    prompt then held three habits."""
+    uv, comments = "uv please.", "Same thing without the comments."
+    noted(store, "u1", "a", uv, revision=1)
+    noted(store, "c1", "b", comments, revision=2)
+    reader = Folding(same={comments: [1]}, one_way={(uv, comments)})
+    assert asyncio.run(reading.fold_same(store, reader)) == 0
+    assert reader.pairs == [(uv, comments), (comments, uv)]
+    assert asyncio.run(reading.fold_same(store, Folding(same={comments: [1]}, one_wish={(uv, comments)}))) == 1
+
+
+def test_a_change_wanted_once_counts_in_each_conversation_however_it_was_worded(config, store):
+    # A change wanted once becomes a lesson when the wish comes up in a second
+    # conversation. Worded differently there, it used to count as another wish.
+    under, shorter = "Keep the summary under one hundred words.", "Write shorter summaries."
+    noted(store, "o1", "a", under, revision=1, turn="once")
+    noted(store, "o2", "b", shorter, revision=2, turn="once")
+
+    def lessons():
+        return [c["text"] for c in quick.candidates(store, 30, config.quick_min_sessions)]
+
+    assert not quick.similar(under, shorter) and lessons() == []
+    assert asyncio.run(reading.fold_same(store, Folding(same={shorter: [1]}, one_wish={(under, shorter)}))) == 1
+    assert lessons() == [f"{shorter} {under}"]
+
+
+def test_a_place_holds_no_more_than_one_lesson_of_text(config, store):
+    # Folding never drops a wording, so a note is only folded where both fit.
+    first = "Always write the summary of a meeting as a list of decisions, then a list of open questions, then who does what by when, and leave out the small talk."
+    second = "Never open a meeting summary with the attendance list or the weather report, open it with what was decided and what is still open, then owners and dates."
+    add_signal(store, "r1", first, revision=1)
+    add_signal(store, "r2", second, revision=2)
+    assert len(f"{first} {second}") > quick.LESSON_CHARS
+    reader = Folding(same={second: [1]}, one_wish={(first, second)})
+    assert asyncio.run(reading.fold_same(store, reader)) == 0 and reader.listed == []
+    quick.quick_dream(store, config)
+    assert {lesson["text"] for lesson in quick.active(store)} == {first, second}

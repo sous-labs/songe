@@ -363,6 +363,34 @@ async def test_update_the_server_refuses_is_rejected_after_three_spaced_tries(
     assert len(calls) == 3 and store.nights()[0]["status"] == "rejected"
 
 
+async def test_a_dream_the_server_never_loaded_practised_nothing(config, store, monkeypatch):
+    """An update refused three times is rejected. Under Dreams the watermark
+    counts practice scenes: moved past them, the scenes of a Dream nobody
+    was ever served counted as practised."""
+    import time
+
+    from songe.practice import pool
+    from songe.sleep import swap
+
+    async def install(*args, **kw):
+        raise RuntimeError("bad weights")
+
+    monkeypatch.setattr(swap, "install", install)
+    store.set("learning_mode", "dreams")
+    ready_night(config, store)
+    night = store.nights()[0]
+    store.night(night["id"], record=night["record"] | {"watermark": 7, "practice_revisions": {"practice:a#v1": 7}})
+    scheduler = Scheduler(config, store, None)
+    scheduler.last_traffic = time.monotonic() - 1000
+    for _ in range(3):
+        night = store.nights()[0]
+        store.night(night["id"], record=night["record"] | {"swap_retry_at": 0})
+        await scheduler.accept(store.nights()[0])
+    assert store.nights()[0]["status"] == "rejected"
+    assert store.get("experience_watermark", 0) == 0 and store.get("practice_revisions", {}) == {}
+    assert pool.rejected(store) == {"practice:a#v1": (7, 1)}
+
+
 async def test_update_loads_alone_when_it_does_not_fit_beside_the_current_one(
     config, store, monkeypatch
 ):

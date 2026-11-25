@@ -114,11 +114,15 @@ def restoring(store):
 
 
 def settings(config, store):
+    from .cloud import summary as cloud_summary
+
     return {
         "model": config.model,
         "upstream": config.upstream,
         "schedule_default_seconds": config.idle_default_seconds,
         "replace_loaded_model": config.replace_loaded_model,
+        # Learn with a cloud model: what it uses, never the key itself.
+        "cloud": cloud_summary(store),
     }
 
 
@@ -869,10 +873,20 @@ def api_routes(config, store, scheduler=None, *, release=None):
                 "upstream",
                 "schedule_default_seconds",
                 "replace_loaded_model",
+                "cloud",
             }:
                 raise ValueError(
-                    "Settings: model, upstream, schedule_default_seconds, replace_loaded_model"
+                    "Settings: model, upstream, schedule_default_seconds, replace_loaded_model, cloud"
                 )
+            if "cloud" in payload:
+                # Learn with a cloud model: its own store entry, the key goes
+                # to the keychain. Turning it on runs the probe first.
+                from . import cloud
+
+                async with lock:
+                    await asyncio.to_thread(cloud.update, store, payload.pop("cloud"))
+                if not payload:
+                    return JSONResponse(settings(config, store))
             async with lock:
                 changes = {
                     k: v
@@ -998,8 +1012,31 @@ def api_routes(config, store, scheduler=None, *, release=None):
             return JSONResponse({"error": "no such cycle"}, 404)
         return JSONResponse(found, headers={"Cache-Control": "no-store"})
 
+    async def cloud_read(request):
+        if rejected := guard(request):
+            return rejected
+        from . import cloud
+
+        try:
+            data = await asyncio.to_thread(cloud.details, store)
+        except sqlite3.Error as exc:
+            return JSONResponse({"error": f"Local store unavailable: {exc}"}, 503)
+        return JSONResponse(data, headers={"Cache-Control": "no-store"})
+
+    async def cloud_test(request):
+        if rejected := guard(request, True):
+            return rejected
+        from dataclasses import asdict
+
+        from . import cloud
+
+        async with lock:
+            found = await asyncio.to_thread(cloud.test, store)
+        return JSONResponse(asdict(found) | {"settings": cloud.summary(store)})
+
     return (
         [Route("/api/flow", flow_read)]
+        + [Route("/api/cloud", cloud_read), Route("/api/cloud/test", cloud_test, methods=["POST"])]
         + [Route("/api/cycles", cycles_read), Route("/api/cycles/{id}", cycles_read)]
         + [
             Route(path, read)

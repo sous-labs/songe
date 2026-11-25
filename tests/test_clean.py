@@ -132,6 +132,46 @@ def test_select_trains_every_cleaned_step_without_the_backend(config):
     assert selected[1]["repeated"] == 2
 
 
+def test_a_practice_scenes_note_is_an_aside_the_teacher_does_not_answer(config):
+    """A scene's hindsight is a note Songe wrote, not evidence that followed
+    the step: the teacher gets it as an aside to follow and not to mention.
+    Shown as quoted observations, the teacher answered the note itself."""
+    note = "Note from an earlier, different task.\nLesson: Use uv, never pip."
+    scene = make("practice:s#v1", hindsight=[{"role": "user", "content": note}]) | {"practice": True}
+    student, teacher = (json.loads(bytes(p)) for p in paired_prompts(Tokenizer(), scene, config))
+    assert student["messages"] == scene["context"]
+    assert teacher["messages"][:-1] == scene["context"]
+    aside = teacher["messages"][-1]
+    assert aside["role"] == "user" and note in aside["content"]
+    assert aside["content"].startswith("(Not part of the conversation.")
+    assert aside["content"].endswith("do not mention it.)")
+    assert "observations" not in aside["content"]
+    # A real step's hindsight is evidence and keeps its marked block.
+    real = json.loads(bytes(paired_prompts(Tokenizer(), scene | {"practice": False}, config)[1]))
+    assert real["messages"][-1]["content"].startswith("Hindsight — quoted observations")
+
+
+def test_an_agents_practice_scene_asks_its_teacher_for_an_action_not_a_reply(config):
+    """With tools in the request a scene often ends on a tool result and the
+    right next step is a tool call: its aside closes with the line a real
+    step's teacher gets. "Write the reply" stays with conversations without
+    tools, where it was measured."""
+    note = "Note from an earlier, different task.\nLesson: Run the tests before the commit."
+    scene = make("practice:s#v1", hindsight=[{"role": "user", "content": note}]) | {"practice": True}
+    ran = {"role": "assistant", "content": "", "tool_calls": [
+        {"id": "a", "type": "function", "function": {"name": "shell", "arguments": '{"command": "git add -A"}'}}]}
+    agent = scene | {
+        "context": scene["context"] + [ran, {"role": "tool", "tool_call_id": "a", "content": "ok"}],
+        "tools": [{"type": "function", "function": {"name": "shell", "parameters": {"type": "object", "properties": {}}}}],
+    }
+    closing = " Follow the note where it applies and do not mention it.)"
+    aside = json.loads(bytes(paired_prompts(Tokenizer(), agent, config)[1]))["messages"][-1]["content"]
+    assert aside.startswith("(Not part of the conversation.") and note in aside
+    assert aside.endswith("\nRespond now with your own action." + closing) and "write the reply" not in aside
+    plain = json.loads(bytes(paired_prompts(Tokenizer(), scene, config)[1]))["messages"][-1]["content"]
+    assert plain.endswith("\nNow write the reply to the message above." + closing)
+
+
 def test_review_note_organises_only_the_teacher_hindsight(config, store):
     reply = {"role": "user", "content": "This deleted my file"}
     step = make("reviewed", hindsight=[reply])

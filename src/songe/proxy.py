@@ -178,7 +178,8 @@ def decode_response(body, streaming):
             )
             # Servers send null for absent fields ("tool_calls": null).
             delta, message = choice.get("delta") or {}, entry["message"]
-            for k in ("content", "reasoning_content"):
+            # Servers name the reasoning reasoning_content or reasoning (vLLM).
+            for k in ("content", "reasoning_content", "reasoning"):
                 if delta.get(k):
                     message[k] = message.get(k, "") + delta[k]
             for call in delta.get("tool_calls") or []:

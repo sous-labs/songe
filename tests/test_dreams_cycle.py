@@ -94,9 +94,17 @@ def test_a_dreams_cycle_trains_on_practice_only(dreams):
     # Recorded so an adopted Dream can take these lessons out of the prompt.
     assert store.nights()[-1]["record"]["trained_signals"] == ["sig0", "sig1", "sig2"]
     assert store.get("learning_mode") == "dreams"
-    # Rejected by the gate, but the scenes count as practised.
+    # Rejected by the gate: nothing was adopted, so the scenes are not
+    # practised. On their own they wait (the same Dream would be rejected
+    # again); with a new scene they are all trained again.
+    assert store.get("practice_revisions", {}) == {}
+    assert set(store.get(practice_pool.REJECTED)) == set(trained)
     assert worker.run(config, store)["reason"] == "Waiting for new learnable experience"
     assert practice_pool.untrained(store) == []
+    add_practice(store, 1, start=10)
+    again = practice_pool.untrained(store)
+    assert {s["id"] for s in again} >= set(trained)
+    assert [s["id"] for s in again if not s.get("retry")] == ["practice:sig10#v1"]
 
 
 def test_practice_beyond_the_cap_waits_for_the_next_dream(dreams):
@@ -110,9 +118,12 @@ def test_practice_beyond_the_cap_waits_for_the_next_dream(dreams):
     worker.run(config, store)
     (trained,) = Model.pools
     assert len(trained) == 4
-    left = {s["id"] for s in practice_pool.untrained(store)}
-    assert len(left) == total - 4 and not left & set(trained)
-    # The next Dream trains from what is left.
+    left = practice_pool.untrained(store)
+    untried = {s["id"] for s in left if not s.get("retry")}
+    assert len(untried) == total - 4 and not untried & set(trained)
+    # Rejected, so the first four are still to train, after the untried ones.
+    assert {s["id"] for s in left if s.get("retry")} == set(trained)
+    # The next Dream trains from what no Dream has tried.
     worker.run(config, store)
     assert not set(Model.pools[1]) & set(trained)
 
@@ -125,19 +136,67 @@ async def test_new_practice_starts_the_next_cycle(dreams):
     add_practice(store, 1, start=10)
     assert await scheduler.enough()
     worker.run(config, store)
-    # New first; older scenes come back only as replay.
+    # The new scene, and with it the scenes of the rejected Dream, in full.
     assert "practice:sig10#v1" in Model.pools[-1]
+    assert set(Model.pools[0]) <= set(Model.pools[-1])
 
 
 def test_switching_from_hindsight_does_not_hide_practice(dreams):
+    from songe.steps import revision_id
+
     config, store = dreams
     # An installation that trained on real steps: its watermark counts
     # exchange ids, far above practice row numbers.
     store.set("experience_watermark", 5000)
     store.set("practice_revisions", {"x": 4000})
+    # Rejections counted under another mode say nothing either.
+    store.set(practice_pool.REJECTED, {s["id"]: [revision_id(s), 2] for s in practice_pool.practice_steps(store)})
     assert len(practice_pool.untrained(store)) == 3
     worker.run(config, store)
     assert len(Model.pools[-1]) == 3
+    assert {times for _, times in practice_pool.rejected(store).values()} == {1}
+
+
+def add_trainable(store, start):
+    """One new scene of a lesson that is not held out; the next free number."""
+    while practice_pool.held_out(f"sig{start}"):
+        start += 1
+    add_practice(store, 1, start=start)
+    return start + 1
+
+
+def test_a_scene_three_dreams_trained_without_adoption_counts_as_practised(dreams):
+    """A scene that keeps failing the gate is not trained in full by every
+    later Dream until something is adopted: on its third Dream that is not
+    adopted it counts as practised and comes back as replay only."""
+    config, store = dreams
+    worker.run(config, store)
+    first = set(Model.pools[-1])
+    free = 10
+    for times in (1, 2):
+        assert store.get("practice_revisions", {}) == {}
+        assert {n for scene, (_, n) in practice_pool.rejected(store).items() if scene in first} == {times}
+        free = add_trainable(store, free)
+        worker.run(config, store)
+        assert first <= set(Model.pools[-1])
+    assert set(store.get("practice_revisions", {})) == first
+    assert sorted(n for _, n in practice_pool.rejected(store).values()) == [1, 2]
+    add_trainable(store, free)
+    left = {s["id"]: s.get("retry", False) for s in practice_pool.untrained(store)}
+    assert not set(left) & first and sorted(left.values()) == [False, True, True]
+
+
+def test_a_new_learning_window_starts_without_rejected_scenes(dreams):
+    from songe.models import registry
+
+    config, store = dreams
+    registry.migrate(config, store)
+    registry.observe(config, store, "learner")
+    learner = store.scoped("learner")
+    learner.set("practice_revisions", {"practice:a#v1": 3})
+    learner.set(practice_pool.REJECTED, {"practice:b#v1": [4, 1]})
+    registry.set_learning(store, "learner", "all")
+    assert learner.get("practice_revisions") is None and learner.get(practice_pool.REJECTED) is None
 
 
 def test_the_cycle_records_which_drift_measure_gated(dreams):
@@ -593,8 +652,9 @@ def test_a_kept_dream_says_which_check_it_failed():
 
 def test_the_gate_judges_what_each_version_writes(monkeypatch):
     """What the version in use and the candidate each write at a held-out
-    moment is compared: the same action ties; a different one goes to the
-    base model's blind judgement; the report's pairs are the moments won."""
+    moment is compared: the same action ties; of two different ones each is
+    judged by the base model on its own; the report's pairs are the moments
+    won."""
     import contextlib
 
     from songe.sleep import judged
@@ -610,9 +670,8 @@ def test_the_gate_judges_what_each_version_writes(monkeypatch):
             return contextlib.nullcontext()
 
         def sample(self, prompt, seed=None, *, deterministic=False, max_tokens=None):
-            if isinstance(prompt, str):  # the judge's question
-                new_is_a = prompt.index("Answer A:") < prompt.index("pnpm add") < prompt.index("Answer B:")
-                return [], verdicts.get("say", '{"follows": "%s"}' % ("A" if new_is_a else "B")), None
+            if isinstance(prompt, str):  # the judge's question, about one answer
+                return [], verdicts.get("say", '{"follows": "%s"}' % ("yes" if "pnpm add" in prompt else "no")), None
             text = '{"name": "shell", "arguments": {"command": "%s"}}' % (
                 "pnpm add lodash" if self.weight else "npm install lodash")
             return [self.weight], text, None
@@ -641,8 +700,8 @@ def test_the_gate_judges_what_each_version_writes(monkeypatch):
     assert shown[0]["feedback"] == "use pnpm here, never npm" and shown[2]["lesson"] == "Always use pnpm."
     # The judge does not decide: a tie, whatever it said. The teacher is not
     # asked (this backend has none): its preference is what training fits.
-    for say, why in (('{"follows": "both"}', "both"), ('{"follows": "neither"}', "neither"),
-                     ("Let me think about the two answers", "unclear")):
+    for say, why in (('{"follows": "yes"}', "both"), ('{"follows": "no"}', "neither"),
+                     ("Let me think about the answer", "unclear")):
         verdicts["say"] = say
         assert judged.outcome(backend, steps[0], before["s0"], after["s0"]) == ("tie", why)
     rows = judged.judge(backend, Journal(), steps, before, after, "scale-1.0", lambda: None)
@@ -665,7 +724,7 @@ def test_judged_units_decide_and_the_kl_is_only_a_diagnostic():
     assert not d.accepted and d.reason.startswith("Not clearly better: better on 0, worse on 0")
 
 
-def test_near_identical_calls_tie_and_a_judge_that_always_picks_one_side_counts_for_nothing(monkeypatch):
+def test_near_identical_calls_tie_and_a_judge_that_says_yes_to_everything_counts_for_nothing(monkeypatch):
     """Live: two reads of snake.py (line 20 vs 21) and two "debate the
     timeout" answers were judged wins; a 3B judge preferred one position."""
     import contextlib
@@ -677,20 +736,20 @@ def test_near_identical_calls_tie_and_a_judge_that_always_picks_one_side_counts_
     assert not differs(read(20), read(21))
     monkeypatch.setattr(judged, "render", lambda tok, messages, tools, **kw: messages[0]["content"])
 
-    class AlwaysA:
+    class AlwaysYes:
         tokenizer = config = None
 
         def base(self):
             return contextlib.nullcontext()
 
         def sample(self, prompt, seed=None, *, deterministic=False, max_tokens=None):
-            return [], '{"follows": "A"}', None
+            return [], '{"follows": "yes"}', None
 
     step = {"id": "m1", "conversation": "c1", "context": [{"role": "user", "content": "run it"}],
             "hindsight": [{"role": "user", "content": "always execute the script"}]}
     before = {"text": "", "tool_calls": [{"name": "bash", "arguments": {"command": "python game.py"}}], "tokens": [1]}
     after = {"text": "", "tool_calls": [{"name": "edit", "arguments": {"path": "game.py"}}], "tokens": [2]}
-    assert judged.outcome(AlwaysA(), step, before, after) == ("tie", "both")
+    assert judged.outcome(AlwaysYes(), step, before, after) == ("tie", "both")
 
 
 def test_a_targeted_lesson_living_in_one_conversation_can_pass_per_moment():
@@ -712,9 +771,48 @@ def test_a_targeted_lesson_living_in_one_conversation_can_pass_per_moment():
     assert not decide(before, weak, min_heldout=5, drift_limit=0.05).accepted
 
 
+def test_two_answers_that_both_do_what_was_asked_tie_whatever_else_differs(monkeypatch):
+    """Live, Qwen3.5-4B as judge: "Yes, chef." and a fenced `pnpm add
+    react-query` against the bare command under "We're on pnpm here." was a
+    loss; a full sentence with the date against the bare date a loss for one
+    question and a win for the next. Asked which of two answers follows
+    better, the judge prefers one of them for reasons the feedback does not
+    name; asked about each alone, both do what was asked, and that is a tie."""
+    import contextlib
+
+    from songe.sleep import judged
+
+    monkeypatch.setattr(judged, "render", lambda tok, messages, tools, **kw: messages[0]["content"])
+    asked = []
+
+    class PrefersTheLonger:
+        tokenizer = config = None
+
+        def base(self):
+            return contextlib.nullcontext()
+
+        def sample(self, prompt, seed=None, *, deterministic=False, max_tokens=None):
+            asked.append(prompt)
+            if "Answer A:" in prompt:  # which of two: the longer one, in either order
+                a, b = prompt.split("Answer A:")[1].split("Answer B:")
+                return [], '{"follows": "%s"}' % ("A" if len(a) > len(b.split("Which answer")[0]) else "B"), None
+            return [], '{"follows": "%s"}' % ("yes" if "pnpm add" in prompt.split("answer now:")[1] else "no"), None
+
+    step = {"id": "m1", "conversation": "c1", "context": [{"role": "user", "content": "How do I add react-query to my web app?"}],
+            "hindsight": [{"role": "user", "content": "We're on pnpm here."}]}
+    before = {"text": "Yes, chef.\n\n```bash\npnpm add react-query\n```", "tool_calls": [], "tokens": [1]}
+    after = {"text": "pnpm add react-query", "tool_calls": [], "tokens": [2]}
+    old = {"text": "```bash\nnpm install react-query\n```\nThis installs the package and its types.", "tool_calls": [], "tokens": [3]}
+    assert judged.outcome(PrefersTheLonger(), step, before, after) == ("tie", "both")
+    assert all("Answer A:" not in prompt for prompt in asked)  # never asked to prefer one
+    # Only one of them does it: that one wins, however short it is.
+    assert judged.outcome(PrefersTheLonger(), step, old, after) == ("win", "judge")
+    assert judged.outcome(PrefersTheLonger(), step, after, old) == ("loss", "judge")
+
+
 def test_the_judge_s_answer_is_begun_for_it_with_thinking_switched_off(monkeypatch):
     """Live: about 4 of 14 replies could not be read. The reply is begun
-    ('{"follows": "'), so only the letter is left, and thinking is off."""
+    ('{"follows": "'), so only the word is left, and thinking is off."""
     import contextlib
 
     from songe.sleep import judged
@@ -1098,3 +1196,18 @@ def test_the_incumbents_measurements_are_kept_for_the_next_dream(tmp_path, confi
     evaluate(v, v, refs[:1], [], drift_refs=drift_refs,
              kept_as=KeptMeasurements(tmp_path, ["incumbent-b"]))
     assert len(calls) == 12 + 2 and len(list(tmp_path.iterdir())) == 1
+
+
+def test_the_judge_s_yes_or_no_is_read_after_a_preamble_and_not_from_a_longer_word():
+    """Where the tokenizer cannot take the begun reply the judge may write a
+    sentence or a thought before its JSON: still a verdict. "not sure" or
+    "nope" is neither a yes nor a no."""
+    from songe.sleep.judged import verdict
+
+    assert verdict('{"follows": "yes"}') is True
+    assert verdict('{"follows": "no"}') is False
+    assert verdict('Looking at it, the answer uses pnpm.\n{"follows": "yes"}') is True
+    assert verdict('<think>it still says npm</think>{"follows": "no"}') is False
+    assert verdict('{"follows": "not sure"}') is None
+    assert verdict('{"follows": "nope"}') is None
+    assert verdict("Let me think about the answer") is None

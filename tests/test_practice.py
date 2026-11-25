@@ -33,9 +33,17 @@ class Writer(FakeReader):
         return await super().ask(prompt, schema, name)
 
 
-def written(store, scene=None, pick=None, per_signal=1):
-    record_session(store)
+def corrected_twice(store):
+    """The same correction in two conversations. Judged a change wanted once
+    (test_reading.ANSWERS), it is a lesson to practise only when it comes up
+    again, as it is a note only then (quick.admitted)."""
+    record_session(store, ask="fix the other failing test")
+    record_session(store)  # the newest: the one its scenes are framed on
     asyncio.run(reading.read(store, FakeReader()))
+
+
+def written(store, scene=None, pick=None, per_signal=1):
+    corrected_twice(store)
     writer = Writer(scene, pick)
     asyncio.run(practice.write(store, writer, per_signal))
     return practice.practice(store), writer
@@ -57,7 +65,7 @@ def test_a_scene_is_framed_on_the_logged_request_and_kept(store):
     # The prompt carries the lesson and a short summary, never the session.
     assert "Check which file the failing test covers" in writer.prompts[0]
     assert "fix the failing test" not in writer.prompts[0]
-    # One session only: the forced choice still runs, against a stock lesson.
+    # One lesson only: the forced choice still runs, against a stock lesson.
     assert writer.asked == ["dream", "matters"] and row["checks"]["matters"] is True
     assert any(f": {text}\n" in writer.prompts[1] for text in STOCK_LESSONS)
 
@@ -78,8 +86,7 @@ def test_a_scene_with_an_unknown_tool_does_not_build(store):
 
 
 def test_the_forced_choice_drops_scenes_about_something_else(store):
-    record_session(store)
-    asyncio.run(reading.read(store, FakeReader()))
+    corrected_twice(store)
     # A second session with a different lesson gives the placebo.
     with store.connect() as db:
         db.execute(
@@ -114,7 +121,7 @@ def test_a_repeated_lesson_from_another_session_cannot_be_its_own_placebo(store)
 
 
 def test_a_first_session_scene_about_something_else_is_dropped(store):
-    # With one session there is no other lesson to compare with; the scene
+    # With one lesson there is no other lesson to compare with; the scene
     # used to be kept unchecked (matters stayed None, and None is not a drop).
     row = written(store, pick="neither")[0][0]
     assert row["checks"]["matters"] is False and row["drop"] == "matters"
@@ -148,17 +155,26 @@ def test_scenes_are_written_up_to_the_target_and_go_with_their_signal(store):
     counts = practice.counts(store)
     assert counts == {"written": 2, "kept": 2, "dropped": 0, "dropped_by": {}}
     # The session is read again and its signal is gone: so are its scenes.
+    session = rows[0]["signal"]["session"]
     with store.connect() as db:
-        session, ids = next(iter(timeline.sessions(db).items()))
+        ids = timeline.sessions(db)[session]
     reading.save(store, session, max(ids) + 1, [], [])
     assert practice.practice(store) == []
 
 
 def test_forget_deletes_practice(store):
+    from songe.practice.pool import REJECTED
+
     written(store)
+    # Scene ids start again after forgetting: what a rejected Dream trained
+    # must not match the new ones (they were then never untrained).
+    other = store.scoped("another-model")
+    for view in (store, other):
+        view.set(REJECTED, {"practice:x#v1": [3, 1]})
     store.forget()
     with store.connect() as db:
         assert db.execute("SELECT COUNT(*) FROM practice").fetchone()[0] == 0
+    assert store.get(REJECTED) is None and other.get(REJECTED) is None
 
 
 def test_not_copy_catches_non_latin_verbatim_requests():
@@ -240,3 +256,193 @@ def test_a_chat_without_tools_or_system_message_gives_a_plain_scene():
     # A logged system prompt is still the frame's.
     framed = frame_from_request({"messages": [{"role": "system", "content": "Be brief."}] + request["messages"]}, "x")
     assert build(scene, framed)[0][0] == {"role": "system", "content": "Be brief."}
+
+
+# ---- A plain chat: new messages of the same kind, kept when the note changes the answer ----
+
+CHAT_SIGNAL = {
+    "id": "c0ffee00aa", "type": "correction", "source": "user", "session": "s-chat", "from": None,
+    "generality": "always", "text": "I use uv, not pip.", "lesson": "Use uv to install packages, not pip.",
+    "exchanges": {"1": 1},
+}
+CHAT_REQUEST = {"messages": [{"role": "user", "content": "How do I install requests?"}]}
+CHAT_ITEMS = [{"kind": "user", "content": "How do I install requests?"}]
+NEW_MESSAGES = ["What do I run to get numpy into this project?", "Add pandas for me, which command?",
+                "I need httpx here. How?"]
+
+
+class ChatWriter(FakeReader):
+    """Writes `messages`; answers a scene with `plain`, or with `taught` when
+    the scene's note is shown; judges for the answer given in `follows`
+    ("taught", "plain", or a fixed letter)."""
+
+    def __init__(self, messages=NEW_MESSAGES, plain="pip install it", taught="uv add it", follows="taught",
+                 reasoned=False):
+        super().__init__()
+        self.messages, self.plain, self.taught = messages, plain, taught
+        self.follows, self.reasoned = follows, reasoned
+        self.prompts, self.replied = [], []
+
+    async def ask(self, prompt, schema, name, *, temperature=0, max_tokens=None):
+        self.asked.append(name)
+        self.prompts.append(prompt)
+        if name == "dream":
+            return {"messages": list(self.messages)}
+        assert name == "changes"
+        if self.follows in ("A", "B", "both", "neither"):
+            return {"follows": self.follows}
+        wanted = self.taught if self.follows == "taught" else self.plain
+        first = prompt.split("Answer A:\n", 1)[1].split("\n\nAnswer B:", 1)[0]
+        return {"follows": "A" if first == wanted else "B"}
+
+    async def reply(self, messages, *, max_tokens, temperature=0, think=None):
+        self.replied.append(messages)
+        noted = "Not part of the conversation" in messages[-1]["content"]
+        return {"content": self.taught if noted else self.plain, "finished": True, "reasoned": self.reasoned}
+
+
+def chat_written(store, monkeypatch, writer, variants=(1, 2, 3), request=CHAT_REQUEST):
+    monkeypatch.setattr(practice, "wanted", lambda store, per_signal: [(CHAT_SIGNAL, list(variants))])
+    monkeypatch.setattr(practice, "source", lambda store, signal: (request, CHAT_ITEMS))
+    asyncio.run(practice.write(store, writer, len(variants)))
+    return practice.practice(store)
+
+
+def test_a_plain_chat_practises_new_messages_of_the_same_kind(store, monkeypatch):
+    """A chat with no tools: each scene is a new conversation that opens with
+    a message of the kind the user sent before their feedback. The writer
+    sees that message and never the lesson, so no scene can state it; one
+    answer holds every scene. Live, the three-message scenes had the user
+    say the lesson again ("... but remember to use pnpm instead of npm")."""
+    writer = ChatWriter()
+    rows = chat_written(store, monkeypatch, writer)
+    assert [r["messages"] for r in rows] == [[{"role": "user", "content": m}] for m in NEW_MESSAGES]
+    assert all(r["tools"] == [] and r["drop"] is None for r in rows)
+    assert writer.asked.count("dream") == 1
+    asked = writer.prompts[0]
+    assert "How do I install requests?" in asked and "3 new messages" in asked
+    assert "uv" not in asked and "pip" not in asked
+    # The forced choice between two lessons is not asked: a scene that does
+    # not state its lesson gave the model nothing to pick it by.
+    assert "matters" not in writer.asked and all(r["checks"]["matters"] is None for r in rows)
+    assert all(r["teacher_note"].endswith("Lesson: Use uv to install packages, not pip.") for r in rows)
+    # A logged system prompt opens each new conversation too.
+    with_system = {"messages": [{"role": "system", "content": "Be brief."}] + CHAT_REQUEST["messages"]}
+    rows = chat_written(store, monkeypatch, ChatWriter(), request=with_system)
+    assert rows[0]["messages"][0] == {"role": "system", "content": "Be brief."}
+    assert rows[0]["messages"][1]["role"] == "user" and len(rows[0]["messages"]) == 2
+
+
+def test_a_plain_scene_is_kept_when_its_note_changes_the_answer(store, monkeypatch):
+    """The served model answers the scene alone and with the note; the
+    scene is kept when the judge, asked in both orders, picks the answer
+    with the note. That answer is stored with the scene."""
+    writer = ChatWriter()
+    rows = chat_written(store, monkeypatch, writer)
+    assert all(r["checks"]["changes"] is True for r in rows)
+    assert rows[0]["teacher_answer"] == {"content": "uv add it", "finished": True}
+    # Two answers per scene: the scene alone, then with its note as an aside.
+    alone, noted = writer.replied[:2]
+    assert alone == rows[0]["messages"]
+    assert noted[:-1] == rows[0]["messages"] and "Lesson: Use uv to install" in noted[-1]["content"]
+    # The judge reads the user's own words, each pair in both orders.
+    judged = [p for p, name in zip(writer.prompts, writer.asked, strict=True) if name == "changes"]
+    assert len(judged) == 6 and all("I use uv, not pip." in p for p in judged)
+    # Asked what the feedback asks, not which answer is the better one.
+    assert all("Judge only that, not which answer is longer" in p for p in judged)
+    assert "Answer A:\npip install it" in judged[0] and "Answer A:\nuv add it" in judged[1]
+
+
+def test_a_plain_scene_is_kept_when_the_judge_cannot_tell_in_one_order(store, monkeypatch):
+    """Live: of 384 scenes 173 were kept, and many dropped ones did follow
+    the lesson (answers that began "Yes, chef.", bare SQL under "Only the
+    query please"): the judge said "neither" in one of the two orders."""
+
+    class Unsure(ChatWriter):
+        async def ask(self, prompt, schema, name, **kw):
+            answer = await super().ask(prompt, schema, name, **kw)
+            if name == "changes" and "Answer A:\nuv add it" in prompt:
+                return {"follows": "neither"}
+            return answer
+
+    rows = chat_written(store, monkeypatch, Unsure())
+    assert all(r["drop"] is None and r["why"]["changes"] == ["after", "neither"] for r in rows)
+    assert rows[0]["teacher_answer"] == {"content": "uv add it", "finished": True}
+
+
+def test_a_plain_scene_the_note_does_not_change_is_dropped(store, monkeypatch):
+    # The same answer with and without the note: nothing to learn here, and
+    # the judge is not asked.
+    same = ChatWriter(taught="pip install it")
+    rows = chat_written(store, monkeypatch, same)
+    assert {r["drop"] for r in rows} == {"changes"} and "changes" not in same.asked
+    assert rows[0]["why"]["changes"] == "same" and "teacher_answer" not in rows[0]
+    # The judge prefers the answer without the note, or the first one shown
+    # whatever it is (a position preference), or neither: dropped.
+    for follows in ("plain", "A", "neither"):
+        store_rows = chat_written(store, monkeypatch, ChatWriter(follows=follows))
+        assert {r["drop"] for r in store_rows} == {"changes"}, follows
+
+
+def test_a_plain_scene_of_a_reasoning_server_is_kept_without_an_answer(store, monkeypatch):
+    """A server that reasons first: the scene is still judged on what the
+    user would see, but its answer is not stored (the scene's own prompt
+    does not lead into that reasoning)."""
+    rows = chat_written(store, monkeypatch, ChatWriter(reasoned=True))
+    assert all(r["drop"] is None and "teacher_answer" not in r for r in rows)
+
+
+class Reasoner(ChatWriter):
+    """A server that reasons first: asked as its users ask, the reasoning
+    takes the whole room (no content, cut off). With `switch` it replies when
+    the reader's switches turn reasoning off; without, only given more room."""
+
+    def __init__(self, switch):
+        super().__init__()
+        self.switch, self.how = switch, []
+
+    async def reply(self, messages, *, max_tokens, temperature=0, think=None):
+        self.how.append((think, max_tokens))
+        answer = await super().reply(messages, max_tokens=max_tokens)
+        if think is False and self.switch:
+            return answer
+        if max_tokens > 384:
+            return answer | {"reasoned": True}
+        return {"content": "", "finished": False, "reasoned": True}
+
+
+def test_a_server_whose_reasoning_takes_the_whole_room_still_gets_plain_scenes(store, monkeypatch):
+    """Empty content, reasoning present, cut off: both answers looked the
+    same and every scene was dropped, so a reasoning server got no plain-chat
+    practice. The two answers are asked again with reasoning switched off,
+    and the scenes after the first start there. Judged, kept, and never
+    stored to train along: as served, the model reasons first."""
+    writer = Reasoner(switch=True)
+    rows = chat_written(store, monkeypatch, writer)
+    assert all(r["drop"] is None and "teacher_answer" not in r for r in rows)
+    assert writer.how == [(None, 384)] * 2 + [(False, 384)] * 6
+
+
+def test_a_server_that_ignores_the_reasoning_switches_is_given_more_room(store, monkeypatch):
+    writer = Reasoner(switch=False)
+    rows = chat_written(store, monkeypatch, writer)
+    assert all(r["drop"] is None and "teacher_answer" not in r for r in rows)
+    assert writer.how == [(None, 384)] * 2 + [(False, 384)] * 2 + [(None, 384 + 2048)] * 6
+    # A reply that is still empty with all that room is a scene the note did not change.
+    writer = Reasoner(switch=False)
+    monkeypatch.setattr("songe.practice.checks.HOW_ASKED", ({}, {"think": False}))
+    rows = chat_written(store, monkeypatch, writer, variants=(4,))
+    assert rows[-1]["drop"] == "changes" and rows[-1]["id"].endswith("#v4")
+
+
+def test_fewer_plain_messages_than_asked_leave_scenes_that_did_not_build(store, monkeypatch):
+    writer = ChatWriter(messages=["Add pandas for me, which command?", " add pandas for me, which command? ", 7])
+    rows = chat_written(store, monkeypatch, writer)
+    assert [r["drop"] for r in rows] == [None, "built", "built"]
+    assert rows[1]["scene"] == {"error": "no message written"}
+
+
+def test_a_plain_message_copied_from_the_chat_is_dropped(store, monkeypatch):
+    writer = ChatWriter(messages=["How do I install requests?"])
+    rows = chat_written(store, monkeypatch, writer, variants=(1,))
+    assert rows[0]["drop"] == "not_copy" and writer.replied == []

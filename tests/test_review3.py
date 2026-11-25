@@ -2,7 +2,9 @@
 
 import asyncio
 import json
+import sys
 from types import SimpleNamespace
+from urllib.parse import urlsplit
 
 import httpx
 import pytest
@@ -191,22 +193,32 @@ def test_existing_server_init_uses_private_endpoint(
     assert Config.load(root).upstream_url == saved.upstream_url
 
 
-async def test_mlx_failed_bind_never_requests_user_endpoint(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "server_command",
+    [[], ["/opt/omarchy/bin/python", "-m", "mlx_omarchy_serve._mlxlm_server"]],
+)
+async def test_mlx_failed_bind_never_requests_user_endpoint(
+    tmp_path, monkeypatch, server_command
+):
     from songe import memory, platform
     from songe.upstream import mlx
 
     requests = []
+    launches = []
     config = Config(
         upstream="mlx",
         model=str(tmp_path / "base"),
         upstream_url="http://127.0.0.1:1235/v1",
+        server_command=server_command,
     )
     upstream = mlx.MLX(config, tmp_path)
 
     async def spawn(*args, **kwargs):
+        launches.append(args)
         return SimpleNamespace(returncode=1)
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    monkeypatch.setattr(memory, "owned_command", lambda args: args)
     monkeypatch.setattr(memory, "guard", lambda *args, **kwargs: None)
     monkeypatch.setattr(platform, "current", memory_platform)
 
@@ -219,6 +231,17 @@ async def test_mlx_failed_bind_never_requests_user_endpoint(tmp_path, monkeypatc
         await upstream.load({"identifier": "ours", "artifact": config.model})
     assert requests == [] and upstream.version is None
     assert config.server_owned and config.upstream_url != "http://127.0.0.1:1235/v1"
+    assert launches == [
+        (
+            *(server_command or [sys.executable, "-m", "mlx_lm", "server"]),
+            "--model",
+            config.model,
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(urlsplit(config.upstream_url).port),
+        )
+    ]
 
 
 def test_transient_psi_cannot_poison_persisted_sizing(tmp_path):

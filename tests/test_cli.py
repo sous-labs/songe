@@ -769,3 +769,24 @@ def test_init_names_models_the_way_the_agents_show_them(tmp_path, monkeypatch, c
     assert cli.next_step(cli.Config()) == (
         "One step left · pick a Songe model in opencode with /models"
     )
+
+
+def test_init_finishes_with_aiders_yaml_settings(tmp_path, config, monkeypatch):
+    # finish_initialization compared files as JSON and failed on Aider's YAML
+    # ("Expecting value: line 1 column 1"), seen end to end (#64).
+    from types import SimpleNamespace
+
+    from songe import agents, cli, launchd
+
+    home = tmp_path / "home"
+    (home / ".aider").mkdir(parents=True)
+    monkeypatch.setattr(agents.Path, "home", lambda: home)
+    monkeypatch.setattr(launchd, "install", lambda *a, **k: None)
+    root = tmp_path / "data"
+    root.mkdir()
+    changes = agents.proposed(config, home, root=root)
+    args = SimpleNamespace(launchd_target=tmp_path / "plist", make_default=False, keep_default=False)
+    cli.finish_initialization(config, args, root, changes, lambda: agents.proposed(config, home, root=root))
+    text = (home / ".aider.model.settings.yml").read_text(encoding="utf-8")
+    assert "name: openai/" + config.public_model in text
+    assert (home / ".aider.model.metadata.json").exists()

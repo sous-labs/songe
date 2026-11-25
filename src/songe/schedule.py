@@ -1436,7 +1436,15 @@ class Scheduler:
                             "Update could not be loaded by the model server"
                         )
                         self.store.night(night["id"], status="rejected", record=record)
-                        self.store.set("experience_watermark", record["watermark"])
+                        if self.store.get("learning_mode", "hindsight") == "dreams":
+                            # Not adopted, so not practised: under Dreams the
+                            # watermark counts practice scenes, and moving it
+                            # hid this Dream's scenes from every later one.
+                            from .practice.pool import keep_for_retry
+
+                            keep_for_retry(self.store, record.get("practice_revisions") or {})
+                        else:
+                            self.store.set("experience_watermark", record["watermark"])
                     else:
                         self.store.night(night["id"], record=record)
                     self.state = "awake"
@@ -1591,6 +1599,7 @@ class ModelScheduler(Scheduler):
         self.serving_model = None
         self.load_refused = {}
         self.serving_binding = None
+        self.answered_running = False
         super().__init__(config, store, upstream, platform)
 
     def unloads(self):
@@ -2422,6 +2431,16 @@ class ModelScheduler(Scheduler):
             refs = await asyncio.to_thread(
                 registry.discover, self.installation_config, self.upstream
             )
+            waiting = set()
+            if self.installation_config.upstream == "llamacpp":
+                from .models import discovery
+
+                config = self.installation_config
+                waiting = await asyncio.to_thread(
+                    discovery.llamaswap_waiting,
+                    config.server_source_url or config.upstream_url,
+                    getattr(self.upstream, "transport", None),
+                )
         except (OSError, ValueError, RuntimeError, KeyError, httpx.HTTPError) as exc:
             # A server that is down or answers oddly leaves the models pending
             # for a later tick; it must never end the tick (issue #8).
@@ -2429,7 +2448,13 @@ class ModelScheduler(Scheduler):
             return
         for row in unknown:
             ref = next((r for r in refs if r.serving_id == row["id"]), None)
-            if ref is None:
+            if ref is None and row["id"] in waiting:
+                # Its weights are named once llama-swap runs it (the user
+                # switched models, or its ttl unloaded it): not given up on.
+                registry.support(
+                    self.installation_store, row["id"], "pending", "waiting until llama-swap runs it"
+                )
+            elif ref is None:
                 registry.support(
                     self.installation_store,
                     row["id"],
@@ -2477,11 +2502,11 @@ class ModelScheduler(Scheduler):
         """A model already loaded on the server; reviewing never loads one."""
         from .models import registry
 
-        listing = getattr(self.upstream, "listing", None)
-        if listing is None:
+        items = await self.loaded_listing()
+        if items is None:
             return self.installation_config.base_identifier or None
         ids = {r["id"] for r in registry.entries(self.installation_store)}
-        for item in await listing():
+        for item in items:
             identifier = item.get("identifier")
             if item.get("type", "llm") == "llm" and (
                 identifier in ids or str(identifier).startswith("songe/")
@@ -2551,14 +2576,32 @@ class ModelScheduler(Scheduler):
     async def loaded_identifiers(self):
         """Identifiers of the models loaded on the server right now; None when
         the server cannot list them (then the configured one is assumed)."""
-        listing = getattr(self.upstream, "listing", None)
-        if listing is None:
+        items = await self.loaded_listing()
+        if items is None:
             return None
-        return {
-            item.get("identifier")
-            for item in await listing()
-            if item.get("type", "llm") == "llm"
-        }
+        return {item.get("identifier") for item in items if item.get("type", "llm") == "llm"}
+
+    async def loaded_listing(self):
+        """The server's loaded models as {"identifier", "type"}, or None when
+        it cannot say."""
+        listing = getattr(self.upstream, "listing", None)
+        if listing is not None:
+            return await listing()
+        # llama-swap behind the generic client (init found no weights to read)
+        # still loads whatever is asked for: its /running says what is loaded.
+        from .models import discovery
+
+        config = self.installation_config
+        loaded = await asyncio.to_thread(
+            discovery.llamaswap_loaded,
+            getattr(config, "server_source_url", "") or config.upstream_url,
+            getattr(self.upstream, "transport", None),
+        )
+        if loaded is None and not self.answered_running:
+            return None
+        # Once it has answered, a failed /running means nothing is loaded.
+        self.answered_running = True
+        return [{"identifier": i, "type": "llm"} for i in loaded or []]
 
     async def read_sessions(
         self, *, force=False, only=None, practice=False, seconds=None, quick=False
@@ -2568,7 +2611,8 @@ class ModelScheduler(Scheduler):
         model being trained does the reading. practice: also write practice
         scenes (Deep Dream's first step; never in short pauses). seconds: a
         reading budget (Quick Dream). quick: publish the prompt lessons after
-        reading. Never loads a model; a learner whose model is not loaded
+        reading (a Deep Dream's reading does too, before it writes practice).
+        Never loads a model; a learner whose model is not loaded
         waits. Returns how many sessions were read and scenes written."""
         if self.installation_config.learning != "dreams":
             return 0
@@ -2714,6 +2758,17 @@ class ModelScheduler(Scheduler):
                             # prompt: said with what it read (live: 5 read, 9
                             # moments, 0 lessons; then just "nothing new").
                             learner.set("quick_checked", checked | {"read": read, "found": activity.get("found_count", 0)})
+                    elif practice:
+                        # A Deep Dream that read conversations no Quick Dream
+                        # had read (pressed early, or a backlog) writes their
+                        # lessons into the prompt as a Quick Dream would,
+                        # before practice and the check. Live: a Dream read
+                        # the rest of the chats, trained on their lessons and
+                        # was checked against a prompt holding 8 notes for
+                        # four of the eight habits; the other notes arrived
+                        # with the next Quick Dream, after the gate. Nothing
+                        # new since the last Quick Dream: nothing happens.
+                        await self.quick_dream(model, reader=reader)
                     failed = getattr(reader, "failed_sessions", None)
                     if failed:
                         # The model's answers could not be read: said on the
@@ -3117,7 +3172,17 @@ class ModelScheduler(Scheduler):
             )
             self.active_model = None
             return
-        kinds = {a.kind for a in self.platform.accelerators()}
+        platform = self.platform
+        if self.config.backend == "mlx" and platform.name == "linux":
+            from .memory import TrainingPlatform
+
+            platform = TrainingPlatform(platform, self.config)
+        try:
+            kinds = {a.kind for a in await asyncio.to_thread(platform.accelerators)}
+        except OSError as exc:
+            self.reason = str(exc)
+            self.active_model = None
+            return
         if kinds <= {"cpu"} and not (
             self.config.force_cpu_training
             or self.config.torch_options.get("force_cpu", False)

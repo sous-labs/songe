@@ -9,8 +9,12 @@
   <a href="#-how-it-works">How it works</a> •
   <a href="#-commands">Commands</a> •
   <a href="ROADMAP.md">Roadmap</a> •
-  <a href="https://discord.gg/cBEywVkXjY">Discord</a> •
+  <a href="https://discord.gg/6bYCjyjr5z">Discord</a> •
   <a href="https://souslabs.ai">Website</a>
+</p>
+
+<p align="center">
+  <a href="https://discord.gg/6bYCjyjr5z"><img src="https://img.shields.io/badge/Join_our_Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Join our Discord" height="36"></a>
 </p>
 
 <p align="center">
@@ -23,7 +27,8 @@ Use your local model as usual through opencode, pi or any OpenAI-compatible
 tool. While you work, Songe notices what happens after each of the model's
 actions: the tool result, the error, your next message. When your agent is
 quiet, it teaches the model to see those coming. A new version is used only
-if it passes its checks, and nothing ever leaves your machine.
+if it passes its checks, and nothing leaves your machine unless you turn on
+the optional cloud learning.
 
 ## ✨ Highlights
 
@@ -36,7 +41,9 @@ if it passes its checks, and nothing ever leaves your machine.
   own conversations; one click goes back to any earlier version.
 - **Stays out of the way.** Runs only when your agent is quiet, memory is free
   and the battery is fine, and stops the moment you are back.
-- **Private.** No account, no telemetry, no cloud. Songe never runs your tools.
+- **Private.** No account, no telemetry, no cloud unless you opt in: `songe
+  cloud on` lets the nightly Dream ask a cloud model you choose, with secrets
+  redacted and a nightly budget. Songe never runs your tools.
 
 ## 📥 Install
 
@@ -157,6 +164,7 @@ once, and trains on what fits. See [DESIGN.md](DESIGN.md).
 | `songe sleep` | start a Deep Dream now |
 | `songe undo MODEL` | go back one version |
 | `songe pause` / `songe resume` | stop and restart learning |
+| `songe cloud on\|off\|status\|test` | optional: let Dreams ask a cloud model you choose |
 | `songe doctor` | check the setup |
 | `songe forget` | delete recorded conversations (learned versions stay) |
 | `songe uninstall` | stop the service and restore your agent settings |
@@ -187,7 +195,7 @@ service moves to the new version by itself in a quiet moment.
 
 Where Songe is going: [ROADMAP.md](ROADMAP.md). Ideas and bugs are welcome as
 [issues](https://github.com/sous-labs/songe/issues). Questions and results from your nights go in
-[Discord](https://discord.gg/cBEywVkXjY). To contribute, see
+[Discord](https://discord.gg/6bYCjyjr5z). To contribute, see
 [CONTRIBUTING.md](CONTRIBUTING.md). Security reports: [SECURITY.md](SECURITY.md).
 
 Licensed under [Apache-2.0](LICENSE).

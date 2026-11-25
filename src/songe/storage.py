@@ -138,6 +138,7 @@ OWNED_ENTRIES = frozenset(
         "backups",
         "blobs",
         "calibration.json",
+        "cloud-key",
         "config.toml",
         "context-summaries",
         "manifests",

@@ -4,7 +4,9 @@ Each signal with a lesson gets `practice_per_signal` scenes, written by the
 learner's own loaded model (sampled, so variants differ) in idle gaps, the
 same way reading runs. A scene is framed on the logged request at the
 signal's responsible step: its real system prompt and tool schemas, with the
-working directory moved to a sibling folder. Scenes are stored with their
+working directory moved to a sibling folder. A plain chat (a request with no
+tools) gets new conversations instead: each opens with a message of the same
+kind as the one the user sent there. Scenes are stored with their
 check results; only kept ones are trained on. A signal that is replaced (its
 session was read again) takes its scenes with it.
 """
@@ -70,9 +72,18 @@ def clusters(signals, have=None):
 
 
 def lesson_signals(store):
+    """The signals Deep Dream practises: those of LESSON_TYPES with the
+    evidence a note needs, and no others (quick.admitted, one bar for both).
+    A lesson that does not fit the prompt (one kind of task) is practised
+    all the same."""
+    from ..quick import admitted, evidenced
     from ..reading.store import signals
 
-    return [s for s in signals(store, types=LESSON_TYPES) if s.get("lesson") and s.get("exchanges")]
+    allowed = {i for cluster in admitted(store, fits=evidenced) for i in cluster["signals"]}
+    return [
+        s for s in signals(store, types=LESSON_TYPES)
+        if s.get("lesson") and s.get("exchanges") and s["id"] in allowed
+    ]
 
 
 def cluster_of(store):
@@ -201,6 +212,67 @@ async def write_one(store, reader, signal, variant, request, items, lessons, wor
     return row
 
 
+def asked(request):
+    """The user's last message in a logged request: what they asked for
+    right before the answer their feedback is about."""
+    from ..steps import CONTINUED
+
+    for message in reversed(request.get("messages") or []):
+        said = timeline.text(message.get("content")).strip()
+        if message.get("role") == "user" and said and not said.startswith(CONTINUED):
+            return said
+    return ""
+
+
+async def like_messages(reader, request, count):
+    """`count` new user messages of the same kind as the one a plain chat's
+    lesson came from, in one answer (fewer when the model wrote fewer)."""
+    answer = await reader.ask(
+        P.LIKE.format(asked=timeline.clip(asked(request), 1200), count=count),
+        P.LIKE_SCHEMA,
+        "dream",
+        temperature=0.8,
+        max_tokens=300 + 150 * count,
+    )
+    seen, messages = set(), []
+    for text in answer.get("messages") or []:
+        text = text.strip() if isinstance(text, str) else ""
+        if text and text.lower() not in seen:
+            seen.add(text.lower())
+            messages.append(text)
+    return messages[:count]
+
+
+async def write_like(store, reader, signal, variant, request, items, lessons, text):
+    """One scene of a plain chat: a new conversation that opens with `text`,
+    under the logged system prompt if there was one. An empty text (the
+    model wrote fewer messages than asked) is a scene that did not build."""
+    row = {
+        "id": f"{signal['id']}#v{variant}",
+        "signal_id": signal["id"],
+        "signal": {k: signal.get(k) for k in ("type", "source", "lesson", "generality", "session", "from")},
+        "variant": variant,
+        "topic": None,
+        "scene": {"request": text} if text else {"error": "no message written"},
+        "teacher_note": P.teacher_note(signal),
+    }
+    if text:
+        frame = frame_from_request(request, "chat")
+        system = [{"role": "system", "content": frame["system"]}] if frame["system"] else []
+        row.update(
+            messages=system + [{"role": "user", "content": text}],
+            tools=[],
+            problems=[],
+            final_files={},
+        )
+    else:
+        row["problems"] = [row["scene"]["error"]]
+    row["checks"], row["drop"], row["why"] = await check(
+        row, signal, items, reader, lessons, plain=True
+    )
+    return row
+
+
 async def write(store, reader, per_signal, *, limit=None):
     """Write missing scenes until done or the user returns. Returns how many
     scenes were written (kept or not)."""
@@ -216,11 +288,24 @@ async def write(store, reader, per_signal, *, limit=None):
         if not request:
             continue
         workdir = workdir_of([(None, request, None, None)])
+        # A plain chat (no tools): every missing scene is a new message of the
+        # kind the user sent, all written in one answer.
+        plain = not request.get("tools") and bool(asked(request))
+        texts = None
         for v in variants:
             row = None
             for wait in (*RETRY_WAITS, None):
                 try:
-                    row = await write_one(store, reader, signal, v, request, items, lessons, workdir)
+                    if plain and texts is None:
+                        texts = await like_messages(reader, request, len(variants))
+                    row = await (
+                        write_like(
+                            store, reader, signal, v, request, items, lessons,
+                            texts[variants.index(v)] if variants.index(v) < len(texts) else "",
+                        )
+                        if plain
+                        else write_one(store, reader, signal, v, request, items, lessons, workdir)
+                    )
                     break
                 except Stopped:
                     return done

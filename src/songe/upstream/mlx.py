@@ -73,13 +73,13 @@ class MLX:
         self.stopping = False
         self.finished = threading.Event()
         port = urlparse(self.config.upstream_url).port or 1235
+        command = self.config.server_command or [
+            sys.executable, "-m", "mlx_lm", "server"
+        ]
         self.process = await asyncio.create_subprocess_exec(
             *owned_command(
                 [
-                    sys.executable,
-                    "-m",
-                    "mlx_lm",
-                    "server",
+                    *command,
                     "--model",
                     model or self.config.model,
                     "--host",

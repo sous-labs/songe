@@ -2,6 +2,8 @@ import json
 import plistlib
 from pathlib import Path
 
+import pytest
+
 from songe import agents, launchd
 from songe.agents.opencode import configure
 
@@ -431,3 +433,249 @@ def test_an_opencode_file_of_another_shape_binds_nothing(tmp_path, monkeypatch):
     for text in ("[]", '{"model": 5}', '{"model": "x/y", "provider": {"x": "str"}}'):
         (folder / "opencode.json").write_text(text, encoding="utf-8")
         assert OpenCode().binding(tmp_path) == ("", "")
+
+
+def aider_home(tmp_path):
+    home = tmp_path / "home"
+    (home / ".aider").mkdir(parents=True)  # Aider has run once
+    return home
+
+
+def test_aider_gets_named_songe_models_and_restore_undoes_them(tmp_path, config, monkeypatch):
+    # #64: Aider reaches Songe through per-model entries; OPENAI_API_BASE
+    # would also send the user's real OpenAI models to Songe.
+    import yaml
+
+    monkeypatch.delenv("AIDER_MODEL", raising=False)
+    home = aider_home(tmp_path)
+    settings = home / ".aider.model.settings.yml"
+    original = b"- name: gpt-4o\n  edit_format: diff\n"
+    settings.write_bytes(original)
+    root = tmp_path / "songe"
+    root.mkdir()
+    changes = agents.proposed(config, home)
+    assert sorted(p.name for p, *_ in changes) == [
+        ".aider.model.metadata.json",
+        ".aider.model.settings.yml",
+    ]
+    agents.apply(changes, root)
+    name = "openai/" + config.public_model
+    entries = {e["name"]: e for e in yaml.safe_load(settings.read_text(encoding="utf-8"))}
+    assert entries["gpt-4o"] == {"name": "gpt-4o", "edit_format": "diff"}
+    assert entries[name]["extra_params"] == {
+        "api_base": "http://127.0.0.1:7613/v1",
+        "api_key": "local",
+    }
+    metadata = json.loads((home / ".aider.model.metadata.json").read_text(encoding="utf-8"))
+    assert metadata[name]["max_input_tokens"] == 8192
+    assert metadata[name]["litellm_provider"] == "openai"
+    assert not agents.proposed(config, home)  # idempotent
+    assert agents.routing(home) == {"aider": False}
+    assert agents.restore(root) == []
+    assert settings.read_bytes() == original
+    assert not (home / ".aider.model.metadata.json").exists()
+
+
+def test_aider_entries_follow_the_servers_context(tmp_path, config):
+    home = aider_home(tmp_path)
+    root = tmp_path / "songe"
+    root.mkdir()
+    agents.apply(agents.proposed(config, home), root)
+    config.served_contexts = {config.public_model: 32768}
+    assert len(agents.refresh_limits(config, home, root=root)) == 1
+    metadata = json.loads((home / ".aider.model.metadata.json").read_text(encoding="utf-8"))
+    assert metadata["openai/" + config.public_model]["max_input_tokens"] == 32768
+    assert agents.restore(root) == []
+
+
+def test_commented_aider_settings_leave_all_of_aider_alone_with_notes(
+    tmp_path, config, capsys
+):
+    # Metadata without the settings' api_base would send openai/songe/...
+    # to api.openai.com with the user's key: Aider gets both files or none.
+    home = aider_home(tmp_path)
+    settings = home / ".aider.model.settings.yml"
+    settings.write_text("# my models\n- name: gpt-4o\n", encoding="utf-8")
+    assert agents.proposed(config, home) == []
+    note = capsys.readouterr().err
+    assert f"Skipped {settings} · it has comments" in note
+    assert f"Skipped {home / '.aider.model.metadata.json'} · {settings.name} is skipped" in note
+    assert "api_base: http://127.0.0.1:7613/v1" in note and "max_input_tokens" in note
+
+
+def test_doctor_and_plan_name_aider_once(tmp_path, config, monkeypatch, capsys):
+    from songe import cli
+
+    home = aider_home(tmp_path)
+    root = tmp_path / "songe"
+    root.mkdir()
+    changes = agents.proposed(config, home)
+    assert {cli.agent_name(p) for p, *_ in changes} == {"aider"}
+    agents.apply(changes, root)
+    settings = home / ".aider.model.settings.yml"
+    adapter = agents.adapter_for(settings)
+    assert adapter.status(settings, agents.load(settings), config) == "configured"
+    assert adapter.pick == "--model openai/songe/…"
+    assert "aider" not in agents.KNOWN  # never listed as "not found"
+
+
+def test_restore_reads_each_file_with_the_codec_it_was_written_with(
+    tmp_path, config, monkeypatch
+):
+    # The manifest records the codec, so a later Songe that no longer knows
+    # the file (or maps its name differently) still undoes it exactly.
+    from pathlib import Path
+
+    home = aider_home(tmp_path)
+    settings = home / ".aider.model.settings.yml"
+    original = b"- name: gpt-4o\n  edit_format: diff\n"
+    settings.write_bytes(original)
+    root = tmp_path / "songe"
+    root.mkdir()
+    agents.apply(agents.proposed(config, home), root)
+    manifest = json.loads((root / "agent-backups.json").read_text(encoding="utf-8"))
+    assert {Path(k).name: v["codec"] for k, v in manifest.items()} == {
+        ".aider.model.settings.yml": "yaml-list:name",
+        ".aider.model.metadata.json": "json",
+    }
+    monkeypatch.setattr(agents, "ADAPTERS", agents.ADAPTERS[:2])  # no Aider
+    assert agents.restore(root) == []
+    assert settings.read_bytes() == original
+
+
+@pytest.mark.parametrize(
+    "raw,why",
+    [
+        (b"- name: gpt-4o\n- name: gpt-4o\n  edit_format: diff\n", "two entries named gpt-4o"),
+        (b"- name: caf\xe9\n", "it is not UTF-8"),
+        (b"{}\n", "not a list of entries"),
+        (b"0\n", "not a list of entries"),
+        (b"false\n", "not a list of entries"),
+    ],
+)
+def test_aider_settings_songe_cannot_rewrite_are_left_alone(tmp_path, config, capsys, raw, why):
+    # Repeated names would lose one entry for good; non-UTF-8 crashed init;
+    # `{}`, `0` and `false` were read as an empty list and replaced.
+    home = aider_home(tmp_path)
+    settings = home / ".aider.model.settings.yml"
+    settings.write_bytes(raw)
+    assert agents.proposed(config, home) == []
+    assert why in capsys.readouterr().err
+    assert settings.read_bytes() == raw
+
+
+def test_non_utf8_json_config_is_skipped_not_a_crash(tmp_path, config, monkeypatch, capsys):
+    home, _ = installed(tmp_path, monkeypatch)
+    oc = home / ".config/opencode/opencode.json"
+    oc.write_bytes(b'{"theme": "caf\xe9"}')
+    assert [c[0] for c in agents.proposed(config, home)] == [home / ".pi/agent/models.json"]
+    assert f"Skipped {oc} · it is not UTF-8" in capsys.readouterr().err
+    assert agents.refresh_limits(config, home) == []
+
+
+def test_yaml_user_edit_then_uninstall_keeps_their_entries(tmp_path, config):
+    import yaml
+
+    home = aider_home(tmp_path)
+    settings = home / ".aider.model.settings.yml"
+    settings.write_bytes(b"- name: gpt-4o\n  edit_format: diff\n")
+    root = tmp_path / "songe"
+    root.mkdir()
+    agents.apply(agents.proposed(config, home), root)
+    entries = yaml.safe_load(settings.read_text(encoding="utf-8"))
+    entries[0]["edit_format"] = "whole"
+    entries.append({"name": "o3", "reasoning_effort": "high"})
+    settings.write_text(yaml.safe_dump(entries, sort_keys=False), encoding="utf-8")
+    assert agents.restore(root) == []
+    # Songe's entry is gone; the user's edits stay, and the file stays YAML.
+    assert settings.read_bytes() == (
+        b"- name: gpt-4o\n  edit_format: whole\n- name: o3\n  reasoning_effort: high\n"
+    )
+
+
+def test_unknown_codec_is_a_conflict_and_uninstall_carries_on(tmp_path, config):
+    # A manifest from a later Songe names a codec this one does not know.
+    home = aider_home(tmp_path)
+    settings = home / ".aider.model.settings.yml"
+    settings.write_bytes(b"- name: gpt-4o\n")
+    root = tmp_path / "songe"
+    root.mkdir()
+    agents.apply(agents.proposed(config, home), root)
+    manifest_path = root / "agent-backups.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest[str(settings)]["codec"] = "toml"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    written = settings.read_bytes()
+    assert agents.restore(root) == [str(settings)]
+    assert settings.read_bytes() == written  # kept for the later Songe
+    assert not (home / ".aider.model.metadata.json").exists()  # the rest is undone
+
+
+def test_aider_drops_a_renamed_models_metadata_but_keeps_its_endpoint(tmp_path, config):
+    # The settings entry is what sends the model to Songe: dropping it would
+    # send a default that still names the model to OpenAI. Metadata goes
+    # when unchanged; the user's edit stays.
+    home = aider_home(tmp_path)
+    settings = home / ".aider.model.settings.yml"
+    metadata = home / ".aider.model.metadata.json"
+    root = tmp_path / "songe"
+    root.mkdir()
+    config.exposed_models = ["songe/test", "songe/other", "songe/third"]
+    agents.apply(agents.proposed(config, home), root)
+    data = json.loads(metadata.read_text(encoding="utf-8"))
+    data["openai/songe/third"]["max_output_tokens"] = 1000  # the user's edit
+    metadata.write_text(json.dumps(data), encoding="utf-8")
+    config.exposed_models = ["songe/renamed"]
+    assert len(agents.refresh_limits(config, home, root=root)) == 2
+    names = agents.load(settings).keys()
+    assert {"openai/songe/other", "openai/songe/third", "openai/songe/renamed"} <= names
+    for name in names:
+        assert agents.load(settings)[name]["extra_params"]["api_base"] == "http://127.0.0.1:7613/v1"
+    kept = json.loads(metadata.read_text(encoding="utf-8"))
+    assert "openai/songe/other" not in kept
+    assert "openai/songe/third" in kept and "openai/songe/renamed" in kept
+    assert agents.restore(root) == []
+    assert not settings.exists()
+
+
+@pytest.mark.parametrize("change", ["comment", "delete", "take-out"])
+def test_refresh_leaves_all_of_aider_alone_when_one_file_cannot_be_refreshed(
+    tmp_path, config, change
+):
+    # The service applies refresh_limits without review: a new model must
+    # not reach the metadata file alone, without an api_base in the settings.
+    home = aider_home(tmp_path)
+    settings = home / ".aider.model.settings.yml"
+    metadata = home / ".aider.model.metadata.json"
+    root = tmp_path / "songe"
+    root.mkdir()
+    agents.apply(agents.proposed(config, home), root)
+    if change == "comment":
+        settings.write_text("# note\n" + settings.read_text(encoding="utf-8"), encoding="utf-8")
+    elif change == "delete":
+        settings.unlink()
+    else:
+        settings.write_text("- name: gpt-4o\n", encoding="utf-8")
+    before = metadata.read_bytes()
+    config.exposed_models = ["songe/m2"]
+    assert agents.refresh_limits(config, home, root=root) == []
+    assert metadata.read_bytes() == before
+
+
+def test_uninstall_warns_when_aiders_default_is_still_a_songe_model(tmp_path, monkeypatch):
+    home = aider_home(tmp_path)
+    adapter = agents.adapter_for(home / ".aider.model.settings.yml")
+    monkeypatch.delenv("AIDER_MODEL", raising=False)
+    assert adapter.after_uninstall(home) is None
+    monkeypatch.setenv("AIDER_MODEL", "openai/songe/qwen")
+    assert "goes to OpenAI" in adapter.after_uninstall(home)
+
+
+def test_aider_on_songe_reads_its_default_model(tmp_path, monkeypatch):
+    home = aider_home(tmp_path)
+    monkeypatch.delenv("AIDER_MODEL", raising=False)
+    assert agents.routing(home) == {"aider": False}
+    (home / ".aider.conf.yml").write_text("model: openai/songe/qwen\n", encoding="utf-8")
+    assert agents.routing(home) == {"aider": True}
+    monkeypatch.setenv("AIDER_MODEL", "gpt-4o")  # the environment wins
+    assert agents.routing(home) == {"aider": False}

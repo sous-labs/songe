@@ -198,10 +198,19 @@ def run(
     from .evaluate import evaluate, references, sharpness
     from .fuse import candidate_kind, evaluation_model, export_candidate
     from .gate import Decision, choose_scale, decide, judged_check
-    from .prompts import OversizedStep, UnusableStep, paired_prompts
+    from .prompts import (
+        OversizedStep,
+        UnusableStep,
+        paired_prompts,
+        serve_as,
+        served_switches,
+    )
     from .samples import SampleAdmission
     from .select import bounded_batch, replay_pool, select
 
+    # Every prompt of this cycle (training, the check, the examples) is
+    # rendered the way the user's server sends it.
+    serve_as(served_switches(store))
     policy_config = config
     lease = (store.root / "worker.lock").open("a+", encoding="utf-8")
     acquire(lease)
@@ -322,6 +331,7 @@ def run(
             # dreams: what was trained under one says nothing about the other.
             store.set("experience_watermark", 0)
             store.set("practice_revisions", {})
+            store.set("rejected_practice", {})
             store.set("learning_mode", config.learning)
         if info["reason"] == "Waiting for experience":
             return info
@@ -635,6 +645,11 @@ def run(
                     config.replay_fraction,
                     store.get("practice_revisions", {}),
                 )
+            if config.learning == "dreams":
+                # A capped Dream takes the scenes no Dream has tried first.
+                from ..practice.pool import marked
+
+                pool = marked(store, pool)
             from .calibration_state import pending_keys
 
             pending_practice = pending_keys(store)
@@ -1444,8 +1459,16 @@ def run(
                 night, status="rejected", phase="check", progress=1, record=record
             )
             store.set("last_completed", time.time())
-            store.set("experience_watermark", record["watermark"])
-            store.set("practice_revisions", record["practice_revisions"])
+            if config.learning == "dreams":
+                # Nothing was adopted, so nothing was practised: this Dream's
+                # scenes are trained again with the next new ones. On their
+                # own they wait (practice.pool.untrained).
+                from ..practice.pool import keep_for_retry
+
+                keep_for_retry(store, record["practice_revisions"])
+            else:
+                store.set("experience_watermark", record["watermark"])
+                store.set("practice_revisions", record["practice_revisions"])
             if record["rebuild"]:
                 # A rejected rebuild is still a completed finite attempt. Wait
                 # for new evidence or a changed rebuild request before retrying.

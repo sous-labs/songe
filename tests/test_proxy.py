@@ -299,6 +299,24 @@ def test_partial_sse_is_not_training_data():
         decode_response(b'data: {"choices":[]}\n\n', True)
 
 
+def test_a_streamed_answer_keeps_its_reasoning_under_either_name():
+    """vLLM streams reasoning as "reasoning"; other servers as
+    "reasoning_content". Dropped, a recorded answer of a reasoning server
+    read as a direct answer."""
+    def stream(field):
+        events = [
+            {"choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}}]},
+            {"choices": [{"index": 0, "delta": {field: "two and "}}]},
+            {"choices": [{"index": 0, "delta": {field: "two"}}]},
+            {"choices": [{"index": 0, "delta": {"content": "4"}, "finish_reason": "stop"}]},
+        ]
+        body = "".join(f"data: {json.dumps(e)}\n\n" for e in events) + "data: [DONE]\n\n"
+        return decode_response(body.encode(), True)["choices"][0]["message"]
+
+    assert stream("reasoning") == {"role": "assistant", "content": "4", "reasoning": "two and two"}
+    assert stream("reasoning_content")["reasoning_content"] == "two and two"
+
+
 async def test_ui_contract_origin_and_assets(config, store):
     app = create_app(config, store)
     async with (

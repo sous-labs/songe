@@ -10,11 +10,12 @@ import json
 from pathlib import Path
 
 from ..storage import atomic_write, write_json
-from .base import JSON, NotEditable
+from .aider import Aider
+from .base import JSON, NotEditable, codec_named
 from .opencode import OpenCode
 from .pi import Pi
 
-ADAPTERS = (OpenCode(), Pi())
+ADAPTERS = (OpenCode(), Pi(), Aider())
 
 # A file Songe will not rewrite (the older name, still used by callers).
 NotPlainJSON = NotEditable
@@ -24,7 +25,12 @@ def adapter_for(path):
     return next((a for a in ADAPTERS if a.handles(Path(path))), None)
 
 
-def codec_for(path):
+def codec_for(path, entry=None):
+    """How to read an agent file: as recorded in its backup manifest entry
+    when there is one, so it is undone the way it was written, else by its
+    adapter."""
+    if entry and entry.get("codec"):
+        return codec_named(entry["codec"])
     adapter = adapter_for(path)
     return adapter.codec(path) if adapter else JSON
 
@@ -77,18 +83,31 @@ def proposed(config, home=None, default=None, opencode_v2=False, root=None):
     home = home or Path.home()
     changes = []
     for adapter in ADAPTERS:
+        loaded, skipped = [], None
         for path, codec in adapter.files(home):
             original = path.read_bytes() if path.exists() else None
             try:
                 if path.suffix == ".jsonc":
                     raise NotEditable(path)
-                data = codec.load(original)
-            except NotEditable:
-                # One commented config must not block the other agents.
-                skip_note(adapter, path, config, default, opencode_v2)
-                continue
+                loaded.append((path, codec, original, codec.load(original)))
+            except NotEditable as exc:
+                # JSON files keep their usual note; other codecs say why.
+                why = str(exc) if codec is not JSON or "UTF-8" in str(exc) else "it has comments"
+                skipped = (path, why)
+                break
+        if skipped:
+            # One commented config must not block the other agents, and an
+            # agent is set up in all its files or none: Aider with model
+            # metadata but no api_base sends a songe/ model to OpenAI.
+            for path, _ in adapter.files(home):
+                why = skipped[1] if path == skipped[0] else f"{skipped[0].name} is skipped"
+                skip_note(adapter, path, config, default, opencode_v2, why)
+            continue
+        for path, codec, original, data in loaded:
             if root and adapter.legacy_models:
                 data = remove_legacy_models(data, path, root, config)
+            elif root:
+                data = drop_stale(adapter, path, data, root, config)
             new = adapter.configure(path, data, config, default=default, v2=opencode_v2)
             result = codec.dump(new)
             changes.extend(diff_change(path, original, result))
@@ -110,15 +129,32 @@ def diff_change(path, original, result):
     return [(path, original, result, diff)]
 
 
-def skip_note(adapter, path, config, default, opencode_v2):
+def skip_note(adapter, path, config, default, opencode_v2, why="it has comments"):
     import sys
 
     entry = adapter.snippet(path, config, default=default, v2=opencode_v2)
     print(
-        f"Skipped {path} · it has comments · add this by hand:\n"
+        f"Skipped {path} · {why} · add this by hand:\n"
         + adapter.codec(path).dump(entry).decode().rstrip("\n"),
         file=sys.stderr,
     )
+
+
+def drop_stale(adapter, path, data, root, config):
+    """Without Songe's entries for models it no longer serves (a renamed
+    model), when they are unchanged since Songe wrote them."""
+    record = read_json(root / "agent-backups.json").get(str(path))
+    if not record:
+        return data
+    try:
+        written = codec_for(path, record).load(record["written"].encode())
+    except NotEditable:
+        return data
+    return {
+        key: value
+        for key, value in data.items()
+        if not (adapter.stale(path, key, config) and written.get(key) == value)
+    }
 
 
 def remove_legacy_models(data, path, root, config, aliases=None):
@@ -287,6 +323,7 @@ def apply(changes, root):
                 "written": result.decode(),
                 "edits": [],
             }
+        entry["codec"] = codec.name
         if "edits" not in entry:
             # Migrate the original manifest using its first backup, not the
             # newly reviewed document (which may include later user changes).
@@ -336,8 +373,8 @@ def restore(root):
     conflicts = []
     for name, entry in list(manifest.items()):
         path = Path(name)
-        codec = codec_for(path)
         try:
+            codec = codec_for(path, entry)
             current = codec.load(path.read_bytes()) if path.exists() else {}
         except NotEditable:
             conflicts.append(name)
@@ -381,8 +418,10 @@ def restore(root):
                 atomic_write(path, backup.read_bytes())
             else:
                 path.unlink(missing_ok=True)
-        else:
+        elif codec is JSON:
             write_json(path, current)
+        else:
+            atomic_write(path, codec.dump(current))
         if unresolved:
             conflicts.append(name)
             entry["edits"] = unresolved
@@ -401,16 +440,27 @@ def refresh_limits(config, home=None, root=None):
     home = home or Path.home()
     changed = []
     for adapter in ADAPTERS:
+        loaded = []
         for path, codec in adapter.files(home):
             if not path.exists() or path.suffix == ".jsonc":
-                continue
+                break
             try:
                 data = codec.load(path.read_bytes())
             except NotEditable:
-                continue
+                break
             if not adapter.owns(path, data):
-                continue
+                break
+            loaded.append((path, codec, data))
+        if len(loaded) != len(adapter.files(home)):
+            # All of an agent's files or none, as in proposed(): a file the
+            # user deleted, commented or took Songe out of leaves the others
+            # alone too (Aider's metadata for a model the settings file has
+            # no api_base for would send it to OpenAI).
+            continue
+        for path, codec, data in loaded:
             new = adapter.configure(path, data, config, default=False)
+            if root and not adapter.legacy_models:
+                new = drop_stale(adapter, path, new, root, config)
             if new != data:
                 result = codec.dump(new)
                 if root is None:

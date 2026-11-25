@@ -63,6 +63,7 @@ def bounded_batch(pool, config, seconds, step_seconds, *, pending=None, whole=Fa
         pool,
         key=lambda s: (
             pending is not None and (s["id"], revision_id(s)) not in pending,
+            bool(s.get("retry")),  # scenes of a rejected Dream after untried ones
             not s.get("stated"),  # the user's own rules make the cut first
             s["id"],
         ),
