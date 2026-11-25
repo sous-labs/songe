@@ -23,18 +23,19 @@
   <a href="LICENSE"><img src="https://img.shields.io/github/license/sous-labs/songe.svg" alt="License: Apache-2.0"></a>
 </p>
 
-Songe is a local proxy between your agent (opencode, pi or any
-OpenAI-compatible tool) and your model server. You use your model as usual.
-Songe records what happens after each of the model's actions: the tool
-result, the error, your next message. When your agent is quiet, it turns
-those moments into lessons. A Quick Dream adds your preferences to the
-model's instructions; a Deep Dream fine-tunes a LoRA adapter on practice
-written from the lessons. The new version is served only if it does better
-than the current one on your own conversations; otherwise nothing changes.
-Nothing leaves your machine unless you turn on the optional cloud learning.
+Songe is an OpenAI-compatible proxy between your agent (opencode, pi or any
+OpenAI-compatible client) and your local model server. It logs each model
+action together with its outcome: the tool result, the error, your next
+message. When the agent is idle, Songe distills those outcomes into lessons
+and applies them in two ways. A Quick Dream writes your preferences into the
+model's instructions; a Deep Dream fine-tunes a LoRA adapter by on-policy
+distillation, on practice scenes generated from the lessons. A candidate is
+evaluated against the version in use at the moments you reacted to, and is
+served only if it does clearly better; otherwise the model stays as it was.
+Everything runs locally unless you enable the optional cloud learning.
 
-Training needs Apple Silicon or an NVIDIA or AMD GPU. Without one, Songe
-still serves and records, but does not train.
+Training requires Apple Silicon (MLX) or an NVIDIA or AMD GPU (PyTorch).
+Without one, Songe still proxies and records, but does not train.
 
 ## ✨ Highlights
 
