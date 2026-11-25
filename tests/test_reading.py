@@ -777,7 +777,7 @@ async def test_quick_dream_under_memory_pressure_says_so_instead_of_started(conf
     assert getattr(scheduler, "dream_task", None) is None and asked == []
     assert learner.get("quick_checked")["error"] == "memory"
     assert (learner.get(quick.HISTORY) or [])[-1]["error"] == "memory"
-    words = json.loads((Path(quick.__file__).parent / "ui" / "wording.json").read_text())
+    words = json.loads((Path(quick.__file__).parent / "ui" / "wording.json").read_text(encoding="utf-8"))
     assert "memory" in words["quick_failed"] and "memory" in words["quick_failed_card"]
     # Once memory is back to normal the same press reads.
     scheduler.platform.memory().pressure = "normal"
