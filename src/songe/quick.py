@@ -879,6 +879,21 @@ def answer_of(message):
     return {"text": text if isinstance(text, str) else "", "tool_calls": calls}
 
 
+def without_thinking(body, server):
+    """Ask without the model's reasoning, by the switches the reader sends
+    (probed per server, #111): the chat template's enable_thinking where the
+    server passes it on, and reasoning_effort "none", which empties
+    Ollama's reasoning. Reported by Jack in a test on 11-24: qwen3 on Ollama
+    spent the whole answer cap reasoning, so both sides of every before and
+    after example were empty."""
+    from .reading.client import TEMPLATE_SWITCH
+
+    if server in TEMPLATE_SWITCH:
+        body["chat_template_kwargs"] = {"enable_thinking": False}
+    body["reasoning_effort"] = "none"
+    return body
+
+
 async def compare(client, url, model, request, before_block, after_block, *, server=""):
     """The same request answered with the lessons from before this Quick Dream
     and with the new ones, by the served model (temperature 0, capped).
@@ -893,8 +908,7 @@ async def compare(client, url, model, request, before_block, after_block, *, ser
         body = {k: v for k, v in request.items() if k not in dropped}
         body["messages"] = with_lessons(request["messages"], block) if block else request["messages"]
         body.update(model=model, temperature=0, max_tokens=ANSWER_TOKENS, stream=False)
-        if server == "vllm":
-            body["chat_template_kwargs"] = {"enable_thinking": False}
+        without_thinking(body, server)
         r = await client.post(url.rstrip("/") + "/chat/completions", json=body)
         r.raise_for_status()
         return answer_of(((r.json().get("choices") or [{}])[0]).get("message"))
@@ -1012,8 +1026,7 @@ async def judge(client, url, model, lesson, before, after, *, server=""):
             "type": "object", "properties": {"follows": {"type": "string", "enum": ["A", "B", "both", "neither"]}},
             "required": ["follows"]}}},
     }
-    if server == "vllm":
-        body["chat_template_kwargs"] = {"enable_thinking": False}
+    without_thinking(body, server)
     try:
         r = await client.post(url.rstrip("/") + "/chat/completions", json=body)
         r.raise_for_status()

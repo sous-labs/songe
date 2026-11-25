@@ -1087,3 +1087,36 @@ def test_the_working_folder_is_read_from_the_agents_system_message():
     assert reading.project_of(rows("Current working directory: C:\\Users\\me\\notes-app\\")) == "notes-app"
     assert reading.project_of(rows("<cwd>/Users/me/code/invoice-tool</cwd>")) == "invoice-tool"
     assert reading.project_of(rows("You are a helpful assistant.")) is None
+
+
+@pytest.mark.parametrize("server", ["ollama", "mlx", "llamacpp", "vllm"])
+async def test_examples_of_a_thinking_model_are_asked_without_its_reasoning(server):
+    """Reported by Jack in a test on 11-24: qwen3 on Ollama put its whole
+    capped answer in the reasoning field, so the page showed both sides of
+    every before and after example empty. The server here answers the way
+    Ollama does: in the reasoning field unless reasoning is switched off."""
+    sent = []
+
+    class Client:
+        async def post(self, url, json):
+            sent.append(json)
+            off = json.get("reasoning_effort") == "none" or (
+                json.get("chat_template_kwargs") or {}).get("enable_thinking") is False
+            message = ({"content": "Run: make test MODULE=parser"} if off
+                       else {"content": "", "reasoning": "Okay, the user wants"})
+
+            class R:
+                def raise_for_status(self):
+                    pass
+
+                def json(self):
+                    return {"choices": [{"message": message}]}
+            return R()
+
+    request = {"messages": [{"role": "user", "content": "how do I run the parser tests?"}]}
+    before, after, _ = await quick.compare(Client(), "http://m/v1", "served", request, "",
+                                           quick.block([{"text": "Run tests with make test."}]), server=server)
+    assert before["text"] and after["text"]
+    assert all(body["reasoning_effort"] == "none" for body in sent)
+    switch = server in {"mlx", "llamacpp", "vllm"}
+    assert all(("chat_template_kwargs" in body) == switch for body in sent)
