@@ -456,10 +456,13 @@ class LMStudio:
             m["identifier"]: m.get("path", "") for m in listing if "identifier" in m
         }
 
-    async def unload(self, version):
+    async def unload(self, version, still=None):
+        """Release an instance Songe requested. still: checked right before
+        the unload; once it says no (the agent asked for the model meanwhile)
+        the instance is left to the agent and no longer Songe's."""
         identifier = version["identifier"]
         owned = getattr(self, "owned", {}).get(identifier)
-        if not owned:
+        if not owned or (still is not None and not still()):
             return
         owned["reclaim"] = True
         self.save_claims()
@@ -469,6 +472,9 @@ class LMStudio:
         if identifier not in self.owned or identifier not in live:
             return
         if self.matches_owned(live[identifier], owned):
+            if still is not None and not still():
+                self.forget(identifier)
+                return
             async with self.sdk() as client:
                 await client.llm.unload(identifier)
             self.forget(identifier)

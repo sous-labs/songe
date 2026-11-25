@@ -297,7 +297,7 @@ class Ollama:
             self.store.set("runtime_imports", imports)
         await self._warm(version["identifier"], version.get("keep_alive"))
 
-    async def _warm(self, identifier, keep_alive=None):
+    async def _warm(self, identifier, keep_alive=None, still=None):
         # Without an explicit keep_alive the user's Ollama setting (default or
         # OLLAMA_KEEP_ALIVE) decides how long the model stays in memory.
         await self._request(
@@ -315,6 +315,8 @@ class Ollama:
                         _tag(m.get("name", m.get("model")))
                         for m in await self._running()
                     }:
+                        if still is not None and not still():
+                            return  # the agent asked for it meanwhile
                         await asyncio.sleep(
                             getattr(self.config, "guard_min_interval", 0.1)
                         )
@@ -323,10 +325,15 @@ class Ollama:
                     f"Ollama did not release model {identifier}"
                 ) from exc
 
-    async def unload(self, version):
+    async def unload(self, version, still=None):
+        """Release an instance Songe requested. still: checked right before
+        the release and while waiting for it; once it says no (the agent
+        asked for the model meanwhile) the instance is left to the agent."""
         if version["identifier"] in getattr(self, "owned", {}):
-            if await self.same_weights(self.owned[version["identifier"]]):
-                await self._warm(version["identifier"], 0)
+            if await self.same_weights(self.owned[version["identifier"]]) and (
+                still is None or still()
+            ):
+                await self._warm(version["identifier"], 0, still=still)
             self.owned.pop(version["identifier"], None)
 
     async def prune_version(self, version):

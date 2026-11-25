@@ -636,6 +636,7 @@ async def test_ollama_lists_what_it_holds_so_background_work_never_loads_a_model
         installation_config = SimpleNamespace(upstream_url="http://test/v1", server_source_url="")
         answered_running = False
         loaded_listing = ModelScheduler.loaded_listing
+        server_listing = ModelScheduler.server_listing
         loaded_identifiers = ModelScheduler.loaded_identifiers
 
     scheduler = Scheduler()

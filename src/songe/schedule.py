@@ -1,6 +1,7 @@
 """Work in learned idle gaps; every heavy worker is resumable and guarded."""
 
 import asyncio
+import contextvars
 import json
 import logging
 import re
@@ -32,6 +33,9 @@ from .platform.locking import acquire as acquire_lock
 from .steps import digest
 
 logger = logging.getLogger(NAME)
+# The model whose pressed Dream the running code belongs to: a model loaded
+# for a press is hidden from every other work (ModelScheduler.loaded_listing).
+PRESSING = contextvars.ContextVar("pressing", default=None)
 AGENT_FOLLOWUP_SECONDS = 300
 RETRY_FIRST_SECONDS = 300  # after an error, wait 5m, then 10m, 20m ... at most 1 day
 RETRY_MAX_SECONDS = 86400
@@ -1582,7 +1586,11 @@ class ModelScheduler(Scheduler):
         self.load_refused = {}
         self.serving_binding = None
         self.answered_running = False
-        self.press_loads = {}  # model: (version, traffic revision) Songe loaded for a press
+        # model: {"version", "used"} for a model Songe loaded for a press
+        # (load_for_press); "used" once the agent asks for it (ensure_model).
+        self.press_loads = {}
+        self.pressing = set()  # models whose Quick Dream press is getting ready
+        self.release_tasks = {}
         super().__init__(config, store, upstream, platform)
 
     def unloads(self):
@@ -1612,6 +1620,10 @@ class ModelScheduler(Scheduler):
 
     async def ensure_model(self, model, version):
         """Renew the selected identity; serialize global servers across bindings."""
+        if model in self.press_loads:
+            # The agent asked for a model Songe loaded for a press: it is the
+            # user's now, never released by Songe (release_press_load).
+            self.press_loads[model]["used"] = True
         global_binding = self.installation_config.upstream in {"llamacpp", "mlx"}
         while True:
             async with self.lock:
@@ -1764,6 +1776,8 @@ class ModelScheduler(Scheduler):
                 return {"started": False, "message": "Quick Dream can't start · no model is loaded in your model server · load it, then press Quick Dream"}
             if unread == "memory":
                 return {"started": False, "message": "Quick Dream can't start · memory is tight on this computer · close some apps, then press Quick Dream"}
+            if unread == "load_unknown":
+                return {"started": False, "message": "Quick Dream can't start · Songe can't measure the model to check memory · load the model in your model server, then press Quick Dream"}
             if unread == "load_memory":
                 return {"started": False, "message": "Quick Dream can't start · not enough free memory to load the model · close some apps, or load the model in your model server, then press Quick Dream"}
             if unread == "nothing":
@@ -1824,6 +1838,8 @@ class ModelScheduler(Scheduler):
         """Reading or practice under way (in this tick or in the background)."""
         if getattr(self, "reading_task", None) is not None:
             return True
+        if getattr(self, "pressing", None) or getattr(self, "press_loads", None):
+            return True  # a press loading, using or releasing its model
         task = getattr(self, "dream_task", None)
         return task is not None and not task.done()
 
@@ -1907,11 +1923,34 @@ class ModelScheduler(Scheduler):
         """Quick Dream now: the newest unread conversations within the budget,
         then the prompt lessons. Returns how many conversations it reads (or
         None when a reading is already running: it continues)."""
-        from .reading import store as reading
 
         running = getattr(self, "dream_task", None)
-        if getattr(self, "reading_task", None) or (running and not running.done()):
+        if (
+            getattr(self, "reading_task", None)
+            or (running and not running.done())
+            or model in self.pressing
+            or model in self.press_loads
+        ):
             return None
+        # Marked before the first await: a second press while this one loads
+        # the model continues it instead of loading again.
+        self.pressing.add(model)
+        token = PRESSING.set(model)
+        started = False
+        try:
+            started, unread = await self.quick_start(model)
+            return unread
+        finally:
+            PRESSING.reset(token)
+            if not started:
+                self.pressing.discard(model)
+                self.schedule_release(model)
+
+    async def quick_start(self, model):
+        """quick_now's checks, the load on press and the reading task.
+        Returns (whether the task started, quick_now's answer)."""
+        from .reading import store as reading
+
         learner = self.installation_store.scoped(model)
         unread = len(await asyncio.to_thread(reading.pending, learner))
 
@@ -1924,13 +1963,13 @@ class ModelScheduler(Scheduler):
                 {"added": [], "lessons": len(quick_lessons.active(learner)),
                  "changes": {"added": [], "reworded": [], "dropped": []}},
                 time.time(), None, read=0, found=0, error=error)
-            return error
+            return False, error
 
         if not unread and learner.get("quick_seen") == await asyncio.to_thread(self.signals_seen, learner):
             # Nothing unread and nothing read since the last Quick Dream: say
             # so, on the notice and (lasting) on the dashboard.
             learner.set("quick_checked", {"at": time.time(), "nothing_new": True})
-            return "nothing"
+            return False, "nothing"
         sample = await asyncio.to_thread(self.platform.memory)
         if sample.pressure != "normal":
             # Reading waits for normal memory pressure (read_sessions), also
@@ -1948,11 +1987,11 @@ class ModelScheduler(Scheduler):
                 return await asyncio.to_thread(failed, why)
             probe_reader = await self.reader_for(model)
             if probe_reader is None:
-                await self.release_press_load(model)
                 return await asyncio.to_thread(failed, "no_model")
         await probe_reader.close()
 
         async def quick_then_release():
+            PRESSING.set(model)
             try:
                 return await self.read_sessions(
                     force=True,
@@ -1961,10 +2000,11 @@ class ModelScheduler(Scheduler):
                     seconds=self.installation_config.quick_read_seconds,
                 )
             finally:
-                await self.release_press_load(model)
+                self.pressing.discard(model)
+                self.schedule_release(model)
 
         self.dream_task = asyncio.create_task(quick_then_release())
-        return unread
+        return True, unread
 
     async def load_for_press(self, model):
         """A Dream the user pressed may load the learner's model when it is
@@ -1973,8 +2013,10 @@ class ModelScheduler(Scheduler):
         memory check as Songe's own versions (upstream.load without
         "serving"). Background work never comes here. Returns None once the
         model is loaded, or why it waits: "load_memory" (not enough free
-        memory to load it), "no_model" (it cannot be loaded)."""
+        memory to load it), "load_unknown" (its size cannot be measured, so
+        memory cannot be checked), "no_model" (it cannot be loaded)."""
         from .memory import MemoryPressure
+        from .upstream.protection import weight_bytes
 
         if getattr(self.upstream, "name", None) not in {"ollama", "lmstudio"}:
             return "no_model"
@@ -1982,41 +2024,83 @@ class ModelScheduler(Scheduler):
         version = await asyncio.to_thread(learner.version)
         if not version or not version.get("artifact"):
             return "no_model"
-        revision = self.traffic_revision
-        async with self.lock:
-            try:
-                await self.upstream.load(version)
-            except MemoryPressure as exc:
-                logger.info("press_load_waits %s: %s", model, exc)
-                return "load_memory"
-            except Exception as exc:
-                logger.warning("press_load_failed %s: %s", model, exc)
-                return "no_model"
-        # Only a load Songe requested is Songe's: a model that was already
-        # loaded (the user's) is reused and never claimed, so never released.
-        if version["identifier"] in getattr(self.upstream, "owned", {}):
-            self.press_loads[model] = (version, revision)
-            logger.info("press_loaded %s", version["identifier"])
+        try:
+            size = await asyncio.to_thread(weight_bytes, version["artifact"])
+        except OSError:
+            size = 0
+        if not size:
+            # Admission sizes a load by its weights: weights Songe cannot
+            # read (an Ollama blob outside its view) would pass as 0 bytes.
+            return "load_unknown"
+        if self.process:
+            return "no_model"  # learning has the model server
+        identifier = version["identifier"]
+        owned = getattr(self.upstream, "owned", {})
+        ours_before = identifier in owned
+        # Not under self.lock: a cold load can take minutes and the agent's
+        # requests wait on that lock. Registered first, so other work skips
+        # the model (loaded_listing) and learning waits (reading_busy).
+        self.press_loads[model] = {"version": version, "used": False}
+        try:
+            await self.upstream.load(version)
+        except MemoryPressure as exc:
+            logger.info("press_load_waits %s: %s", model, exc)
+            return "load_memory"
+        except Exception as exc:
+            logger.warning("press_load_failed %s: %s", model, exc)
+            return "no_model"
+        finally:
+            owned = getattr(self.upstream, "owned", {})
+            # Only a load Songe requested is Songe's: a model that was already
+            # loaded (the user's) is reused and never claimed, never released.
+            if ours_before or identifier not in owned:
+                self.press_loads.pop(model, None)
+        if model in self.press_loads:
+            logger.info("press_loaded %s", identifier)
         return None
 
+    def schedule_release(self, model):
+        """Release a press's load in its own task: it may wait for the agent's
+        requests to finish, and nothing else waits for it."""
+        task = self.release_tasks.get(model)
+        if model in self.press_loads and (task is None or task.done()):
+            self.release_tasks[model] = asyncio.create_task(self.release_press_load(model))
+
     async def release_press_load(self, model):
-        """Unload what load_for_press loaded, as soon as the pressed work is
-        done (Ollama: keep_alive 0, confirmed by /api/ps; LM Studio: unload),
-        unless the user's agent has used that model since: then it is the
-        user's, and the server's own idle timeout decides."""
-        held = self.press_loads.pop(model, None)
-        if not held:
-            return
-        version, revision = held
-        if any(self.in_flight.values()) or (
-            self.traffic_revision != revision and self.serving_model == model
-        ):
-            return
+        """Unload what load_for_press loaded, once nothing is in flight (Ollama:
+        keep_alive 0, confirmed by /api/ps; LM Studio: unload), unless the
+        agent has asked for that model since: then it is the user's, and the
+        server's own idle timeout decides."""
+        interval = getattr(self.installation_config, "guard_min_interval", 0.1)
+        while True:
+            held = self.press_loads.get(model)
+            if not held:
+                return
+            if held["used"]:
+                self.press_loads.pop(model, None)
+                logger.info("press_load_kept %s: the agent uses it", model)
+                return
+            if (
+                any(self.in_flight.values())
+                or model in (getattr(self, "reading_activity", None) or {})
+                or model in self.pressing
+            ):
+                await asyncio.sleep(interval)  # retried, never dropped
+                continue
+            break
+
+        def still_ours():
+            # Checked again right before the unload and while it waits: a
+            # request admitted meanwhile keeps the model.
+            return not held["used"] and not any(self.in_flight.values())
+
         try:
-            await self.upstream.unload(version)
-            logger.info("press_released %s", version["identifier"])
+            await self.upstream.unload(held["version"], still=still_ours)
+            logger.info("press_released %s", held["version"]["identifier"])
         except Exception as exc:
             logger.warning("press_release_failed %s: %s", model, exc)
+        finally:
+            self.press_loads.pop(model, None)
 
     def dream_blocked(self, model):
         """Why Dream can do nothing for this model right now, or None."""
@@ -2654,7 +2738,20 @@ class ModelScheduler(Scheduler):
 
     async def loaded_listing(self):
         """The server's loaded models as {"identifier", "type"}, or None when
-        it cannot say."""
+        it cannot say. A model loaded for a press is listed only to that
+        press's own work (PRESSING): other reading must not start on a model
+        that is released when the press is done."""
+        items = await self.server_listing()
+        hidden = set()
+        for model, held in getattr(self, "press_loads", {}).items():
+            if model != PRESSING.get():
+                name = held["version"]["identifier"]
+                hidden |= {model, name, name.removesuffix(":latest"), name + ":latest"}
+        if items is None or not hidden:
+            return items
+        return [item for item in items if item.get("identifier") not in hidden]
+
+    async def server_listing(self):
         listing = getattr(self.upstream, "listing", None)
         if listing is not None:
             return await listing()
