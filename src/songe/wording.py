@@ -147,7 +147,8 @@ def status_copy(data):
             " · retries automatically"
         )
     if unsupported := re.match(r"unsupported · (.+)", reason):
-        return "Not supported yet", f"{unsupported[1]} · Choose another model"
+        # Next says "Choose another model"; Now names the model once.
+        return "Not supported yet", unsupported[1]
     if reason.startswith("preparing examples"):
         return "Preparing training data", re.sub(
             r"(\d+) examples waiting to learn",
@@ -414,6 +415,9 @@ def base_summary(model, data):
             "",
             re.sub(r" not supported yet$", "", readable(model.get("reason"))),
         )
+        # A reason that only repeats the title ("unsupported") is left out.
+        if detail.lower() in {"unsupported", "not supported yet"}:
+            detail = ""
         return "Not supported yet", " · ".join(
             filter(None, (detail, may_not_load(model)))
         )
