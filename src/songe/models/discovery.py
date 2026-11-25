@@ -295,6 +295,19 @@ def llamaswap_models(url, transport=None):
     return [m["id"] for m in data if isinstance(m.get("id"), str)]
 
 
+def llamaswap_loaded(url, transport=None):
+    """The ids llama-swap has loaded now, or None when the server is not
+    llama-swap."""
+    running = llamaswap_running(url.rstrip("/").removesuffix("/v1"), transport)
+    if running is None:
+        return None
+    return [
+        entry["model"]
+        for entry in running
+        if isinstance(entry, dict) and isinstance(entry.get("model"), str)
+    ]
+
+
 def llamaswap_waiting(url, transport=None):
     """llama-swap's models that are not loaded now; empty for other servers."""
     root = url.rstrip("/").removesuffix("/v1")

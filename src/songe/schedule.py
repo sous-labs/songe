@@ -2475,8 +2475,7 @@ class ModelScheduler(Scheduler):
         """A model already loaded on the server; reviewing never loads one."""
         from .models import registry
 
-        listing = getattr(self.upstream, "listing", None)
-        items = await listing() if listing else None
+        items = await self.loaded_listing()
         if items is None:
             return self.installation_config.base_identifier or None
         ids = {r["id"] for r in registry.entries(self.installation_store)}
@@ -2550,26 +2549,28 @@ class ModelScheduler(Scheduler):
     async def loaded_identifiers(self):
         """Identifiers of the models loaded on the server right now; None when
         the server cannot list them (then the configured one is assumed)."""
-        listing = getattr(self.upstream, "listing", None)
-        items = await listing() if listing else None
+        items = await self.loaded_listing()
         if items is None:
             return None
-        loaded = {item.get("identifier") for item in items if item.get("type", "llm") == "llm"}
-        if getattr(self.upstream, "name", "") == "llamacpp":
-            # llama-swap lists the user's models only; a learned version runs
-            # on Songe's own llama-server and never swaps theirs out.
-            loaded |= await asyncio.to_thread(self.learned_identifiers)
-        return loaded
+        return {item.get("identifier") for item in items if item.get("type", "llm") == "llm"}
 
-    def learned_identifiers(self):
-        from .models import registry
+    async def loaded_listing(self):
+        """The server's loaded models as {"identifier", "type"}, or None when
+        it cannot say."""
+        listing = getattr(self.upstream, "listing", None)
+        if listing is not None:
+            return await listing()
+        # llama-swap behind the generic client (init found no weights to read)
+        # still loads whatever is asked for: its /running says what is loaded.
+        from .models import discovery
 
-        found = set()
-        for row in registry.entries(self.installation_store):
-            version = self.installation_store.scoped(row["id"]).version()
-            if version and not (version["id"] == "base" or version["id"].startswith("base-")):
-                found.add(version.get("identifier"))
-        return found
+        config = self.installation_config
+        loaded = await asyncio.to_thread(
+            discovery.llamaswap_loaded,
+            getattr(config, "server_source_url", "") or config.upstream_url,
+            getattr(self.upstream, "transport", None),
+        )
+        return None if loaded is None else [{"identifier": i, "type": "llm"} for i in loaded]
 
     async def read_sessions(
         self, *, force=False, only=None, practice=False, seconds=None, quick=False

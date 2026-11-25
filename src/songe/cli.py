@@ -328,14 +328,19 @@ def initialize(args, root):
                 ids = upstream_model_ids(url)
             except (OSError, ValueError, httpx.HTTPError):
                 continue
-            idle_swap = name == "llamacpp" and discovery.llamaswap_running(
-                url.rstrip("/").removesuffix("/v1")
-            ) is not None
-            if idle_swap:
-                # llama-swap with nothing loaded names no weights, and a
-                # llama.cpp setup without Songe's own endpoint would fail only
-                # at publish, after training: forward until init sees one.
+            swap_note = None
+            swapped = discovery.llamaswap_loaded(url) if name == "llamacpp" else None
+            if swapped is not None:
+                # llama-swap without weights Songe can read, and a llama.cpp
+                # setup without Songe's own endpoint would fail only at
+                # publish, after training: forward until init sees some.
                 name = None
+                swap_note = (
+                    "llama-swap's loaded models name no weights Songe can read"
+                    " (an absolute -m path to a .gguf file)"
+                    if swapped
+                    else "llama-swap has no model loaded · run songe init again while one runs"
+                )
             # An embedding model can never chat: not offered to agents (#72).
             ids = [i for i in ids if not embedding_name(i)]
             if ids:
@@ -360,9 +365,7 @@ def initialize(args, root):
                         ("Service", service_fact(args)),
                         ("Replace", "loaded copy when a better version is ready"),
                         *(
-                            [("Learning", "llama-swap has no model loaded · run songe init again while one runs")]
-                            if idle_swap
-                            else []
+                            [("Learning", swap_note)] if swap_note else []
                         ),
                     ]
                 )

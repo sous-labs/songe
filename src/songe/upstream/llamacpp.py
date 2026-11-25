@@ -71,20 +71,30 @@ class LlamaCPP:
         return served
 
     async def listing(self):
-        """llama-swap's loaded models, from /running; None for a plain
-        llama-server, whose one model is always loaded. Background work for a
-        model llama-swap has not loaded would swap out the user's."""
-        url = (getattr(self.config, "server_source_url", "") or self.url).rstrip("/")
-        running = await asyncio.to_thread(
-            discovery.llamaswap_running, url.removesuffix("/v1"), self.transport
-        )
-        if running is None:
+        """What is loaded now when the user's server is llama-swap: its models
+        from /running, and the versions Songe's own llama-server is serving.
+        None for a plain llama-server, whose one model is always loaded.
+        Background work for a model that is not loaded would swap out the
+        user's, or read with another learner's weights."""
+        url = getattr(self.config, "server_source_url", "") or self.url
+        loaded = await asyncio.to_thread(discovery.llamaswap_loaded, url, self.transport)
+        if loaded is None:
             return None
-        return [
-            {"identifier": entry["model"], "type": "llm"}
-            for entry in running
-            if isinstance(entry, dict) and isinstance(entry.get("model"), str)
-        ]
+        return [{"identifier": i, "type": "llm"} for i in loaded + await self.serving()]
+
+    async def serving(self):
+        """Identifiers of the versions Songe's own llama-server serves right
+        now: its base and the adapters applied on it; [] while it is stopped."""
+        if not self.owns_server():
+            return []
+        try:
+            props = await self._request("GET", "/props")
+        except httpx.HTTPError:
+            return []
+        base = str(Path((props or {}).get("model_path", "")).resolve())
+        found = [self.identifiers[base]] if base in self.identifiers else []
+        found += [self.identifiers[p] for p in sorted(self.applied) if p in self.identifiers]
+        return found
 
     async def _request(self, method, path, **kwargs):
         async with httpx.AsyncClient(
@@ -175,6 +185,7 @@ class LlamaCPP:
                         "A new llama.cpp base requires a supervised restart"
                     )
                 await self.restart(version)
+            self.identifiers[str(artifact.resolve())] = version["identifier"]
             if self.applied:
                 adapters = await self._request("GET", "/lora-adapters")
                 await self._request(

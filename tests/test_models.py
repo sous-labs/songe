@@ -1062,6 +1062,10 @@ SERVERS = {
         "/api/version": {"build_date": "2026-11-20", "commit": "e0274d5", "version": "v275"},
         "/running": {"running": []},
     },
+    "llama-swap-unreadable": {
+        "/api/version": {"build_date": "2026-11-20", "commit": "e0274d5", "version": "v275"},
+        "/running": {"running": [{"model": "qwen", "cmd": "llama-server -m models/qwen.gguf"}]},
+    },
     "openai-only": {"/v1/models": {"data": [{"id": "qwen"}]}},
     "llama-server": {"/props": {"model_path": "/models/x.gguf"}},
     "unknown": {},
@@ -1103,7 +1107,7 @@ def test_identify_tells_ollama_from_servers_that_only_share_api_version(
     assert discovery.identify("http://127.0.0.1:9292/v1") == expected
 
 
-@pytest.mark.parametrize("server", ["openai-only", "llama-swap"])
+@pytest.mark.parametrize("server", ["openai-only", "llama-swap", "llama-swap-unreadable"])
 @pytest.mark.parametrize("through", ["agent", "upstream-url"])
 def test_forwarding_init_uses_an_unrecognized_server_as_openai_compatible(
     tmp_path, monkeypatch, capsys, through, server
@@ -1144,6 +1148,20 @@ def test_forwarding_init_uses_an_unrecognized_server_as_openai_compatible(
     out = capsys.readouterr().out
     assert f"OpenAI-compatible · {url}" in out
     assert ("llama-swap has no model loaded" in out) == (server == "llama-swap")
+    assert ("name no weights Songe can read" in out) == (server == "llama-swap-unreadable")
+    if server != "openai-only":
+        # The generic client has no listing of its own; /running still keeps
+        # background work off a model llama-swap has not loaded (it would
+        # swap out the user's).
+        import asyncio
+
+        from songe.log import Store
+
+        scheduler = ModelScheduler(config, Store(root), SimpleNamespace())
+        running = SERVERS[server]["/running"]["running"]
+        assert asyncio.run(scheduler.loaded_identifiers()) == {e["model"] for e in running}
+        if not running:
+            assert asyncio.run(scheduler.reader_for("qwen")) is None
 
 
 async def test_an_automatic_run_stopped_for_memory_says_so_and_tries_again_later(
@@ -1397,7 +1415,7 @@ async def test_llama_swap_serves_its_bases_and_reports_their_context(tmp_path):
 
 
 
-def swap_scheduler(learners, running, models=None):
+def swap_scheduler(learners, running, models=None, props=None):
     from songe.upstream.llamacpp import LlamaCPP
 
     config, store = learners
@@ -1406,13 +1424,22 @@ def swap_scheduler(learners, running, models=None):
     config.server_source_url = "http://127.0.0.1:9292/v1"
 
     def handler(request):
+        if request.url.port == 41001:  # Songe's own llama-server
+            if request.url.path == "/props" and props is not None:
+                return httpx.Response(200, json=props)
+            return httpx.Response(404)
         if request.url.path == "/running" and running is not None:
             return httpx.Response(200, json={"running": running})
         if request.url.path == "/v1/models" and models is not None:
             return httpx.Response(200, json={"data": [{"id": m} for m in models]})
         return httpx.Response(404)
 
-    upstream = LlamaCPP(config, transport=httpx.MockTransport(handler))
+    async def hook(*a):
+        pass
+
+    # Supervised (owns_server) only while it is serving.
+    owned = {"restart": hook, "stop": hook} if props is not None else {}
+    upstream = LlamaCPP(config, transport=httpx.MockTransport(handler), **owned)
     return ModelScheduler(config, store, upstream), store
 
 
@@ -1432,15 +1459,38 @@ async def test_llama_swap_learner_not_running_gets_no_reader(learners):
         await reader.close()
 
 
-async def test_llama_swap_counts_learned_versions_on_songes_own_server(learners):
+async def test_llama_swap_counts_only_what_songes_own_server_serves_now(learners):
+    # Songe's llama-server holds one base at a time and is stopped when not
+    # needed: reading another learner then would use the wrong weights, or
+    # fail. Only its base and applied adapters count, while it runs.
+    from pathlib import Path
+
     from tests.test_store import version
 
-    scheduler, store = swap_scheduler(learners, [])
+    _, store = learners
     second = store.scoped("second")
     second.add_version(version("night-2", 2) | {"identifier": "second-learned"})
     second.swap("night-2", second.get("current"))
-    assert "second-learned" in await scheduler.loaded_identifiers()
-    assert await scheduler.review_model() is None  # nothing of the user's loaded
+    scheduler, _ = swap_scheduler(learners, [])  # Songe's server stopped
+    assert await scheduler.loaded_identifiers() == set()
+    assert await scheduler.reader_for("second") is None
+    scheduler, _ = swap_scheduler(learners, [], props={"model_path": "/models/first-night.gguf"})
+    upstream = scheduler.upstream
+    upstream.identifiers = {
+        str(Path("/models/first-night.gguf").resolve()): "first-learned",
+        str(Path("/models/lora.gguf").resolve()): "first-lora",
+    }
+    assert await scheduler.loaded_identifiers() == {"first-learned"}
+    assert await scheduler.reader_for("second") is None  # another learner's base
+    upstream.applied = {str(Path("/models/lora.gguf").resolve())}
+    assert await scheduler.loaded_identifiers() == {"first-learned", "first-lora"}
+    scheduler, _ = swap_scheduler(learners, [], props={"model_path": "/models/night-2.gguf"})
+    scheduler.upstream.identifiers = {str(Path("/models/night-2.gguf").resolve()): "second-learned"}
+    reader = await scheduler.reader_for("second")
+    try:
+        assert reader is not None
+    finally:
+        await reader.close()
 
 
 async def test_plain_llama_server_is_still_assumed_loaded(learners):
