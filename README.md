@@ -14,6 +14,10 @@
 </p>
 
 <p align="center">
+  <a href="https://discord.gg/cBEywVkXjY"><img src="https://img.shields.io/badge/Join_our_Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Join our Discord" height="36"></a>
+</p>
+
+<p align="center">
   <a href="https://pypi.org/project/songe/"><img src="https://img.shields.io/pypi/v/songe.svg" alt="PyPI version"></a>
   <a href="https://pypi.org/project/songe/"><img src="https://img.shields.io/pypi/pyversions/songe.svg" alt="Python versions"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/sous-labs/songe.svg" alt="License: Apache-2.0"></a>
