@@ -655,10 +655,14 @@ class Store:
                         None,
                     )
                     if same:
-                        # Same state with new numbers: update it in place.
+                        # Same state with new numbers: update it in place,
+                        # as the newest line. Windows' clock (Python 3.12 and
+                        # older) ticks every ~15.6 ms, so a line written just
+                        # before can carry the same time: step past it.
+                        newest = db.execute("SELECT MAX(created) FROM events").fetchone()[0]
                         db.execute(
                             "UPDATE events SET created=?, text=? WHERE id=?",
-                            (time.time(), text, same),
+                            (max(time.time(), (newest or 0) + 1e-6), text, same),
                         )
                         return
                 row = db.execute(

@@ -505,6 +505,15 @@ def test_a_state_with_new_numbers_updates_its_line(store):
     ]
 
 
+def test_a_state_updated_within_one_clock_tick_is_still_newest(store, monkeypatch):
+    """Windows' clock (Python 3.12 and older) ticks every ~15.6 ms, so the
+    refreshed line and the one written just before it had the same time and
+    the refreshed one sorted second (seen on a Windows laptop; reported by
+    Jack in a test on 11-24)."""
+    monkeypatch.setattr("songe.log.time.time", lambda: 1000.0)
+    test_a_state_with_new_numbers_updates_its_line(store)
+
+
 def test_older_flow_lines_read_in_todays_wording():
     from songe.wording import flow_state
 
