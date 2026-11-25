@@ -1,8 +1,11 @@
 """Plain English shared by the terminal interfaces and the page (ui/wording.json)."""
 
+import json
 import math
 import re
 from datetime import datetime
+from functools import cache
+from pathlib import Path
 
 TRAINING_SETTINGS = "Training settings"
 IGNORED_MODEL_SETTINGS = "Ignored per-model settings"
@@ -250,6 +253,17 @@ def next_copy(data):
     else:
         text = readable(raw_next)
     return capitalize(text)
+
+
+@cache
+def page_words():
+    """ui/wording.json: the page's words, for the lines both surfaces show."""
+    return json.loads((Path(__file__).parent / "ui" / "wording.json").read_text(encoding="utf-8"))
+
+
+def fill(template, **values):
+    """{name} placeholders, as the page's fill() reads them."""
+    return re.sub(r"\{(\w+)\}", lambda m: str(values.get(m[1], "")), template)
 
 
 def status_lines(data):

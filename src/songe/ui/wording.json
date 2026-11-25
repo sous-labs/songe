@@ -491,5 +491,12 @@
   "request_failed": "request failed ({status})",
   "label_in_use": "{version} in use",
   "dream_stopped_early": "it ended early",
-  "idle_of": "{elapsed} of {limit}"
+  "idle_of": "{elapsed} of {limit}",
+  "deep_step": {
+    "memory": "Deep Dream · waiting for memory · {free} free of {total} · close some apps · try {attempt} of {tries}",
+    "fit": "Deep Dream · waiting for memory to train · {free} free · needs {needed} · close some apps",
+    "growth": "Deep Dream · measuring longer practice scenes · then training",
+    "measured": "Deep Dream · machine measured · training next",
+    "ready": "Deep Dream · getting ready to train"
+  }
 }
