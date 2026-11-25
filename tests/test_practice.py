@@ -379,8 +379,91 @@ def test_a_kept_plain_scene_carries_its_answer_into_training(store, monkeypatch)
 
     chat_written(store, monkeypatch, ChatWriter())
     steps = pool.practice_steps(store) + pool.practice_steps(store, split="held_out")
+    steps = [s for s in steps if not s["ordinary"]]
     assert len(steps) == 3
     assert all(s["teacher_answer"] == {"content": "uv add it", "finished": True} for s in steps)
+
+
+def test_kept_plain_scenes_get_ordinary_rows_beside_them(store, monkeypatch):
+    """Scenes where the lesson applies are all a Deep Dream trained on, and
+    the model's answers moved everywhere. Measured on a rented card
+    (Qwen3.5-4B, 16 lessons, the Dream of #166 and #169): drift at full
+    strength 0.0504, 0.0458, 0.0395 and 0.0429 against a limit of 0.05;
+    with ordinary rows 0.0147, 0.0186 and 0.0161, the habits as well
+    learned. An ordinary row is a bundled request no lesson is about with
+    the served model's own answer, no note: one per kept scene."""
+    from pathlib import Path
+
+    from songe.practice import pool
+    from songe.sleep import worker
+
+    writer = ChatWriter()
+    rows = chat_written(store, monkeypatch, writer)
+    ordinary, requests = practice.practice(store, ordinary=True), practice.ordinary_requests()
+    assert len(rows) == 3 and [r["scene"]["request"] for r in ordinary] == requests[:3]
+    # Asked as a user would, with no note, and stored to train along.
+    assert writer.replied[-3:] == [[{"role": "user", "content": q}] for q in requests[:3]]
+    assert all(r["teacher_note"] == "" and r["teacher_answer"] == {"content": "pip install it", "finished": True}
+               for r in ordinary)
+    steps = [s for s in pool.practice_steps(store) + pool.practice_steps(store, split="held_out") if s["ordinary"]]
+    assert len(steps) == 3 and all(s["hindsight"] == [] and s["teacher_answer"]["content"] == "pip install it"
+                                   for s in steps)
+    # The drift check's prompts are never trained on, and no request twice.
+    measured = json.loads((Path(worker.__file__).parent / "anchors.json").read_text(encoding="utf-8"))
+    assert not {r.strip().lower() for r in requests} & {m.strip().lower() for m in measured}
+    assert len(set(requests)) == len(requests) >= 150
+    # They are not scenes: the counts and the listing leave them out, and a
+    # second pass writes none again.
+    assert practice.counts(store)["written"] == 3 and all("ordinary" not in r for r in rows)
+    asyncio.run(practice.write_ordinary(store, writer))
+    assert len(practice.practice(store, ordinary=True)) == 3
+    # A logged system prompt opens an ordinary row as it opens the scenes.
+    with_system = {"messages": [{"role": "system", "content": "Be brief."}] + CHAT_REQUEST["messages"]}
+    signal = CHAT_SIGNAL | {"id": "beef00aa11"}
+    monkeypatch.setattr(practice, "wanted", lambda store, per_signal: [(signal, [1])])
+    monkeypatch.setattr(practice, "source", lambda store, signal: (with_system, CHAT_ITEMS))
+    asyncio.run(practice.write(store, ChatWriter(), 1))
+    (row,) = [r for r in practice.practice(store, ordinary=True) if r["signal_id"] == "beef00aa11"]
+    assert row["messages"] == [{"role": "system", "content": "Be brief."}, {"role": "user", "content": requests[3]}]
+    # Written in turn across the lessons, so the bundled requests are shared.
+    with store.connect() as db:
+        db.execute("DELETE FROM practice WHERE json_extract(payload,'$.ordinary') IS NOT NULL")
+    todo, free = practice.ordinary_wanted(store)
+    assert [(scene["signal_id"], n) for scene, n in todo] == [
+        ("c0ffee00aa", 1), ("beef00aa11", 1), ("c0ffee00aa", 2), ("c0ffee00aa", 3)]
+    assert free == requests
+
+
+def test_ordinary_rows_train_also_when_their_lesson_is_held_out(store, monkeypatch):
+    """The scheduler counts every kept row (practice_revisions) and the
+    calibration is keyed on the rows practice_steps returns. Live: rows of a
+    held-out lesson were in the first and in neither split of the second,
+    the two keys never matched, and the calibration started again every 15
+    seconds for 80 minutes."""
+    from songe.practice import pool
+
+    chat_written(store, monkeypatch, ChatWriter())
+    monkeypatch.setattr(pool, "held_out", lambda signal, extra=(): True)
+    train, test = pool.practice_steps(store), pool.practice_steps(store, split="held_out")
+    assert [s["ordinary"] for s in train] == [True] * 3 and [s["ordinary"] for s in test] == [False] * 3
+    assert set(pool.practice_revisions(store)) == {s["id"] for s in train + test}
+
+
+def test_an_ordinary_answer_the_server_cut_short_is_not_trained_along(store, monkeypatch):
+    class Cut(ChatWriter):
+        async def reply(self, messages, *, max_tokens, temperature=0, think=None):
+            got = await super().reply(messages, max_tokens=max_tokens, temperature=temperature, think=think)
+            return got | {"finished": messages[-1]["content"] not in practice.ordinary_requests()}
+
+    from songe.practice import pool
+
+    writer = Cut()
+    assert len(chat_written(store, monkeypatch, writer)) == 3
+    assert [(r["drop"], r["teacher_answer"]) for r in practice.practice(store, ordinary=True)] == [("cut", None)] * 3
+    assert not [s for s in pool.practice_steps(store) if s["ordinary"]]
+    asked = len(writer.replied)
+    asyncio.run(practice.write_ordinary(store, writer))  # not asked again
+    assert len(writer.replied) == asked
 
 
 def test_a_plain_scene_the_note_does_not_change_is_dropped(store, monkeypatch):

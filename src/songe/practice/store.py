@@ -105,7 +105,8 @@ def wanted(store, per_signal):
     with store.connect() as db:
         have = {}
         for signal_id, n in db.execute(
-            "SELECT signal_id, COUNT(*) FROM practice WHERE model_id=? GROUP BY signal_id",
+            "SELECT signal_id, COUNT(*) FROM practice WHERE model_id=?"
+            " AND json_extract(payload,'$.ordinary') IS NULL GROUP BY signal_id",
             (store.model_id,),
         ):
             have[signal_id] = n
@@ -121,11 +122,14 @@ def wanted(store, per_signal):
     return out
 
 
-def practice(store, *, kept=None):
+def practice(store, *, kept=None, ordinary=False):
+    """The written scenes, or (ordinary=True) the ordinary rows beside them
+    (write_ordinary)."""
     with store.connect() as db:
         rows = db.execute(
             "SELECT payload FROM practice WHERE model_id=?"
             + ("" if kept is None else " AND kept=?")
+            + f" AND json_extract(payload,'$.ordinary') IS {'NOT ' if ordinary else ''}NULL"
             + " ORDER BY created",
             (store.model_id,) if kept is None else (store.model_id, int(kept)),
         ).fetchall()
@@ -135,7 +139,8 @@ def practice(store, *, kept=None):
 def counts(store):
     with store.connect() as db:
         rows = db.execute(
-            "SELECT kept, \"drop\", COUNT(*) FROM practice WHERE model_id=? GROUP BY kept, \"drop\"",
+            "SELECT kept, \"drop\", COUNT(*) FROM practice WHERE model_id=?"
+            " AND json_extract(payload,'$.ordinary') IS NULL GROUP BY kept, \"drop\"",
             (store.model_id,),
         ).fetchall()
     written = sum(n for _, _, n in rows)
@@ -329,6 +334,87 @@ async def scene_row(store, reader, signal, v, request, items, lessons, workdir, 
             await asyncio.sleep(wait)
 
 
+ORDINARY_TOKENS = 500
+
+
+def ordinary_requests():
+    """The bundled ordinary requests (practice/ordinary.json): questions and
+    small writing tasks no lesson is about, and none of the prompts the
+    drift check measures on (sleep/anchors.json)."""
+    from pathlib import Path
+
+    return json.loads((Path(__file__).parent / "ordinary.json").read_text(encoding="utf-8"))
+
+
+def ordinary_wanted(store):
+    """(the ordinary rows still to write as [(a kept scene of the lesson,
+    the row's number)], the requests not used in this store yet).
+
+    One ordinary row per kept scene that is trained along its teacher's
+    answer (a plain chat's scene), numbered from 1 within its lesson. They
+    are written in turn across the lessons, each bundled request once in a
+    store: when the requests are used up, every lesson has about as many."""
+    scenes, have, used = {}, {}, set()
+    for row in practice(store, ordinary=True):
+        have.setdefault(row["signal_id"], set()).add(row["variant"])
+        used.add(row["scene"]["request"])
+    for row in practice(store, kept=True):
+        if row.get("messages") and (row.get("teacher_answer") or {}).get("content"):
+            scenes.setdefault(row["signal_id"], []).append(row)
+    todo = [
+        (rows[0], n)
+        for signal_id, rows in scenes.items()
+        for n in range(1, len(rows) + 1)
+        if n not in have.get(signal_id, ())
+    ]
+    todo.sort(key=lambda pair: pair[1])  # stable: the lessons keep their order within a turn
+    return todo, [r for r in ordinary_requests() if r not in used]
+
+
+async def write_ordinary(store, reader):
+    """Ordinary rows for the lessons that lack them. Returns how many were
+    kept.
+
+    A Deep Dream that trains only on scenes where the lesson applies moves
+    the model's answers everywhere (measured on a rented card, Qwen3.5-4B,
+    16 lessons: drift at full strength 0.046 to 0.050 against a limit of
+    0.05). An ordinary row is a request no lesson is about with the served
+    model's own answer, no note for the teacher: trained along that answer
+    (as a plain scene is along its teacher's), the student is held to what
+    it does today where no lesson applies. With one such row per kept scene,
+    up to the 192 bundled requests, the same Dreams measured 0.015 to 0.019.
+
+    The requests are their own set: the drift check's prompts are never
+    trained on, or it would measure what it was trained to pass. A row opens
+    with the system message its lesson's scenes open with. An answer the
+    server cut short is not stored to train along (kept=0, so the request is
+    not asked again)."""
+    todo, free = await asyncio.to_thread(ordinary_wanted, store)
+    kept = 0
+    for scene, n in todo:
+        if not free:
+            break
+        request = free.pop(0)
+        system = [m for m in scene["messages"] if m.get("role") == "system"][:1]
+        messages = system + [{"role": "user", "content": request}]
+        try:
+            answer = await reader.reply(messages, max_tokens=ORDINARY_TOKENS)
+        except Stopped:
+            break
+        whole = answer["finished"] and not answer["reasoned"] and bool(answer["content"].strip())
+        row = {
+            "id": f"{scene['signal_id']}#o{n}", "signal_id": scene["signal_id"], "signal": scene["signal"],
+            "variant": n, "topic": None, "scene": {"request": request}, "ordinary": True,
+            "teacher_note": "", "messages": messages, "tools": [], "problems": [], "final_files": {},
+            "teacher_answer": {"content": answer["content"], "finished": True} if whole else None,
+            "checks": {"built": True}, "drop": None if whole else "cut",
+            "why": {"ordinary": "a request no lesson is about, trained along the served model's own answer"},
+        }
+        await asyncio.to_thread(save, store, row)
+        kept += whole
+    return kept
+
+
 async def write(store, reader, per_signal, *, limit=None):
     """Write missing scenes until done or the user returns. Returns how many
     scenes were written (kept or not)."""
@@ -398,4 +484,7 @@ async def write(store, reader, per_signal, *, limit=None):
                 return done
             if failed >= FAILED_IN_A_ROW:
                 raise PracticeFailed(f"{type(last).__name__}: {last}") from last
+    ordinary = await write_ordinary(store, reader)
+    if ordinary:
+        logger.info("practice_ordinary %s rows", ordinary)
     return done

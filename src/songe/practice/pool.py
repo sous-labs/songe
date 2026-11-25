@@ -62,7 +62,15 @@ def practice_steps(store, split="train"):
         row = json.loads(payload)
         if not row.get("messages"):
             continue
-        if (held_out(row["signal_id"], extra) or row["id"] in out_scenes) != (split == "held_out"):
+        # An ordinary row (practice.store.write_ordinary) always trains, also
+        # when its lesson is held out for the check, and is never a test
+        # moment: no lesson is in it. practice_revisions counts every kept
+        # row, and the two must agree.
+        ordinary = bool(row.get("ordinary"))
+        if ordinary:
+            if split == "held_out":
+                continue
+        elif (held_out(row["signal_id"], extra) or row["id"] in out_scenes) != (split == "held_out"):
             continue
         if row["signal_id"] in waiting:
             continue
@@ -81,7 +89,10 @@ def practice_steps(store, split="train"):
                 "teacher_answer": row.get("teacher_answer"),
                 "context": row["messages"],
                 "tools": row.get("tools") or [],
-                "hindsight": [{"role": "user", "content": row["teacher_note"]}],
+                # No note for the teacher in an ordinary row: the student is
+                # trained toward the model as it is, along its own answer.
+                "hindsight": [] if ordinary else [{"role": "user", "content": row["teacher_note"]}],
+                "ordinary": ordinary,
                 "action": {},
                 "source_id": rowid,
                 "observed_id": 0,
