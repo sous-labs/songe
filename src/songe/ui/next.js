@@ -274,7 +274,9 @@ function dreaming(c) {
     return el('span', {title: W.stage[s.key]}, el('i', {style: `width:${Math.round(share * 100)}%`}));
   }));
   return el('div', {class: `finished running${c.wait ? ' waiting' : ''}`},
-    el('p', {class: 'finished-title'}, el('span', {class: 'tick'}, c.wait ? '‖' : '●'), c.wait ? ' Dreaming · paused' : ' Dreaming',
+    el('p', {class: 'finished-title'}, el('span', {class: 'tick'}, c.wait ? '‖' : '●'),
+      // Paused is the viewer's own choice; any other wait is Songe's.
+      c.wait ? ` Dreaming · ${c.wait.code === 'paused' ? 'paused' : 'waiting'}` : ' Dreaming',
       el('span', {class: 'muted'}, ` · started ${when(c.started_at)} · step ${i + 1} of ${c.stages.length}`)),
     el('p', {class: 'finished-outcome'}, c.wait ? W.wait[c.wait.code] : now),
     steps,

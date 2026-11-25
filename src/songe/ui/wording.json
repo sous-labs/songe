@@ -95,7 +95,7 @@
     "disk": "Waits for disk space",
     "no_data": "Waits for new conversations",
     "model_server": "Waits for the model to be loaded in your model server",
-    "paused": "Paused",
+    "paused": "Paused · press Resume to continue",
     "unsupported": "This model cannot learn here yet",
     "error": "Stopped by an error · run songe doctor"
   },
