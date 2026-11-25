@@ -691,3 +691,40 @@ def test_mlx_teacher_is_the_cycle_start_snapshot(monkeypatch):
         assert not backend.model.training
     assert backend.model.weights["lora_a"].tolist() == [7.0, 8.0]
     assert backend.model.training and based == [True]
+
+
+def test_frozen_undoes_in_place_conv_and_recurrent_state_writes():
+    """A hybrid cache layer (Inkling-2) writes its convolution and recurrent
+    states in place. Under a frozen prefix those writes must be undone, or the
+    backward pass replays the layer on the window's own tail (CheckpointError).
+    Runs on transformers' own cache layer, without the Inkling-2 model code."""
+    from types import SimpleNamespace
+
+    torch = pytest.importorskip("torch")
+    cache_utils = pytest.importorskip("transformers.cache_utils")
+    from transformers.modeling_layers import GradientCheckpointingLayer
+
+    from songe.backends.torch import TorchBackend
+
+    layer = GradientCheckpointingLayer()
+    layer.gradient_checkpointing = True
+    state = cache_utils.LinearAttentionAndFullAttentionLayer()
+    state.update_conv_state(torch.arange(8.0).reshape(1, 2, 4))
+    state.update_recurrent_state(torch.ones(1, 2, 3))
+    conv = state.conv_states[0].clone()
+    recurrent = state.recurrent_states[0].clone()
+    owner = SimpleNamespace(torch=torch, _causal=lambda: torch.nn.Sequential(layer))
+    past = SimpleNamespace(layers=[state])
+
+    with TorchBackend.frozen(owner, past) as kept:
+        assert kept
+        full = state.update_conv_state(torch.full((1, 2, 2), 9.0))
+        assert full.shape[-1] == 6  # the prefix's states were read
+        state.update_recurrent_state(torch.full((1, 2, 3), 5.0))
+        torch.testing.assert_close(state.conv_states[0], conv, atol=0, rtol=0)
+        torch.testing.assert_close(state.recurrent_states[0], recurrent, atol=0, rtol=0)
+
+    assert "update_conv_state" not in vars(state)
+    assert "update_recurrent_state" not in vars(state)
+    state.update_conv_state(torch.full((1, 2, 2), 9.0))
+    assert not torch.equal(state.conv_states[0], conv)  # writes again after
