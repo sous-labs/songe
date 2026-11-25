@@ -5,6 +5,10 @@ import random
 from dataclasses import asdict, dataclass
 from statistics import mean
 
+# What a judged moment carries (sleep/judged.py): its outcome, who decided,
+# and with cloud learning on the local judge's outcome beside it.
+JUDGED = ("outcome", "by", "judge", "local", "cloud_unavailable")
+
 
 @dataclass
 class Decision:
@@ -185,7 +189,7 @@ def choose_scale(
         )
         evaluations[str(scale)] = verdict.dict() | {
             # The judged moments (sleep/judged.py), for the report.
-            "judged": [{k: r.get(k) for k in ("id", "conversation", "outcome", "by")}
+            "judged": [{k: r[k] for k in ("id", "conversation", *JUDGED) if k in r}
                        for r in after if r.get("outcome")],
         }
         if verdict.accepted:
