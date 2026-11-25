@@ -1415,7 +1415,7 @@ async def test_llama_swap_serves_its_bases_and_reports_their_context(tmp_path):
 
 
 
-def swap_scheduler(learners, running, models=None, props=None):
+def swap_scheduler(learners, running, models=None, props=None, adapters=()):
     from songe.upstream.llamacpp import LlamaCPP
 
     config, store = learners
@@ -1427,6 +1427,8 @@ def swap_scheduler(learners, running, models=None, props=None):
         if request.url.port == 41001:  # Songe's own llama-server
             if request.url.path == "/props" and props is not None:
                 return httpx.Response(200, json=props)
+            if request.url.path == "/lora-adapters" and props is not None:
+                return httpx.Response(200, json=list(adapters))
             return httpx.Response(404)
         if request.url.path == "/running" and running is not None:
             return httpx.Response(200, json={"running": running})
@@ -1474,7 +1476,10 @@ async def test_llama_swap_counts_only_what_songes_own_server_serves_now(learners
     scheduler, _ = swap_scheduler(learners, [])  # Songe's server stopped
     assert await scheduler.loaded_identifiers() == set()
     assert await scheduler.reader_for("second") is None
-    scheduler, _ = swap_scheduler(learners, [], props={"model_path": "/models/first-night.gguf"})
+    lora = {"id": 0, "path": "/models/lora.gguf", "scale": 0.0}
+    scheduler, _ = swap_scheduler(
+        learners, [], props={"model_path": "/models/first-night.gguf"}, adapters=[lora]
+    )
     upstream = scheduler.upstream
     upstream.identifiers = {
         str(Path("/models/first-night.gguf").resolve()): "first-learned",
@@ -1482,7 +1487,7 @@ async def test_llama_swap_counts_only_what_songes_own_server_serves_now(learners
     }
     assert await scheduler.loaded_identifiers() == {"first-learned"}
     assert await scheduler.reader_for("second") is None  # another learner's base
-    upstream.applied = {str(Path("/models/lora.gguf").resolve())}
+    lora["scale"] = 1.0
     assert await scheduler.loaded_identifiers() == {"first-learned", "first-lora"}
     scheduler, _ = swap_scheduler(learners, [], props={"model_path": "/models/night-2.gguf"})
     scheduler.upstream.identifiers = {str(Path("/models/night-2.gguf").resolve()): "second-learned"}
@@ -1491,6 +1496,59 @@ async def test_llama_swap_counts_only_what_songes_own_server_serves_now(learners
         assert reader is not None
     finally:
         await reader.close()
+
+
+async def test_llama_swap_drops_an_adapter_when_a_restart_changes_the_base(tmp_path):
+    # A's adapter is applied on base X; loading B's adapter restarts Songe's
+    # server on base Y. A must not count: its requests would get Y and B's
+    # adapter, and its signals would be read with B's weights.
+    from songe.upstream.llamacpp import LlamaCPP
+
+    a, b = str(tmp_path / "a.gguf"), str(tmp_path / "b.gguf")
+    x, y = str(tmp_path / "x.gguf"), str(tmp_path / "y.gguf")
+    lora_of = {x: a, y: b}
+    state = {"base": x, "adapters": [{"id": 0, "path": a, "scale": 0.0}]}
+
+    def handler(request):
+        if request.url.port != 41001:
+            return httpx.Response(200, json={"running": []})  # llama-swap, idle
+        if request.url.path == "/props":
+            return httpx.Response(200, json={"model_path": state["base"]})
+        if request.method == "POST":
+            scales = {i["id"]: i["scale"] for i in json.loads(request.content)}
+            for adapter in state["adapters"]:
+                adapter["scale"] = scales.get(adapter["id"], 0.0)
+        return httpx.Response(200, json=[dict(i) for i in state["adapters"]])
+
+    async def restart(version):
+        base = version["artifact"] if version.get("kind") == "gguf-full" else version["base"]
+        state.update(base=base, adapters=[{"id": 0, "path": lora_of[base], "scale": 0.0}])
+
+    async def stop():
+        pass
+
+    config = Config(upstream="llamacpp", upstream_url="http://127.0.0.1:41001/v1")
+    config.server_source_url = "http://127.0.0.1:9292/v1"
+    upstream = LlamaCPP(
+        config, transport=httpx.MockTransport(handler), restart=restart, stop=stop
+    )
+    await upstream.load(
+        {"identifier": "songe/a-learned", "artifact": a, "adapter": a, "base": x}
+    )
+    assert await upstream.serving() == ["songe/a-learned"]
+    await upstream.load(
+        {"identifier": "songe/b-learned", "artifact": b, "adapter": b, "base": y}
+    )
+    assert await upstream.serving() == ["songe/b-learned"]
+    assert [i["identifier"] for i in await upstream.listing()] == ["songe/b-learned"]
+
+
+async def test_llama_swap_failing_after_it_answered_means_nothing_loaded(learners):
+    scheduler, _ = swap_scheduler(learners, [{"model": "first"}])
+    assert await scheduler.review_model() == "first"
+    scheduler.upstream.transport = httpx.MockTransport(lambda r: httpx.Response(502))
+    assert await scheduler.loaded_identifiers() == set()
+    assert await scheduler.review_model() is None
 
 
 async def test_plain_llama_server_is_still_assumed_loaded(learners):

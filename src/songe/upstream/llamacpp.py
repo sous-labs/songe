@@ -31,6 +31,7 @@ class LlamaCPP:
         self.restart, self.stop, self.memory_probe = restart, stop, memory_probe
         self.identifiers = {}
         self.applied = set()
+        self.answered_running = False
         self.routes = {}
 
     def discover(self):
@@ -78,8 +79,11 @@ class LlamaCPP:
         user's, or read with another learner's weights."""
         url = getattr(self.config, "server_source_url", "") or self.url
         loaded = await asyncio.to_thread(discovery.llamaswap_loaded, url, self.transport)
-        if loaded is None:
+        if loaded is None and not self.answered_running:
             return None
+        # Once it has answered, a failed /running means nothing is loaded.
+        self.answered_running = True
+        loaded = loaded or []
         return [{"identifier": i, "type": "llm"} for i in loaded + await self.serving()]
 
     async def serving(self):
@@ -89,11 +93,22 @@ class LlamaCPP:
             return []
         try:
             props = await self._request("GET", "/props")
+            adapters = await self._request("GET", "/lora-adapters")
         except httpx.HTTPError:
             return []
         base = str(Path((props or {}).get("model_path", "")).resolve())
         found = [self.identifiers[base]] if base in self.identifiers else []
-        found += [self.identifiers[p] for p in sorted(self.applied) if p in self.identifiers]
+        # Ask the server, not self.applied: a restart onto another base drops
+        # adapters applied before it.
+        for adapter in adapters if isinstance(adapters, list) else []:
+            if not isinstance(adapter, dict):
+                continue
+            scale = adapter.get("scale")
+            if not isinstance(scale, (int, float)) or scale <= 0:
+                continue
+            path = str(Path(adapter.get("path", "")).resolve())
+            if path in self.identifiers and self.identifiers[path] not in found:
+                found.append(self.identifiers[path])
         return found
 
     async def _request(self, method, path, **kwargs):

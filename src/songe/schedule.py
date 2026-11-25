@@ -1573,6 +1573,7 @@ class ModelScheduler(Scheduler):
         self.serving_model = None
         self.load_refused = {}
         self.serving_binding = None
+        self.answered_running = False
         super().__init__(config, store, upstream, platform)
 
     def unloads(self):
@@ -2570,7 +2571,11 @@ class ModelScheduler(Scheduler):
             getattr(config, "server_source_url", "") or config.upstream_url,
             getattr(self.upstream, "transport", None),
         )
-        return None if loaded is None else [{"identifier": i, "type": "llm"} for i in loaded]
+        if loaded is None and not self.answered_running:
+            return None
+        # Once it has answered, a failed /running means nothing is loaded.
+        self.answered_running = True
+        return [{"identifier": i, "type": "llm"} for i in loaded or []]
 
     async def read_sessions(
         self, *, force=False, only=None, practice=False, seconds=None, quick=False
