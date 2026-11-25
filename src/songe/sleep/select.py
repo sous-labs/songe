@@ -59,13 +59,23 @@ def bounded_batch(pool, config, seconds, step_seconds, *, pending=None, whole=Fa
         )
     else:
         limit = min(limit, config.accumulation)
-    ordered = sorted(
-        pool,
-        key=lambda s: (
+    def first(s):
+        return (
             pending is not None and (s["id"], revision_id(s)) not in pending,
             bool(s.get("retry")),  # scenes of a rejected Dream after untried ones
             not s.get("stated"),  # the user's own rules make the cut first
-            s["id"],
-        ),
-    )
+        )
+
+    ordered = sorted(pool, key=lambda s: (*first(s), s["id"]))
+    if len(ordered) > limit:
+        # Over the limit, the cut is even: rows are taken in turn from each
+        # lesson (the rows of one conversation count as one lesson), so every
+        # lesson keeps the same number of rows, or all it has. Cut by id
+        # alone, the lessons whose ids sort last lost every row and were not
+        # trained at all (measured: 3 of 11 lessons, 142 of 478 scenes).
+        turn, seen = {}, {}
+        for s in ordered:
+            lesson = s.get("conversation") or s["id"]
+            turn[s["id"]] = seen[lesson] = seen.get(lesson, -1) + 1
+        ordered.sort(key=lambda s: (*first(s), turn[s["id"]], s["id"]))
     return ordered[:limit], ordered[limit:]

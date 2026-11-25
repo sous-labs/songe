@@ -8,7 +8,17 @@ from ..steps import digest
 def public_name(model):
     if model.startswith("songe/"):
         return model
-    name = re.sub(r"[^a-zA-Z0-9._-]+", "-", model.rsplit("/", 1)[-1]).strip("-")
+    last = model.rsplit("/", 1)[-1]
+    # A Hugging Face cache path ends in .../models--Org--Name/snapshots/<commit>:
+    # its last part is a commit hash, the model's name is two parts up.
+    parts = re.split(r"[\\/]", model.rstrip("/\\"))
+    if (
+        len(parts) >= 3
+        and parts[-2] == "snapshots"
+        and parts[-3].startswith("models--")
+    ):
+        last = parts[-3].split("--", 2)[-1]
+    name = re.sub(r"[^a-zA-Z0-9._-]+", "-", last).strip("-")
     return f"songe/{name or 'local'}"
 
 

@@ -110,7 +110,7 @@ def train(backend, pool, anchors, work, progress):
 
     optimizer = backend.optimizer(schedule)
     weights = sample_weights(pool)
-    losses, learned = [], set()
+    losses, learned, skipped = [], set(), 0
     is_torch = backend.kind == "torch"
     if not is_torch:
         from mlx.utils import tree_flatten, tree_map, tree_unflatten
@@ -199,13 +199,26 @@ def train(backend, pool, anchors, work, progress):
             # A step boundary: the slice deadline may stop here, never midway.
             getattr(backend, "boundary", backend.check)()
             step_started = time.monotonic()
-            gradients, loss, pending = None, 0.0, set()
+            gradients, loss, pending, used = None, 0.0, set(), 0
             batch = plan[cursor : cursor + accumulation]
             for micro, (is_anchor, index) in enumerate(batch):
                 step = anchors[index] if is_anchor else pool[index]
-                value, grad, count = backend.train_step(
-                    step, optimizer, seed=7613 + cursor + micro
-                )
+                try:
+                    value, grad, count = backend.train_step(
+                        step, optimizer, seed=7613 + cursor + micro
+                    )
+                except Exception as error:
+                    # A mixture-of-experts model can route a token to another
+                    # expert when a checkpointed layer is recomputed for the
+                    # backward pass (Inkling 2 Mini: a routing tie), and torch
+                    # then stops the step. Nothing was applied yet, so that
+                    # one sample is passed over instead of ending the Dream.
+                    if type(error).__name__ != "CheckpointError":
+                        raise
+                    skipped += 1
+                    getattr(backend, "release", lambda: None)()
+                    continue
+                used += 1
                 if not math.isfinite(value):
                     raise ValueError("Non-finite training loss")
                 if count < 1:
@@ -242,7 +255,11 @@ def train(backend, pool, anchors, work, progress):
                 # otherwise accumulation grows the allocator cache by each shape.
                 getattr(backend, "release", lambda: None)()
                 loss += value * weight
-            size = len(batch)
+            if gradients is None:
+                # Every sample of this step was passed over.
+                cursor += len(batch)
+                continue
+            size = used
             if is_torch:
                 gradients = {n: _inplace(g, "div_", size) for n, g in gradients.items()}
             else:
@@ -281,6 +298,8 @@ def train(backend, pool, anchors, work, progress):
     return {
         "iterations": iteration,
         "samples_trained": cursor,
+        # In this slice; a resumed run counts from its resume.
+        "samples_skipped": skipped,
         "steps_learned": len(learned),
         "trained_revisions": {
             s["id"]: revision_id(s) for s in pool if s["id"] in learned

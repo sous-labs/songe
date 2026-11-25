@@ -56,7 +56,7 @@ class Stats:
 
     @property
     def prompt_tps(self):
-        return self.prompt_tokens / (self.prompt_seconds or self.seconds)
+        return self.prompt_tokens / max(self.prompt_seconds or self.seconds, 1e-6)
 
 
 def divergence(
@@ -584,7 +584,9 @@ class TorchBackend:
         inputs = torch.tensor([prompt_ids], device=self.device)
         was_training = self.model.training
         self.model.eval()
-        started = time.monotonic()
+        # perf_counter: Windows' monotonic clock ticks every ~15.6 ms, so a
+        # short answer could take "0 seconds" and divide by zero.
+        started = time.perf_counter()
         if state is not None or len(prompt_ids) > self._chunk():
             # A long prompt is read in chunks, as the teacher reads it: one
             # pass over the whole prompt can need far more memory than the
@@ -619,7 +621,7 @@ class TorchBackend:
                         ).to(self.device)
                     value = int(token.item())
                     if not tokens:
-                        prompt_seconds = time.monotonic() - started
+                        prompt_seconds = time.perf_counter() - started
                     tokens.append(value)
                     past, inputs = self._cache(out), token
                     if value in eos:
@@ -628,7 +630,9 @@ class TorchBackend:
             self.model.train(was_training)
         if not tokens:
             raise ValueError("Model generated no tokens")
-        seconds = time.monotonic() - started
+        seconds = time.perf_counter() - started
+        # Never a zero span, whatever the clock's resolution.
+        tick = 1e-6
         return (
             tokens,
             self.tokenizer.decode(tokens, skip_special_tokens=True),
@@ -636,9 +640,9 @@ class TorchBackend:
                 len(prompt_ids),
                 len(tokens),
                 seconds,
-                (len(tokens) - 1) / (seconds - prompt_seconds)
+                (len(tokens) - 1) / max(seconds - prompt_seconds, tick)
                 if len(tokens) > 1
-                else len(tokens) / seconds,
+                else len(tokens) / max(seconds, tick),
                 prompt_seconds,
             ),
         )

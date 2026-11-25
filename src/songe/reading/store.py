@@ -8,6 +8,7 @@ answers make the next attempt quick.
 
 import asyncio
 import json
+import re
 import time
 
 from ..steps import digest
@@ -187,9 +188,33 @@ def signals(store, *, types=None):
     return [s for s in found if types is None or s["type"] in types]
 
 
-def save(store, session, revision, found, items):
+# Where an agent says which folder it works in: Claude Code and opencode
+# ("Working directory: /path"), pi ("Current working directory: /path"), Codex
+# ("<cwd>/path</cwd>").
+WORKDIR = re.compile(r"(?im)(?:^|\b)(?:current )?(?:working directory|working dir|cwd)\s*[:=>]\s*['\"`]?([^\s'\"`<]+)")
+
+
+def project_of(rows):
+    """The folder the session's agent worked in, by its last path part
+    ("billing-api"), from the first system message that names one; None."""
+    for _, request, _, _ in rows:
+        for m in (request or {}).get("messages") or []:
+            if m.get("role") != "system":
+                continue
+            content = m.get("content")
+            if isinstance(content, list):
+                content = " ".join(str(p.get("text", "")) for p in content if isinstance(p, dict))
+            if found := WORKDIR.search(str(content or "")):
+                name = found[1].rstrip("/\\").replace("\\", "/").rsplit("/", 1)[-1]
+                return name or None
+    return None
+
+
+def save(store, session, revision, found, items, project=None):
     """Replace this learner's signals for one session. A signal retired before
-    (a newer preference replaced it) stays retired."""
+    (a newer preference replaced it) stays retired. project: the folder the
+    agent worked in (project_of), kept on each signal so a note can say the
+    project's own names in a way that holds in other projects (quick.general)."""
     exchange_of = {it["step"]: it.get("exchange") for it in items if it["kind"] == "action"}
     with store.connect() as db:
         retired = dict(
@@ -208,6 +233,8 @@ def save(store, session, revision, found, items):
                 str(n): exchange_of.get(n) for n in steps if exchange_of.get(n) is not None
             }
             s["revision"] = revision
+            if project:
+                s["project"] = project
             s["id"] = digest([session, s["type"], s.get("item"), s.get("text")])
             db.execute(
                 "INSERT OR REPLACE INTO signals(id,model_id,session,revision,payload,retired_at) VALUES (?,?,?,?,?,?)",
@@ -429,7 +456,7 @@ async def read(store, reader, *, limit=None, on_session=None, newest=False, seco
             store_failed = getattr(reader, "failed_sessions", [])
             reader.failed_sessions = [*store_failed, session]
             continue
-        await asyncio.to_thread(save, store, session, max(ids), found, items)
+        await asyncio.to_thread(save, store, session, max(ids), found, items, project_of(rows))
         done += 1
         if on_session:
             on_session(session, found)

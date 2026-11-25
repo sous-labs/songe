@@ -216,6 +216,26 @@ def decode_response(body, streaming):
     return {"choices": result}
 
 
+def upstream_failure(exc, url):
+    """What went wrong reaching the model server, said for the agent's user
+    (reported by Jack in a test on 11-24: mlx-lm 0.32 dropped the
+    connection on a tool call it could not parse, and the agent saw only
+    "Local upstream unavailable", 41 times in 80 conversations)."""
+    from urllib.parse import urlparse
+
+    where = urlparse(url).netloc or url
+    detail = " ".join(str(exc).split())[:200]
+    if isinstance(exc, httpx.ConnectError):
+        said = f"nothing answers at {where}"
+    elif isinstance(exc, httpx.RemoteProtocolError):
+        said = f"the model server at {where} closed the connection without an answer; its own log says why"
+    elif isinstance(exc, httpx.TimeoutException):
+        said = f"no answer in time from the model server at {where}"
+    else:
+        said = f"the model server at {where} failed"
+    return f"{said} ({type(exc).__name__}{': ' + detail if detail else ''})"
+
+
 async def open_upstream(client, upstream_request, request):
     """Cancel a stalled upstream even if the client leaves before headers."""
 
@@ -429,9 +449,32 @@ def create_app(config=None, store=None, client=None, scheduler=None):
                     (raw for raw, alias in aliases.items() if alias == requested), None
                 )
                 model = model or (store.get("primary_model") if is_alias else requested)
+                refs = ()
+                if (
+                    model == requested
+                    and requested.startswith("songe/")
+                    and not await asyncio.to_thread(registry.find, store, requested)
+                ):
+                    # A Songe name nobody registered: a model downloaded
+                    # after Songe started. Find it in the library; never
+                    # register the Songe name itself as a model (live: its
+                    # 404 marked the name unsupported and the real model was
+                    # renamed songe/<name>-<hash>).
+                    from .models import library
+
+                    try:
+                        ref = await asyncio.to_thread(library.named, config, requested)
+                    except Exception:
+                        logger.warning("library_lookup_failed", exc_info=True)
+                        ref = None
+                    model, refs = (ref.serving_id, (ref,)) if ref else (None, ())
+                    if model is None:
+                        # Passed on as asked (the server answers 404), not
+                        # served by the primary model's version.
+                        version, binding = None, f"{requested}:base"
                 if model:
                     row = await asyncio.to_thread(
-                        registry.observe, config, store, model
+                        registry.observe, config, store, model, refs
                     )
                     model = row["id"]
                     selected = store.scoped(model)
@@ -534,13 +577,15 @@ def create_app(config=None, store=None, client=None, scheduler=None):
             if scheduler:
                 scheduler.release(binding)
             return Response(status_code=499)
-        except httpx.HTTPError:
+        except httpx.HTTPError as exc:
             if scheduler:
                 scheduler.release(binding)
+            why = upstream_failure(exc, url)
+            logger.warning("upstream_unavailable %s", why)
             return JSONResponse(
                 {
                     "error": {
-                        "message": "Local upstream unavailable",
+                        "message": "Local upstream unavailable · " + why,
                         "type": "upstream_unavailable",
                     }
                 },

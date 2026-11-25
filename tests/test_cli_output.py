@@ -421,3 +421,19 @@ def test_flow_states_use_dashboard_units():
         "collecting · 0 of 8 new examples"
     )
     assert flow_state("LM Studio busy") == "LM Studio busy"
+
+
+def test_a_model_that_cannot_learn_is_named_once():
+    """Now and Next both said "Choose another model"."""
+    from songe.wording import status_lines
+
+    data = {
+        "activity": {
+            "now": "waiting · unsupported · Gemma 3",
+            "next": "choose another model",
+        }
+    }
+    assert status_lines(data) == [
+        ("now", "Not supported yet · Gemma 3"),
+        ("next", "Choose another model"),
+    ]

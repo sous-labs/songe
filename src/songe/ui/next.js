@@ -30,8 +30,9 @@ function duration(s) {
   if (s == null) return '';
   s = Math.round(s);
   if (s < 60) return `${s}s`;
-  if (s < 3600) return `${Math.round(s / 60)}m`;
-  return `${Math.floor(s / 3600)}h ${Math.round(s % 3600 / 60)}m`;
+  // Round to minutes first: 7170 s is "2h 0m", not "1h 60m".
+  const m = Math.round(s / 60);
+  return m < 60 ? `${m}m` : `${Math.floor(m / 60)}h ${m % 60}m`;
 }
 function value(unit, v) {
   if (v == null) return '–';
@@ -140,7 +141,11 @@ function statusLines(models, inventory, paused) {
     return [`Idle · ${r?.outcome === 'adopted' ? `${name(lastId)} moved to ${r.version}` : `last Deep Dream not used`} ${when(last.last.ended_at)}`,
       needs || (auto ? 'Dreams again when your computer is idle' : 'Auto-dream is off · press Dream to run one')];
   }
-  const firstId = Object.keys(models)[0];
+  // No model can learn here (no local weights, an unsupported
+  // architecture): say so, as `songe status` does, not "Collecting".
+  const ids = Object.keys(models);
+  const firstId = ids.find(id => inventory[id]?.support !== 'unsupported');
+  if (!firstId && ids.length) return [`${W.not_supported} · ${name(ids[0])}`, W.choose_another];
   const pending = models[firstId]?.pending;
   const auto = inventory[firstId]?.auto_dream ?? true;
   return [`Collecting · ${pending ? plural(pending.conversations, 'conversations') : ''} recorded`,
@@ -234,8 +239,9 @@ function example(e) {
 function when(sec) {
   if (sec == null) return '';
   const d = new Date(sec * 1000), today = new Date();
-  const time = d.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
-  return d.toDateString() === today.toDateString() ? `today ${time}` : `${d.toLocaleDateString([], {month: 'short', day: 'numeric'})} ${time}`;
+  // English like the rest of the page, whatever the browser's language.
+  const time = d.toLocaleTimeString('en-US', {hour: '2-digit', minute: '2-digit', hourCycle: 'h23'});
+  return d.toDateString() === today.toDateString() ? `today ${time}` : `${d.toLocaleDateString('en-US', {month: 'short', day: 'numeric'})} ${time}`;
 }
 // The result in words. After an undo, an adopted version was used then,
 // not now.
@@ -274,7 +280,9 @@ function dreaming(c) {
     return el('span', {title: W.stage[s.key]}, el('i', {style: `width:${Math.round(share * 100)}%`}));
   }));
   return el('div', {class: `finished running${c.wait ? ' waiting' : ''}`},
-    el('p', {class: 'finished-title'}, el('span', {class: 'tick'}, c.wait ? '‖' : '●'), c.wait ? ' Dreaming · paused' : ' Dreaming',
+    el('p', {class: 'finished-title'}, el('span', {class: 'tick'}, c.wait ? '‖' : '●'),
+      // Paused is the viewer's own choice; any other wait is Songe's.
+      c.wait ? ` Dreaming · ${c.wait.code === 'paused' ? 'paused' : 'waiting'}` : ' Dreaming',
       el('span', {class: 'muted'}, ` · started ${when(c.started_at)} · step ${i + 1} of ${c.stages.length}`)),
     el('p', {class: 'finished-outcome'}, c.wait ? W.wait[c.wait.code] : now),
     steps,
@@ -669,7 +677,7 @@ function modelView(id, ml, inv, paused = false) {
   const dreams = ml?.dreams || [];
   const latest = dreams[0];
   const seen = d => () => control('seen', {model: id, id: d.id});
-  if (unsupported) node.append(quiet(ml, inv, [W.wait.unsupported, inv.reason && `It is ${inv.reason}.`]));
+  if (unsupported) node.append(quiet(ml, inv, [W.wait.unsupported, inv.reason]));
   else if (running === 'deep' && !away) {
     // A Deep Dream running: the learning view.
     node.append(backLink(id), el('section', {class: 'changed'}, dreaming(ml.current)), cycleView(ml.current, 'This Dream'));
@@ -695,11 +703,13 @@ function modelView(id, ml, inv, paused = false) {
     }
     // While the new Quick Dream is the card on top, the row opens on the
     // Dream before it, so its report is not shown twice.
+    // When that card is the only Dream, the row has nothing else to open.
     const chosen = dreams.find(d => d.id === selectedDream[id]) || (card && dreams[1]) || dreams[0];
-    node.append(
+    const twice = card && chosen.id === latest.id;
+    node.append(...[
       el('section', {class: 'dreams'}, el('h3', {class: 'section-title'}, W.dreams_title), dreamRow(id, dreams, chosen.id)),
-      el('section', {class: 'chosen-report'}, rowReport(id, ml, chosen)),
-      nowLine(id, ml));
+      twice ? null : el('section', {class: 'chosen-report'}, rowReport(id, ml, chosen)),
+      nowLine(id, ml)].filter(Boolean));
   }
   if (!unsupported && ml?.versions?.length) node.append(versionsView(id, ml.versions));
   return node;
@@ -1071,7 +1081,7 @@ async function cloudSetup(enabling, details = null) {
       el('p', {class: 'label'}, night ? fill(C.calls_title, {night: night.night}) : C.calls_none),
       night ? el('p', {class: 'muted'}, fill(C.calls_total, {calls: night.calls, spent: night.cost_known ? money(night.usd) : C.cost_unknown})) : null,
       calls.length ? el('ul', {}, calls.map(call => el('li', {},
-        el('span', {}, `${new Date(call.at * 1000).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'})} · ${call.purpose} · ${call.model}`),
+        el('span', {}, `${new Date(call.at * 1000).toLocaleTimeString('en-US', {hour: '2-digit', minute: '2-digit', hourCycle: 'h23'})} · ${call.purpose} · ${call.model}`),
         el('span', {class: 'muted'}, ` · ${call.sent_chars} chars · ${call.sent ? money(call.cost_usd) : C.not_sent}${call.ok ? '' : ` · ${call.error || 'failed'}`}`),
         call.preview ? el('span', {class: 'cloud-preview'}, call.preview) : null))) : null));
 }

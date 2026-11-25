@@ -157,6 +157,19 @@ def test_cpu_requires_explicit_training_choice(tmp_path):
     assert backend.sample([3], seed=1)[0]
 
 
+def test_tokens_per_second_with_a_coarse_clock(backend, monkeypatch):
+    """Windows' monotonic clock ticks every ~15.6 ms: a short answer took
+    "0 seconds" and sampling raised ZeroDivisionError (11 tests failed on a
+    Windows laptop; reported by Jack in a test on 11-24). A clock that does
+    not move at all is the limit of that."""
+    monkeypatch.setattr("songe.backends.torch.time.monotonic", lambda: 5.0)
+    monkeypatch.setattr("songe.backends.torch.time.perf_counter", lambda: 5.0)
+    tokens, _, stats = backend.sample([3, 8], seed=91, max_tokens=2)
+    assert tokens
+    assert math.isfinite(stats.generation_tps) and stats.generation_tps > 0
+    assert math.isfinite(stats.prompt_tps)
+
+
 def test_sampling_seed_base_and_interruption(backend):
     first = backend.sample([3, 8], seed=91)
     second = backend.sample([3, 8], seed=91)

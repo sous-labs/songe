@@ -1761,6 +1761,8 @@ class ModelScheduler(Scheduler):
             unread = await self.quick_now(model)
             if unread == "no_model":
                 return {"started": False, "message": "Quick Dream can't start · no model is loaded in your model server · load it, then press Quick Dream"}
+            if unread == "memory":
+                return {"started": False, "message": "Quick Dream can't start · memory is tight on this computer · close some apps, then press Quick Dream"}
             if unread == "nothing":
                 last = (self.installation_store.scoped(model).get("quick_last") or {}).get("at")
                 # The page puts `since` in the viewer's local time.
@@ -1848,13 +1850,18 @@ class ModelScheduler(Scheduler):
         """Throw away this model's Dream under way: stop its training child,
         discard its night (running, interrupted or waiting to swap). Its
         practice stays untrained, so a later Deep Dream trains it. Returns how
-        many nights were discarded."""
+        many nights were discarded; self.cancel_stopped says whether work
+        under way (a reading, a measurement, a pressed Dream getting ready)
+        was stopped, self.cancel_requested whether a pressed Dream was."""
         async with self.lock:
+            stopped = False
             for name in ("dream_task", "reading_task"):
                 task = getattr(self, name, None)
                 if task is not None and not task.done():
                     task.cancel()
+                    stopped = True
             if self.process and self.active_model == model:
+                stopped = True
                 self.interrupt("cancelled")
                 try:
                     await asyncio.wait_for(
@@ -1870,11 +1877,16 @@ class ModelScheduler(Scheduler):
                 if night["status"] in {"running", "interrupted", "ready", "waiting"}:
                     learner.night(night["id"], status="discarded")
                     discarded += 1
-            if self.installation_store.get("requested_model") == model:
+            requested = self.installation_store.get("requested_model") == model
+            if requested:
+                # A pressed Dream still getting ready: it is stopped too.
+                stopped = True
                 self.installation_store.set("requested_model", None)
                 self.installation_store.set("requested_sleep", False)
             learner.set("memory_wait", None)  # a cancelled Dream waits for nothing
             learner.set("dream_memory_waits", None)
+            self.cancel_stopped = stopped
+            self.cancel_requested = requested
             return discarded
 
     @staticmethod
@@ -1919,6 +1931,21 @@ class ModelScheduler(Scheduler):
             # so, on the notice and (lasting) on the dashboard.
             learner.set("quick_checked", {"at": time.time(), "nothing_new": True})
             return "nothing"
+        sample = await asyncio.to_thread(self.platform.memory)
+        if sample.pressure != "normal":
+            # Reading waits for normal memory pressure (read_sessions), also
+            # when it would only publish lessons from new signals; a press
+            # under pressure would say "started" and do nothing
+            # (reported by Jack in a test on 11-24: a Mac at "warning").
+            learner.set("quick_checked", {"at": time.time(), "nothing_new": False, "error": "memory"})
+            from . import quick as quick_lessons
+
+            await asyncio.to_thread(
+                quick_lessons.record, learner,
+                {"added": [], "lessons": len(quick_lessons.active(learner)),
+                 "changes": {"added": [], "reworded": [], "dropped": []}},
+                time.time(), None, read=0, found=0, error="memory")
+            return "memory"
         self.dream_task = asyncio.create_task(
             self.read_sessions(
                 force=True,

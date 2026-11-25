@@ -435,6 +435,55 @@ def test_a_server_that_ignores_the_reasoning_switches_is_given_more_room(store, 
     assert rows[-1]["drop"] == "changes" and rows[-1]["id"].endswith("#v4")
 
 
+def test_the_plain_writer_sees_the_answer_the_feedback_was_about(store, monkeypatch):
+    """A lesson about the form of an answer ("just the code", "no comments")
+    can only be practised on a request whose answer has that form. Shown the
+    request alone, the writer also wrote questions about code that are
+    answered in prose; the note changed nothing there. With the logged answer
+    in front of it, it is asked for messages a good answer to which has the
+    same form. The lesson itself is still not shown. Measured on a rented
+    card (Qwen3.5-4B, 384 scenes for 16 lessons): 158 teaching scenes before,
+    208 with the answer shown."""
+    monkeypatch.setattr(practice, "answered", lambda store, signal: "Run `python -m pip install requests`.")
+    writer = ChatWriter()
+    rows = chat_written(store, monkeypatch, writer)
+    asked = writer.prompts[0]
+    assert "The assistant answered:\nRun `python -m pip install requests`." in asked
+    assert "the same form as the answer above" in asked and "3 new messages" in asked
+    assert "uv" not in asked
+    assert [r["drop"] for r in rows] == [None, None, None]
+    # No logged answer (an old store, a tool call with no text): as before.
+    monkeypatch.setattr(practice, "answered", lambda store, signal: "")
+    writer = ChatWriter()
+    chat_written(store, monkeypatch, writer)
+    assert "The assistant answered" not in writer.prompts[0]
+
+
+def test_many_plain_messages_are_asked_for_twelve_at_a_time(store, monkeypatch):
+    """One call for all of a lesson's messages needs 150 tokens of JSON per
+    message and a small model stops early or repeats itself. Twelve are asked
+    for per call, and a later call is told what is written already: asked the
+    same question twice, the reader would hand back the first answer."""
+
+    class Many(ChatWriter):
+        async def ask(self, prompt, schema, name, *, temperature=0, max_tokens=None):
+            if name != "dream":
+                return await super().ask(prompt, schema, name, temperature=temperature, max_tokens=max_tokens)
+            self.asked.append(name)
+            self.prompts.append(prompt)
+            count = int(prompt.split("Write ", 1)[1].split(" ", 1)[0])
+            done = prompt.count("\n- Which command adds package")
+            return {"messages": [f"Which command adds package number {done + i}?" for i in range(count)]}
+
+    writer = Many()
+    rows = chat_written(store, monkeypatch, writer, variants=tuple(range(1, 15)))
+    dreams = [p for p, name in zip(writer.prompts, writer.asked, strict=True) if name == "dream"]
+    assert len(dreams) == 2 and "Write 12 new messages" in dreams[0] and "Write 2 new messages" in dreams[1]
+    assert "Already written" not in dreams[0]
+    assert "Already written, write different ones:\n- Which command adds package number 0?" in dreams[1]
+    assert len({r["messages"][-1]["content"] for r in rows}) == 14
+
+
 def test_fewer_plain_messages_than_asked_leave_scenes_that_did_not_build(store, monkeypatch):
     writer = ChatWriter(messages=["Add pandas for me, which command?", " add pandas for me, which command? ", 7])
     rows = chat_written(store, monkeypatch, writer)
@@ -446,3 +495,27 @@ def test_a_plain_message_copied_from_the_chat_is_dropped(store, monkeypatch):
     writer = ChatWriter(messages=["How do I install requests?"])
     rows = chat_written(store, monkeypatch, writer, variants=(1,))
     assert rows[0]["drop"] == "not_copy" and writer.replied == []
+
+
+def test_the_scenes_of_a_plain_chat_are_answered_several_at_a_time(store, monkeypatch):
+    """A scene costs two answers and a judgement from the served model. Asked
+    one after another, a 27B on vLLM wrote 8 scenes a minute while the server
+    sat at one running request; a Dream of 16 lessons with 60 scenes each
+    would have practised for two hours. The scenes of one plain-chat lesson
+    share nothing (no workspace, no tools), so AT_ONCE of them are answered
+    at the same time. Scenes with tools stay one at a time."""
+
+    class Slow(ChatWriter):
+        running = most = 0
+
+        async def reply(self, messages, *, max_tokens, temperature=0, think=None):
+            Slow.running += 1
+            Slow.most = max(Slow.most, Slow.running)
+            await asyncio.sleep(0.01)
+            Slow.running -= 1
+            return await super().reply(messages, max_tokens=max_tokens)
+
+    many = [f"Which command adds package number {n}?" for n in range(20)]
+    rows = chat_written(store, monkeypatch, Slow(messages=many), variants=tuple(range(1, 21)))
+    assert sorted(r["variant"] for r in rows) == list(range(1, 21))
+    assert 1 < Slow.most <= 2 * practice.AT_ONCE

@@ -55,3 +55,15 @@ def test_now_names_the_job_during_the_pause_between_slices():
     }
     rows = dict(panel_rows(model, snapshot=snapshot))
     assert rows["now"] == "Training · short pause between runs"
+
+
+def test_paused_says_the_command_that_resumes():
+    """The old words named a "Learning" switch that no surface has any more."""
+    data = {
+        "paused": True,
+        "activity": {"now": "training Qwen", "next": "resume → train Qwen3.5-4B"},
+    }
+    assert status_lines(data) == [
+        ("now", "Paused · Run songe resume to continue"),
+        ("next", "Run songe resume, then train Qwen3.5-4B"),
+    ]

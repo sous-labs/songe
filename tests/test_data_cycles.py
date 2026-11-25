@@ -126,6 +126,41 @@ def test_the_slice_deadline_stops_only_between_steps(config, tmp_path):
     assert saved["iteration"] == 2 and saved["sample_cursor"] == 4
 
 
+def test_a_sample_whose_recompute_differs_is_passed_over(config, tmp_path):
+    """Live (Inkling 2 Mini): a mixture-of-experts routing tie made the
+    recomputed forward differ, torch raised CheckpointError and the whole
+    Dream failed after 1.5 h. That sample is now passed over."""
+
+    class CheckpointError(RuntimeError):
+        pass
+
+    config.accumulation, config.anchor_fraction = 2, 0
+    pool, clock = steps(6), [0]
+    backend = ScalarBackend(config, clock)
+    plain = backend.train_step
+
+    def train_step(step, optimizer, seed):
+        if step["id"] in ("2", "3", "4"):
+            raise CheckpointError("recomputed tensor shapes differ")
+        return plain(step, optimizer, seed)
+
+    backend.train_step = train_step
+    result = train(backend, pool, [], private_dir(tmp_path / "work"), lambda *_: None)
+    # Step 1 averages over its one good sample; step 2 had none and is not applied.
+    assert backend.gradients == [1.0, 1.0]
+    assert result["iterations"] == 2 and result["samples_skipped"] == 3
+    assert sorted(result["trained_revisions"]) == ["1", "5", "6"]
+
+    # Any other error still stops the run.
+    def broken(step, optimizer, seed):
+        raise RuntimeError("out of memory")
+
+    other = ScalarBackend(config, clock)
+    other.train_step = broken
+    with pytest.raises(RuntimeError):
+        train(other, steps(2, 50), [], private_dir(tmp_path / "other"), lambda *_: None)
+
+
 def test_resume_keeps_frozen_batch_cursor_and_rehearsal(config, tmp_path):
     config.accumulation, config.anchor_fraction = 3, 0.25
     pool, anchors, clock = steps(7), steps(3, 100), [0]

@@ -757,6 +757,49 @@ async def test_quick_dream_reads_then_puts_the_lessons_in_the_prompt(config, sto
     assert quick_message(None, nothing_since=learner.get("quick_last")["at"]).startswith("Nothing new since your last Quick Dream at ")
 
 
+async def test_quick_dream_under_memory_pressure_says_so_instead_of_started(config, store, monkeypatch):
+    """Reported by Jack in a test on 11-24: on a Mac at memory pressure
+    "warning", pressing Quick Dream said "Quick Dream started" and reading
+    returned at once with nothing read, and the page never said why."""
+    from pathlib import Path
+
+    from songe import quick
+
+    config.learning = "dreams"
+    registry.migrate(config, store)
+    registry.observe(config, store, "learner")
+    registry.set_learning(store, "learner", "all")
+    record_session(store)
+    learner = store.scoped("learner")
+    scheduler, asked = scheduler_for(config, store, monkeypatch, loaded=["learner"])
+    scheduler.platform.memory().pressure = "warning"
+    assert await scheduler.quick_now("learner") == "memory"
+    assert getattr(scheduler, "dream_task", None) is None and asked == []
+    assert learner.get("quick_checked")["error"] == "memory"
+    assert (learner.get(quick.HISTORY) or [])[-1]["error"] == "memory"
+    words = json.loads((Path(quick.__file__).parent / "ui" / "wording.json").read_text(encoding="utf-8"))
+    assert "memory" in words["quick_failed"] and "memory" in words["quick_failed_card"]
+    # Once memory is back to normal the same press reads.
+    scheduler.platform.memory().pressure = "normal"
+    assert await scheduler.quick_now("learner") == 1
+
+
+async def test_quick_dream_with_only_new_signals_under_memory_pressure_says_so(config, store, monkeypatch):
+    """Nothing unread, but signals since the last Quick Dream: the press would
+    publish lessons, and reading waits under memory pressure all the same."""
+    config.learning = "dreams"
+    registry.migrate(config, store)
+    registry.observe(config, store, "learner")
+    registry.set_learning(store, "learner", "all")
+    learner = store.scoped("learner")
+    learner.set("quick_seen", [999, 999])  # differs from what is there now
+    scheduler, asked = scheduler_for(config, store, monkeypatch, loaded=["learner"])
+    scheduler.platform.memory().pressure = "warn"
+    assert await scheduler.quick_now("learner") == "memory"
+    assert getattr(scheduler, "dream_task", None) is None and asked == []
+    assert learner.get("quick_checked")["error"] == "memory"
+
+
 def test_a_pi_compaction_is_not_a_conversation_and_its_continuation_joins(store):
     """Live demo: pi's summarise calls were read as separate sessions and the
     user's conversation was split from its continuation."""

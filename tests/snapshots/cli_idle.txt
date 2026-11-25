@@ -4,4 +4,4 @@ next    Train Qwen3.5 4B · when idle
   Model             Auto-dream    Status
   Qwen3.5 4B        On            18% fewer repeat errors
   Granite 4.2 3B    Off
-  LFM3 1.7B         On            Not supported yet · unsupported
+  LFM3 1.7B         On            Not supported yet

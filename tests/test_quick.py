@@ -15,14 +15,17 @@ def one_session_is_enough(config):
     config.quick_min_sessions = 1
 
 
-def add_signal(store, sid, lesson, *, kind="correction", generality="kind", revision=1, text=None):
+def add_signal(store, sid, lesson, *, kind="correction", generality="kind", revision=1, text=None, session="s",
+               project=None, **extra):
     # The user's words: by default the lesson itself, as a stated rule.
     text = lesson if text is None and kind in quick.USER else text or ""
-    payload = {"id": sid, "session": "s", "type": kind, "source": "user" if kind in quick.USER else "tool",
-               "lesson": lesson, "generality": generality, "revision": revision, "text": text}
+    payload = {"id": sid, "session": session, "type": kind, "source": "user" if kind in quick.USER else "tool",
+               "lesson": lesson, "generality": generality, "revision": revision, "text": text, **extra}
+    if project:
+        payload["project"] = project
     with store.connect() as db:
         db.execute("INSERT INTO signals VALUES (?,?,?,?,?,NULL)",
-                   (sid, store.model_id, "s", revision, json.dumps(payload)))
+                   (sid, store.model_id, session, revision, json.dumps(payload)))
 
 
 def test_quick_dream_picks_preferences_and_tool_facts_not_skills(config, store):
@@ -1047,3 +1050,73 @@ def test_a_place_holds_no_more_than_one_lesson_of_text(config, store):
     assert asyncio.run(reading.fold_same(store, reader)) == 0 and reader.listed == []
     quick.quick_dream(store, config)
     assert {lesson["text"] for lesson in quick.active(store)} == {first, second}
+
+
+def test_a_note_says_its_projects_own_names_for_any_project(config, store):
+    """Reported by Jack in a test on 11-24: notes named one practice repo's
+    folder ("Use src/notes_app/ in all file paths."), and in another
+    repository the model then wrote into notes_app. With Qwen3.8-27B, main
+    still published "Put code under src/recipe_box/." and the test command
+    once per module ("make test MODULE=auth", "MODULE=parser", ...)."""
+    assert quick.general("Put code under src/billing_api/.", "billing-api") == "Put code under src/<package>/."
+    assert quick.general("Clone billing-api first.", "billing-api") == "Clone <project> first."
+    assert quick.general("Keep the app small.", "app") == "Keep the app small."  # too common a name
+    for n, (project, module) in enumerate([("billing-api", "invoices"), ("notes-app", "auth"), ("invoice-tool", "parser")]):
+        add_signal(store, f"t{n}", f"Run tests with make test MODULE={module}.", session=f"s{n}", project=project,
+                   revision=n + 1, text=f"don't call pytest directly, we run tests with make test MODULE={module}",
+                   turn_kind="lasting")
+    add_signal(store, "p1", "Put code under src/billing_api/.", session="s0", project="billing-api", revision=4,
+               text="nothing lives at the repo root, the code is all under src/billing_api/.", turn_kind="lasting",
+               short="Put code under src/billing_api/.")
+    add_signal(store, "p2", "Put code under src/recipe_box/.", session="s4", project="recipe-box", revision=5,
+               text="nothing lives at the repo root, the code is all under src/recipe_box/.", turn_kind="lasting",
+               short="Put code under src/recipe_box/.")
+    quick.quick_dream(store, config)
+    lessons = {lesson["text"]: lesson["count"] for lesson in quick.active(store)}
+    assert lessons == {
+        "don't call pytest directly, we run tests with make test MODULE=<module>": 3,
+        "Put code under src/<package>/.": 2,
+    }
+
+
+def test_the_working_folder_is_read_from_the_agents_system_message():
+    def rows(system):
+        return [(1, {"messages": [{"role": "system", "content": system}, {"role": "user", "content": "hi"}]}, None, 200)]
+
+    assert reading.project_of(rows("You are opencode.\n<env>\n  Working directory: /home/dev/billing-api\n</env>")) == "billing-api"
+    assert reading.project_of(rows("Current working directory: C:\\Users\\me\\notes-app\\")) == "notes-app"
+    assert reading.project_of(rows("<cwd>/Users/me/code/invoice-tool</cwd>")) == "invoice-tool"
+    assert reading.project_of(rows("You are a helpful assistant.")) is None
+
+
+@pytest.mark.parametrize("server", ["ollama", "mlx", "llamacpp", "vllm"])
+async def test_examples_of_a_thinking_model_are_asked_without_its_reasoning(server):
+    """Reported by Jack in a test on 11-24: qwen3 on Ollama put its whole
+    capped answer in the reasoning field, so the page showed both sides of
+    every before and after example empty. The server here answers the way
+    Ollama does: in the reasoning field unless reasoning is switched off."""
+    sent = []
+
+    class Client:
+        async def post(self, url, json):
+            sent.append(json)
+            off = json.get("reasoning_effort") == "none" or (
+                json.get("chat_template_kwargs") or {}).get("enable_thinking") is False
+            message = ({"content": "Run: make test MODULE=parser"} if off
+                       else {"content": "", "reasoning": "Okay, the user wants"})
+
+            class R:
+                def raise_for_status(self):
+                    pass
+
+                def json(self):
+                    return {"choices": [{"message": message}]}
+            return R()
+
+    request = {"messages": [{"role": "user", "content": "how do I run the parser tests?"}]}
+    before, after, _ = await quick.compare(Client(), "http://m/v1", "served", request, "",
+                                           quick.block([{"text": "Run tests with make test."}]), server=server)
+    assert before["text"] and after["text"]
+    assert all(body["reasoning_effort"] == "none" for body in sent)
+    switch = server in {"mlx", "llamacpp", "vllm"}
+    assert all(("chat_template_kwargs" in body) == switch for body in sent)
