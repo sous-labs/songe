@@ -9,12 +9,12 @@
   <a href="#-how-it-works">How it works</a> •
   <a href="#-commands">Commands</a> •
   <a href="ROADMAP.md">Roadmap</a> •
-  <a href="https://discord.gg/cBEywVkXjY">Discord</a> •
+  <a href="https://discord.gg/6bYCjyjr5z">Discord</a> •
   <a href="https://souslabs.ai">Website</a>
 </p>
 
 <p align="center">
-  <a href="https://discord.gg/cBEywVkXjY"><img src="https://img.shields.io/badge/Join_our_Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Join our Discord" height="36"></a>
+  <a href="https://discord.gg/6bYCjyjr5z"><img src="https://img.shields.io/badge/Join_our_Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Join our Discord" height="36"></a>
 </p>
 
 <p align="center">
@@ -191,7 +191,7 @@ service moves to the new version by itself in a quiet moment.
 
 Where Songe is going: [ROADMAP.md](ROADMAP.md). Ideas and bugs are welcome as
 [issues](https://github.com/sous-labs/songe/issues). Questions and results from your nights go in
-[Discord](https://discord.gg/cBEywVkXjY). To contribute, see
+[Discord](https://discord.gg/6bYCjyjr5z). To contribute, see
 [CONTRIBUTING.md](CONTRIBUTING.md). Security reports: [SECURITY.md](SECURITY.md).
 
 Licensed under [Apache-2.0](LICENSE).
