@@ -53,6 +53,30 @@ def test_three_lines_idle_and_calibration_progress(config, store, monkeypatch):
     assert [key for key, value in lines(state)] == ["now", "next", "paused"]
 
 
+def test_a_dream_waiting_for_disk_space_says_how_much(config, store, monkeypatch):
+    """Reported by Jack in a test on 11-24: a pressed Deep Dream waited 3.5
+    hours for 42.8 GB of disk while Next only said "Your Deep Dream is
+    pending · it starts on its own"."""
+    config.learning = "dreams"
+    registry.migrate(config, store)
+    registry.set_learning(store, config.base_identifier, "all")
+    registry.support(store, config.base_identifier, "trainable")
+    models = registry.summaries(config, store)
+    store.set("requested_model", config.base_identifier)
+    store.set("requested_sleep", True)
+    monkeypatch.setattr("songe.status.time.monotonic", lambda: 1000)
+    worker = scheduler(config, last_traffic=520, process=None)
+    worker.reason = "Needs 42.8 GB free on D:\\; 8.0 GB available"
+    pending = activity(config, store, worker, None, models, live=True)
+    store.scoped(config.base_identifier).set("disk_wait", "Needs 42.8 GB free on D:\\; 8.0 GB available")
+    result = activity(config, store, worker, None, models, live=True)
+    assert pending["next"] == "Your Deep Dream is pending · it starts on its own"
+    assert result["now"] == "waiting · Needs 42.8 GB free on D:\\; 8.0 GB available"
+    assert result["next"] == "Free up disk space · it starts on its own once there is room"
+    store.scoped(config.base_identifier).set("disk_wait", None)
+    assert activity(config, store, worker, None, models, live=True)["next"] == pending["next"]
+
+
 @pytest.mark.parametrize("reason,detail", [
     # The scheduler decided to start: it is starting.
     ("Will sleep when idle", "Starting now"),
