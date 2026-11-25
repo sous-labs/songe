@@ -579,6 +579,16 @@ function trainingLine(ml) {
   const line = parts.join(' · ');
   return el('p', {class: 'model-facts muted'}, line[0].toUpperCase() + line.slice(1));
 }
+// How long it has been idle, when a Dream for this model starts on idle
+// ("6m of 10m"); null when idle time is not what it waits on.
+let activity = null;          // status.activity from the last poll
+function idleFor(id) {
+  const a = activity;
+  if (!a || a.model !== id || !String(a.now || '').startsWith('waiting · proxy idle')) return null;
+  if (a.idle_elapsed_seconds == null || !a.idle_threshold_seconds) return null;
+  const limit = a.idle_threshold_seconds;
+  return fill(W.idle_of, {elapsed: duration(Math.min(a.idle_elapsed_seconds, limit)), limit: duration(limit)});
+}
 function quiet(ml, inv, text) {
   return el('section', {class: 'changed'}, el('div', {class: 'finished kept'},
     el('p', {class: 'finished-title'}, text[0]), text[1] ? el('p', {class: 'finished-outcome muted'}, text[1]) : null));
@@ -590,7 +600,7 @@ function modelView(id, ml, inv, paused = false) {
   // practice replayed); the viewer only chooses whether Dreams start alone.
   const auto = inv?.auto_dream ?? level !== 'off';
   const autoSwitch = el('button', {type: 'button', class: 'auto', role: 'switch', 'aria-checked': String(auto),
-    title: W.auto_dream_title, onclick: () => control('auto_dream', {model: id, on: !auto})},
+    title: [W.auto_dream_title, idleFor(id)].filter(Boolean).join(' · '), onclick: () => control('auto_dream', {model: id, on: !auto})},
     el('span', {class: 'track', 'aria-hidden': 'true'}, el('span', {class: 'knob'})), W.auto_dream);
   const current = ml?.versions?.find(v => v.current);
   // One button follows the Dream: start it, pause it, resume it. Pausing is
@@ -657,7 +667,8 @@ function modelView(id, ml, inv, paused = false) {
       : !ml?.pending?.conversations
         // Nothing recorded yet: the agent is probably not on a songe/ model.
         ? quiet(ml, inv, E.none)
-        : quiet(ml, inv, [E.pending[0], fill(E.pending[1], {conversations: plural(ml.pending.conversations, 'conversations'), next: auto ? E.next_auto : E.next_manual})]));
+        : quiet(ml, inv, [E.pending[0], fill(E.pending[1], {conversations: plural(ml.pending.conversations, 'conversations'), next: !auto ? E.next_manual
+          : idleFor(id) ? fill(E.next_idle, {idle: idleFor(id)}) : E.next_auto})]));
     if (level !== 'off') node.append(nowLine(id, ml));
   } else {
     // The dashboard: a new Quick Dream on top, the Dream row, the chosen
@@ -838,6 +849,7 @@ function render() {
   // Paused is the service's own state and is known at once; the Dream's
   // record catches up a moment later. Show a running Dream as waiting on it.
   const models = status?.paused ? pausedView(last.models) : last.models;
+  activity = status?.activity || null;
   const all = [...new Set([...Object.keys(inventory), ...Object.keys(models)])];
   const learning = all.filter(id => learns(models[id], inventory[id]));
   // When no model learns, they are all the list: nothing to fold away.
