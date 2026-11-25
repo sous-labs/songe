@@ -617,3 +617,17 @@ def test_empty_store_pipeline_keeps_counts_and_unknown_measurements(config, stor
     }
     assert metrics["wake"] == {"last": None}
     assert metrics["versions"] == []
+
+
+def test_page_times_use_a_24_hour_clock():
+    """Times the page writes sit beside 24-hour times Songe words itself
+    ("since your last Quick Dream at 16:00"): one clock, whatever the
+    browser's language."""
+    import re
+    from pathlib import Path
+
+    import songe
+
+    script = (Path(songe.__file__).parent / "ui" / "next.js").read_text(encoding="utf-8")
+    calls = re.findall(r"toLocaleTimeString\(([^)]*)\)", script)
+    assert calls and all("hourCycle: 'h23'" in call for call in calls)

@@ -236,7 +236,7 @@ function when(sec) {
   if (sec == null) return '';
   const d = new Date(sec * 1000), today = new Date();
   // English like the rest of the page, whatever the browser's language.
-  const time = d.toLocaleTimeString('en-US', {hour: '2-digit', minute: '2-digit'});
+  const time = d.toLocaleTimeString('en-US', {hour: '2-digit', minute: '2-digit', hourCycle: 'h23'});
   return d.toDateString() === today.toDateString() ? `today ${time}` : `${d.toLocaleDateString('en-US', {month: 'short', day: 'numeric'})} ${time}`;
 }
 // The result in words. After an undo, an adopted version was used then,
@@ -1073,7 +1073,7 @@ async function cloudSetup(enabling, details = null) {
       el('p', {class: 'label'}, night ? fill(C.calls_title, {night: night.night}) : C.calls_none),
       night ? el('p', {class: 'muted'}, fill(C.calls_total, {calls: night.calls, spent: night.cost_known ? money(night.usd) : C.cost_unknown})) : null,
       calls.length ? el('ul', {}, calls.map(call => el('li', {},
-        el('span', {}, `${new Date(call.at * 1000).toLocaleTimeString('en-US', {hour: '2-digit', minute: '2-digit'})} · ${call.purpose} · ${call.model}`),
+        el('span', {}, `${new Date(call.at * 1000).toLocaleTimeString('en-US', {hour: '2-digit', minute: '2-digit', hourCycle: 'h23'})} · ${call.purpose} · ${call.model}`),
         el('span', {class: 'muted'}, ` · ${call.sent_chars} chars · ${call.sent ? money(call.cost_usd) : C.not_sent}${call.ok ? '' : ` · ${call.error || 'failed'}`}`),
         call.preview ? el('span', {class: 'cloud-preview'}, call.preview) : null))) : null));
 }
