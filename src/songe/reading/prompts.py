@@ -328,13 +328,30 @@ NOW_ONLY = re.compile(
     r"\b((?<!till )(?<!until )(?<!through )(?<!to )today(?!['’]s)|tonight|for now|this time|just this once|this once)\b|今天|今晚|这次|这回|暂时|오늘|이번만|이번엔|\b(hoy|esta vez|por ahora)\b",
     re.I,
 )
-FROM_NOW = re.compile(r"\b(from (today|now|tonight)|starting (today|now)|as of today|going forward)\b|从今天|今天起|今天开始|以后|오늘부터|desde hoy", re.I)
+FROM_NOW = re.compile(
+    r"\b(from (today|now|tonight)|(for|from) now on|starting (today|now)|as of today|going forward|always|every time|ever|not just)\b"
+    r"|从今天|今天起|今天开始|以后|一直|每次|永远|오늘부터|항상|\b(desde hoy|siempre)\b",
+    re.I,
+)
+SENTENCE_END = re.compile(r"(?<=[.!?;])\s+|(?<=[。！？；])|\n")
 
 
-def now_only(message):
-    """Whether the user's message limits what it asks for to now."""
-    said = str(message or "")
-    return bool(NOW_ONLY.search(said)) and not FROM_NOW.search(said)
+def now_only(message, wish=""):
+    """Whether the user's message limits the wish it voices to now.
+
+    The limit has to be in the sentence the wish comes from (one the model's
+    wording names, rules.voiced), or in the wording itself: "I prefer tabs,
+    not spaces. Today let's refactor utils.py" keeps the wish for tabs. A
+    sentence that also says the wish lasts ("today and always", "not just
+    today", "for now on") is not a limit."""
+    from .rules import voiced
+
+    if NOW_ONLY.search(wish or "") and not FROM_NOW.search(wish or ""):
+        return True
+    return any(
+        NOW_ONLY.search(part) and not FROM_NOW.search(part) and voiced(wish or "", part) > 0
+        for part in SENTENCE_END.split(str(message or ""))
+    )
 
 
 def turn_verdict(answer, message="", earlier=""):
@@ -358,7 +375,7 @@ def turn_verdict(answer, message="", earlier=""):
     kind = answer.get("kind") if answer.get("kind") in ("once", "task", "reaction") else None
     if answer.get("standing") != "yes":
         return kind, ""
-    if now_only(message):
+    if now_only(message, str(answer.get("wish") or "")):
         return "task", ""
     wish, said = " ".join(str(answer.get("wish") or "").split()), message.lower()
     if said.isascii() and any(name in wish.lower() and name not in said for name in TURN_EXAMPLE_NAMES):
