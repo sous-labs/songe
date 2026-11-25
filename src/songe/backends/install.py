@@ -18,10 +18,19 @@ from ..storage import atomic_write
 WHEEL_ROOT = "https://download.pytorch.org/whl"
 
 
-def runtime_python(root):
-    return (
-        root / "runtime" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-    )
+def runtime_python(root, folder="runtime"):
+    """The private service installation's interpreter (``runtime``)."""
+    return root / folder / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+
+
+# The GGUF converter toolkit (torch, peft, gguf) an MLX Mac gets on first use.
+# Its own folder: ``runtime`` is the service's installation, which the
+# upgrade check queries and rebinds the service to; the converter has no MLX.
+CONVERTER = "converter"
+
+
+def converter_runtime_python(root):
+    return runtime_python(root, CONVERTER)
 
 
 def stack_ready(kind):
@@ -184,11 +193,11 @@ def display(commands):
         )
 
 
-def install(commands, root):
+def install(commands, root, folder="runtime"):
     if not commands:
         return
-    venv.EnvBuilder(with_pip=True).create(root / "runtime")
-    log = root / "runtime-install.log"
+    venv.EnvBuilder(with_pip=True).create(root / folder)
+    log = root / f"{folder}-install.log"
     atomic_write(log, b"")
     with log.open("a", encoding="utf-8") as output:
         for command in commands:
@@ -255,15 +264,51 @@ def converter_python(platform):
     # Only an MLX Mac lacks torch by design; CUDA and ROCm runtimes have it.
     if data_dir is None or "metal" not in {a.kind for a in accelerators()}:
         return sys.executable
-    root = Path(data_dir())
-    python = runtime_python(root)
+    root = Path(home(platform).data_dir())
     probe = ["-c", "import " + ", ".join(CONVERTER_MODULES)]
-    if (
-        not python.exists()
-        or subprocess.run([str(python), *probe], capture_output=True).returncode
-    ):
-        install([[str(python), "-m", "pip", "install", package_requirement()]], root)
+
+    def ready(python):
+        return (
+            python.exists()
+            and not subprocess.run([str(python), *probe], capture_output=True).returncode
+        )
+
+    # A private service installation init made for a GGUF model already
+    # carries the converter modules; use it rather than a second copy.
+    if ready(runtime_python(root)):
+        return str(runtime_python(root))
+    python = converter_runtime_python(root)
+    if not ready(python):
+        announce(root, "Downloading the converter toolkit (about 1 GB, one time)")
+        install(
+            [[str(python), "-m", "pip", "install", package_requirement()]],
+            root,
+            CONVERTER,
+        )
+        announce(root, "converter toolkit ready")
     return str(python)
+
+
+def home(platform):
+    """The installation's own data directory: conversions run on a platform
+    rooted at their scratch volume, but the toolkit is installed once."""
+    from ..platform import Rooted
+
+    while isinstance(platform, Rooted) and hasattr(platform.platform, "data_dir"):
+        platform = platform.platform
+    return platform
+
+
+def announce(root, text):
+    """A line in the dashboard's Flow; best effort, never fails the work."""
+    if not (root / "experience.sqlite3").exists():
+        return
+    try:
+        from ..log import Store
+
+        Store(root).event("install", text, model_id="")
+    except Exception:  # noqa: BLE001 - a status line only
+        pass
 
 
 def interpreter_for(platform, runner):
