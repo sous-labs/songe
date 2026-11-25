@@ -358,6 +358,25 @@ async def test_cancel_says_it_stopped_work_that_was_not_a_dream_yet(levels):
         assert response.json()["message"] == "No Dream to cancel"
 
 
+async def test_cancel_stops_a_pressed_dream_still_getting_ready(levels):
+    """A pressed Deep Dream that has not started yet (only requested) is
+    stopped by Cancel, which says so and takes its pause away."""
+    config, store, _ = levels
+    scheduler = ModelScheduler(config, store, SimpleNamespace())
+    store.set("requested_model", "other")
+    store.set("requested_sleep", True)
+    store.set("paused", True)
+    app = create_app(config, store, scheduler=scheduler)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app), base_url="http://localhost"
+    ) as client:
+        response = await client.post(
+            "/api/control", json={"action": "cancel", "model": "other"}
+        )
+    assert response.json()["message"] == "Stopped · no Dream had started yet"
+    assert store.get("paused") is False and store.get("requested_model") is None
+
+
 async def test_a_manual_deep_dream_trains_with_auto_dream_off(levels):
     """Live run: with auto-dream off, Deep Dream said "nothing new to learn"
     though 110 practice scenes waited (the check ran before the request)."""

@@ -767,9 +767,11 @@ def api_routes(config, store, scheduler=None, *, release=None):
 
                     model = resolve(store, payload.get("model"))
                     discarded = await scheduler.cancel(model)
-                    if discarded:
+                    if discarded or getattr(scheduler, "cancel_requested", False):
                         # Cancelling ends it all: a pause that held this Dream
-                        # goes too, so the button is back to Dream.
+                        # (also one still getting ready) goes too, so the
+                        # button is back to Dream. A stopped reading alone
+                        # leaves a pause as it was.
                         await asyncio.to_thread(store.set, "paused", False)
                     # Work under way with no Dream yet (a measurement, a
                     # reading) is stopped too: say so, not "No Dream".
