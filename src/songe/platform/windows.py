@@ -50,7 +50,12 @@ def commit_pressure(commit_available, system_free):
     """Pressure from commit charge: what can still be committed, counting the
     system drive's free space above COMMIT_STOP_BYTES as room the page file
     may grow into. Free physical memory alone misses this: CUDA and model
-    servers commit far more than they touch."""
+    servers commit far more than they touch.
+
+    "warn" holds back starts that wait on warn (reading, review); it does
+    not stop running work. "critical" makes the guard stop running work at
+    once. The scheduler's own disk check (artifacts.storage.SWAP_STOP_BYTES,
+    the same 4 GB line) is what stops work gracefully before that."""
     if system_free is None:
         return "normal"
     room = commit_available + max(0, system_free - COMMIT_STOP_BYTES)
