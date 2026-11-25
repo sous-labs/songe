@@ -330,6 +330,14 @@ class LlamaCPP:
                 )
             await self._request("POST", "/lora-adapters", json=active)
 
+    async def loaded_device_bytes(self):
+        """{accelerator: bytes} stopping Songe's own llama-server frees (a CUDA
+        build holds the model there), or None when unknown."""
+        supervisor = getattr(self, "supervisor", None)
+        if supervisor is not None and self.owns_server():
+            return supervisor.device_bytes()
+        return None
+
     async def loaded_bytes(self):
         return (
             max(0, int(self.memory_probe()))

@@ -17,6 +17,7 @@ from ..memory import (
     owned_command,
     process_options,
     process_tree_bytes,
+    snapshot,
     terminate,
 )
 from ..platform import current
@@ -101,12 +102,29 @@ def owns_endpoint(config, process):
         return False
 
 
+def device_free(platform):
+    """Free memory per accelerator ({identifier: bytes}), or None when this
+    machine reports none (unified memory: host RAM is the device's)."""
+    try:
+        devices = snapshot(platform).vram
+    except (OSError, ValueError):
+        return None
+    return {a.identifier or a.name: a.memory_free for a in devices} or None
+
+
 class LlamaServer:
     def __init__(self, config, root):
         self.config, self.root = config, root
         self.process, self.watcher = None, None
         self.finished = threading.Event()
         self.platform = current()
+        # Accelerator memory the running server took when it started (free
+        # before minus free once ready): what stopping it gives back. Its
+        # process's RSS is host memory only; a vLLM holding 72 GB of an
+        # 80 GB GPU has an RSS of a few GB (live, Qwen3.8-27B on an A100: a
+        # pressed Deep Dream waited for memory, then stopped, never training).
+        self.device_held = None
+        self._free_before_start = None
 
     def memory_bytes(self):
         pid = self.process.pid if self.process else None
@@ -114,6 +132,23 @@ class LlamaServer:
             process_tree_bytes(self.platform, pid)
             if pid and hasattr(self.platform, "process_bytes")
             else 0
+        )
+
+    def device_bytes(self):
+        """{accelerator: bytes} the running server holds, or None if unknown."""
+        if self.process is None or self.process.returncode is not None:
+            return None
+        return self.device_held
+
+    def _before_start(self):
+        self._free_before_start = device_free(self.platform)
+
+    def _ready(self):
+        before, after = self._free_before_start, device_free(self.platform)
+        self.device_held = (
+            {k: max(0, before[k] - after.get(k, before[k])) for k in before}
+            if before and after
+            else None
         )
 
     async def stop(self):
@@ -132,6 +167,7 @@ class LlamaServer:
         if self.watcher:
             await self.watcher
         self.process, self.watcher = None, None
+        self.device_held = None
 
     async def restart(self, version):
         await self.stop()
@@ -210,6 +246,7 @@ class LlamaServer:
             argv += ["--lora", path]
         if paths:
             argv += ["--lora-init-without-apply"]
+        await asyncio.to_thread(self._before_start)
         self.process = await asyncio.create_subprocess_exec(
             *owned_command(argv),
             **process_options(),
@@ -234,6 +271,7 @@ class LlamaServer:
                         self.config.upstream_url.removesuffix("/v1") + "/health"
                     )
                     if response.is_success:
+                        await asyncio.to_thread(self._ready)
                         return
                 except httpx.HTTPError:
                     pass
@@ -280,6 +318,7 @@ class VLLMServer(LlamaServer):
         if "--enable-lora" not in argv:
             argv.append("--enable-lora")
         env = os.environ | {"VLLM_ALLOW_RUNTIME_LORA_UPDATING": "True"}
+        await asyncio.to_thread(self._before_start)
         self.process = await asyncio.create_subprocess_exec(
             *owned_command(argv),
             env=env,
@@ -303,6 +342,7 @@ class VLLMServer(LlamaServer):
                 try:
                     response = await client.get(self.config.upstream_url + "/models")
                     if response.is_success:
+                        await asyncio.to_thread(self._ready)
                         return
                 except httpx.HTTPError:
                     pass
