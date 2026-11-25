@@ -134,6 +134,23 @@ Write {count} new messages the same user might send in other conversations. Each
 
 Answer with JSON only: {{"messages": ["...", "..."]}}"""
 
+# The writer also sees the answer the user's feedback was about, when it is
+# logged: a lesson about the form of an answer ("just the code", "no comments")
+# is practised only on a request whose answer has that form, and "the same
+# kind of request" alone also gave questions about code, answered in prose,
+# where the note changes nothing. (Measured, Qwen3.5-4B writing 384 scenes
+# for 16 lessons: the scenes that teach, where the answer with the note
+# follows the lesson and the plain one does not, went from 158 to 208.)
+LIKE_ANSWER = """A user sent an assistant this message:
+{asked}
+
+The assistant answered:
+{answer}
+
+Write {count} new messages the same user might send in other conversations. Each asks for the same kind of thing about something different, so that a good answer to it has the same form as the answer above. Worded differently from this one and from each other, and complete on its own.
+
+Answer with JSON only: {{"messages": ["...", "..."]}}"""
+
 LIKE_SCHEMA = {
     "type": "object",
     "properties": {"messages": {"type": "array", "items": {"type": "string"}}},

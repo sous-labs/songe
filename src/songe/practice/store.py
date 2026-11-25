@@ -224,22 +224,58 @@ def asked(request):
     return ""
 
 
-async def like_messages(reader, request, count):
+LIKE_BATCH = 12
+
+
+def answered(store, signal):
+    """The answer the user's feedback was about: the logged response at the
+    earliest responsible step ("" when it is gone or has no text)."""
+    from ..parts import request_of
+
+    step = min(int(n) for n in signal["exchanges"])
+    with store.connect() as db:
+        row = request_of(db, signal["exchanges"][str(step)], "*")
+    try:
+        response = json.loads((row or {}).get("response") or "null")
+    except (TypeError, ValueError):
+        return ""
+    message = timeline.response_message(response) or {}
+    return timeline.text(message.get("content")).strip()
+
+
+async def like_messages(reader, request, count, answer=""):
     """`count` new user messages of the same kind as the one a plain chat's
-    lesson came from, in one answer (fewer when the model wrote fewer)."""
-    answer = await reader.ask(
-        P.LIKE.format(asked=timeline.clip(asked(request), 1200), count=count),
-        P.LIKE_SCHEMA,
-        "dream",
-        temperature=0.8,
-        max_tokens=300 + 150 * count,
-    )
+    lesson came from, asked for twelve at a time (fewer when the model wrote
+    fewer). With the answer the feedback was about, the writer sees it too."""
     seen, messages = set(), []
-    for text in answer.get("messages") or []:
-        text = text.strip() if isinstance(text, str) else ""
-        if text and text.lower() not in seen:
-            seen.add(text.lower())
-            messages.append(text)
+    for _ in range(-(-count // LIKE_BATCH) + 1):
+        n = min(LIKE_BATCH, count - len(messages))
+        if n <= 0:
+            break
+        said = timeline.clip(asked(request), 1200)
+        prompt = (
+            P.LIKE_ANSWER.format(asked=said, answer=answer[:1200], count=n)
+            if answer
+            else P.LIKE.format(asked=said, count=n)
+        )
+        if messages:
+            # A second call with the same words would get the first call's
+            # answer back (the reader caches by question): it is told what
+            # is written already.
+            prompt = prompt.replace(
+                "\n\nAnswer with JSON only",
+                "\n\nAlready written, write different ones:\n"
+                + "\n".join(f"- {m}" for m in messages)
+                + "\n\nAnswer with JSON only",
+            )
+        got = await reader.ask(
+            prompt, P.LIKE_SCHEMA, "dream", temperature=0.8, max_tokens=300 + 150 * n
+        )
+        for text in got.get("messages") or []:
+            text = text.strip() if isinstance(text, str) else ""
+            if text and text.lower() not in seen:
+                seen.add(text.lower())
+                messages.append(text)
     return messages[:count]
 
 
@@ -297,7 +333,10 @@ async def write(store, reader, per_signal, *, limit=None):
             for wait in (*RETRY_WAITS, None):
                 try:
                     if plain and texts is None:
-                        texts = await like_messages(reader, request, len(variants))
+                        texts = await like_messages(
+                            reader, request, len(variants),
+                            await asyncio.to_thread(answered, store, signal),
+                        )
                     row = await (
                         write_like(
                             store, reader, signal, v, request, items, lessons,
