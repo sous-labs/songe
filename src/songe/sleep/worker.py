@@ -86,6 +86,7 @@ def preview(config, store):
         from ..practice.pool import (
             MOMENTS_PER_CONVERSATION,
             ensure_heldout,
+            ensure_note_heldout,
             gate_moments,
             heldout_fill,
             practice_steps,
@@ -99,6 +100,8 @@ def preview(config, store):
         # counts): the check stays bounded however long the history grows.
         heldout = gate_moments(real_test_steps(store))
         ensure_heldout(store, config.min_heldout)
+        if config.learning == "dreams":
+            ensure_note_heldout(store)
         train = practice_steps(store)
         per = {}
         for s in heldout:

@@ -219,6 +219,47 @@ def ensure_heldout(store, need):
     return added
 
 
+def ensure_note_heldout(store):
+    """Every note whose lesson has practice from two or more conversations
+    keeps one of them out of training, so the note can be tested.
+
+    A note leaves the prompt only when the new version follows its lesson on
+    practice it was not trained on (sleep.judged.learned), and that practice
+    has to come from another conversation: a lesson's own scenes are all its
+    conversation's kind of request. One lesson in five (held_out) leaves most
+    notes with nothing to be asked on (live: four of eight notes), and those
+    could never leave. The lesson with the fewest scenes is kept out, only
+    lessons never trained, remembered like ensure_heldout's. A note with
+    practice from one conversation stays until its lesson comes up again.
+    Returns how many were added."""
+    from .. import quick
+    from .store import cluster_of
+
+    with store.connect() as db:
+        have = dict(db.execute(
+            "SELECT json_extract(payload,'$.signal_id'), COUNT(*) FROM practice"
+            " WHERE model_id=? AND kept=1"
+            " AND COALESCE(json_array_length(payload,'$.messages'), 0) > 0 GROUP BY 1",
+            (store.model_id,),
+        ).fetchall())
+    extra = list(store.get(EXTRA_HELD_OUT) or [])
+    trained = set(store.get("trained_signals") or []) | set(store.get("absorbed_signals") or [])
+    same, added = cluster_of(store), 0
+    for lesson in quick.active(store):
+        practised = sorted({
+            mate for sig in lesson.get("signals") or [] for mate in same.get(sig, [sig]) if mate in have
+        })
+        if len(practised) < 2 or any(held_out(sig, extra) for sig in practised):
+            continue
+        fresh = [sig for sig in practised if sig not in trained]
+        if fresh:
+            extra.append(min(fresh, key=lambda sig: (have[sig], sig)))
+            added += 1
+    if added:
+        store.set(EXTRA_HELD_OUT, extra)
+    return added
+
+
 def heldout_fill(store, missing):
     """Held-out practice to fill the gate's missing test places: one scene
     for each of `missing` held-out lessons (never trained on), in a fixed

@@ -182,7 +182,12 @@ or by auto-dream:
   request alone, and each answer must do what the note asks as well as the
   teacher's stored answer (`sleep.judged.learned`, recorded as `learned` and
   `absorbed_signals`). A lesson not learned yet, or with no held-out scene,
-  keeps its note beside the adapter. An undo lets absorbed notes come back.
+  keeps its note beside the adapter. So that a note can be tested, a note
+  whose lesson has practice from two or more conversations keeps one of them
+  out of training (`practice.pool.ensure_note_heldout`: the one with the
+  fewest scenes, never one already trained); with practice from a single
+  conversation the note stays until the lesson comes up again. An undo lets
+  absorbed notes come back.
 - Reading happens only inside a Dream. In idle moments (auto-dream on): after
   `quick_quiet_seconds`, an automatic Quick Dream (the newest unread
   conversations for at most `quick_read_seconds`, then the prompt lessons; a

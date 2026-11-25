@@ -770,6 +770,41 @@ def test_a_note_leaves_only_when_the_candidate_follows_its_lesson_without_it(sto
     assert len(asked) == 5  # three of the five uv scenes, both pnpm ones
 
 
+def test_a_note_practised_in_two_conversations_keeps_one_for_its_test(store):
+    """A note can leave only when its lesson is followed on practice that was
+    not trained, from another conversation. One lesson in five held out left
+    half the notes with nothing to be asked on: they could never leave."""
+    from songe import quick
+    from songe.practice.pool import EXTRA_HELD_OUT, ensure_note_heldout, held_out
+
+    names = [f"s{i}" for i in range(40) if not held_out(f"s{i}")]
+    uv_a, uv_b, uv_c, pnpm, chef_a, chef_b = names[:6]
+    kept = next(f"h{i}" for i in range(40) if held_out(f"h{i}"))  # one in five is held out already
+
+    def scenes(signal, count):
+        with store.connect() as db:
+            for n in range(count):
+                row = {"id": f"{signal}#{n}", "signal_id": signal, "tools": [],
+                       "messages": [{"role": "user", "content": f"request {signal} {n}"}]}
+                db.execute('INSERT INTO practice(id,model_id,signal_id,payload,kept,"drop",created)'
+                           " VALUES (?,?,?,?,1,NULL,0)", (row["id"], store.model_id, signal, json.dumps(row)))
+
+    for signal, count in ((uv_a, 6), (uv_b, 4), (uv_c, 5), (pnpm, 6), (chef_a, 6), (chef_b, 6), (kept, 6)):
+        scenes(signal, count)
+    store.set(quick.KEY, {"version": 1, "updated_at": None, "removed": [], "lessons": [
+        {"id": "l1", "text": "Use uv.", "signals": [uv_a, uv_b, uv_c]},
+        {"id": "l2", "text": "Use pnpm.", "signals": [pnpm]},          # one conversation: its note stays
+        {"id": "l3", "text": "Start with Yes, chef.", "signals": [chef_a, chef_b, kept]},  # has a held-out one
+    ]})
+    store.set("trained_signals", [uv_b])  # an adopted version trained on it: never a test afterwards
+    assert ensure_note_heldout(store) == 1
+    assert store.get(EXTRA_HELD_OUT) == [uv_c]  # the fewest scenes among those never trained
+    held = {s["signal_id"] for s in practice_pool.practice_steps(store, split="held_out")}
+    assert held == {uv_c, kept}
+    assert {s["signal_id"] for s in practice_pool.practice_steps(store)} == {uv_a, uv_b, pnpm, chef_a, chef_b}
+    assert ensure_note_heldout(store) == 0
+
+
 def test_judged_units_decide_and_the_kl_is_only_a_diagnostic():
     from songe.sleep.gate import decide
 
