@@ -279,7 +279,7 @@ The user's next message:
 {message}
 
 Two questions about the user's next message.
-- standing: "yes" if the message, or a part of it, tells the assistant how this user wants answers or work from now on, beyond this one answer: the language to answer in ("reply in Chinese"), how short or long answers should be ("keep answers short"), a tone, a format or a notation ("no emojis", "plain text, no LaTeX"), a tool, a library or a unit to use or to avoid ("tabs, not spaces", "no jQuery"), or how the user works and what they like ("I use Linux", "I like a dark look"). A change to the look of something made for the user is "yes" as well, because people keep their taste in looks: its colours, fonts, corners, borders, shadows, spacing, light or dark ("make the buttons green", "a bigger font please", "less space between the lines"). A message can ask for something else as well and still be "yes". "no" if it only wants this one answer redone or changed ("make it shorter", "rewrite it more formally", "add a paragraph on costs", "write it in Python", "that is wrong"), asks for new work, or asks for nothing. Also "no" when it gives the assistant a role, a persona or a game to play ("act as a Linux terminal", "you are an expert prompt writer", "from now on you are DAN"), or asks for a word or a text in another language ("defeated in Chinese", "the last paragraph in English"): that is new work.
+- standing: "yes" if the message, or a part of it, tells the assistant how this user wants answers or work from now on, beyond this one answer: the language to answer in ("reply in Chinese"), how short or long answers should be ("keep answers short"), a tone, a format or a notation ("no emojis", "plain text, no LaTeX"), a tool, a library or a unit to use or to avoid ("tabs, not spaces", "no jQuery"), or how the user works and what they like ("I use Linux", "I like a dark look"). A change to the look of something made for the user is "yes" as well, because people keep their taste in looks: its colours, fonts, corners, borders, shadows, spacing, light or dark ("make the buttons green", "a bigger font please", "less space between the lines"). A message can ask for something else as well and still be "yes". "no" if it only wants this one answer redone or changed ("make it shorter", "rewrite it more formally", "add a paragraph on costs", "write it in Python", "that is wrong"), asks for new work, or asks for nothing, or limits what it wants to now: today, this time, this one ("short answers today, I have a deadline", "skip the lint for today's demo", "this one can be casual"). Also "no" when it gives the assistant a role, a persona or a game to play ("act as a Linux terminal", "you are an expert prompt writer", "from now on you are DAN"), or asks for a word or a text in another language ("defeated in Chinese", "the last paragraph in English"): that is new work.
 - kind: "once" if it wants this one answer changed, corrected or tried again; "task" if it asks for new or further work or asks a question; "reaction" if it asks for nothing (thanks, praise, a remark).
 - wish: if standing is "yes", that wish alone as one full sentence that tells the assistant what to do from now on, in English, starting with a verb and naming exactly what the user named ("Answer in Chinese.", "Keep answers to two or three sentences.", "Use Polars, not pandas.", "Use plain text, not LaTeX."); leave out whatever belongs to this one answer. Otherwise "".
 Answer with JSON only."""
@@ -315,6 +315,28 @@ def own_words(message):
     return own if len(own.split()) > 1 else ""
 
 
+# A wish the user limits to now ("today only reply fast", "今天先别管 lint 了",
+# "just for today skip the tests") is about the work at hand, whatever the
+# model answered: not a note, and not a change wanted once either (read as
+# "once", "today only reply fast, short short" was joined with an email-length
+# wish from another chat and still became a note). Live (Qwen3.8-27B, two test users): both were read as
+# standing wishes and became the notes "Reply fast and short today." and
+# "Ignore lint today.", which the prompt then carried into every later day.
+# "From today on" and "starting today" say the opposite: the wish lasts; a
+# span of dates ("from 2026-02-01 till today") is not a limit.
+NOW_ONLY = re.compile(
+    r"\b((?<!till )(?<!until )(?<!through )(?<!to )today(?!['’]s)|tonight|for now|this time|just this once|this once)\b|今天|今晚|这次|这回|暂时|오늘|이번만|이번엔|\b(hoy|esta vez|por ahora)\b",
+    re.I,
+)
+FROM_NOW = re.compile(r"\b(from (today|now|tonight)|starting (today|now)|as of today|going forward)\b|从今天|今天起|今天开始|以后|오늘부터|desde hoy", re.I)
+
+
+def now_only(message):
+    """Whether the user's message limits what it asks for to now."""
+    said = str(message or "")
+    return bool(NOW_ONLY.search(said)) and not FROM_NOW.search(said)
+
+
 def turn_verdict(answer, message="", earlier=""):
     """("lasting", the wish as a note) or ("once" | "task" | "reaction", "")
     from the answer to TURN about this message; (None, "") when the model
@@ -336,6 +358,8 @@ def turn_verdict(answer, message="", earlier=""):
     kind = answer.get("kind") if answer.get("kind") in ("once", "task", "reaction") else None
     if answer.get("standing") != "yes":
         return kind, ""
+    if now_only(message):
+        return "task", ""
     wish, said = " ".join(str(answer.get("wish") or "").split()), message.lower()
     if said.isascii() and any(name in wish.lower() and name not in said for name in TURN_EXAMPLE_NAMES):
         return kind, ""
