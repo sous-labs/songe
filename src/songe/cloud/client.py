@@ -90,6 +90,26 @@ def _number(value):
         return None
 
 
+def adjusted(body, response):
+    """Change the request in place for a model that refused one of its fields,
+    and say whether to ask again. Live, OpenAI's GPT-6 models: "'max_tokens'
+    is not supported with this model. Use 'max_completion_tokens' instead",
+    and "'temperature' does not support 0 with this model"."""
+    if response.status_code != 400:
+        return False
+    try:
+        param = ((response.json().get("error") or {}).get("param")) or ""
+    except (ValueError, AttributeError):
+        return False
+    if param == "max_tokens" and "max_tokens" in body:
+        body["max_completion_tokens"] = body.pop("max_tokens")
+        return True
+    if param == "temperature" and "temperature" in body:
+        del body["temperature"]
+        return True
+    return False
+
+
 def chat(*, provider, provider_name, url, key, model, messages, max_tokens,
          temperature=0.0, pricing=None):
     """One completion. Messages must already be redacted."""
@@ -103,9 +123,12 @@ def chat(*, provider, provider_name, url, key, model, messages, max_tokens,
         body["usage"] = {"include": True}  # OpenRouter reports the call's cost
     try:
         with http() as client:
-            response = client.post(
-                url.rstrip("/") + "/chat/completions", json=body, headers=_headers(provider, key)
-            )
+            for _ in range(3):
+                response = client.post(
+                    url.rstrip("/") + "/chat/completions", json=body, headers=_headers(provider, key)
+                )
+                if not adjusted(body, response):
+                    break
     except httpx.TimeoutException as exc:
         raise CloudError(f"{provider_name} did not answer in time") from exc
     except httpx.HTTPError as exc:

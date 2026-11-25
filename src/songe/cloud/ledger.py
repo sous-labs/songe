@@ -36,7 +36,8 @@ PREVIEW_CHARS = 240
 def night_key(at: float | None = None) -> str:
     """Noon to noon, local time: the night a call belongs to."""
     at = time.time() if at is None else at
-    return time.strftime("%Y-%m-%d", time.localtime(at - 12 * 3600))
+    # Not below 0: Windows' localtime refuses negative times (a test clock).
+    return time.strftime("%Y-%m-%d", time.localtime(max(at - 12 * 3600, 0)))
 
 
 def _exists(db) -> bool:

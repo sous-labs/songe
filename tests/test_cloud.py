@@ -703,3 +703,38 @@ def test_agent_traffic_still_only_goes_local(config):
 
     with pytest.raises(ValueError, match="local"):
         replace(config, upstream_url="https://openrouter.ai/api/v1").validate()
+
+
+def test_a_model_that_refuses_max_tokens_or_temperature_is_asked_again(monkeypatch):
+    """Live, OpenAI's GPT-6 models through a custom endpoint: max_tokens and
+    temperature 0 are refused with a 400 naming the field."""
+    import json as _json
+
+    import httpx
+
+    from songe.cloud import client
+
+    seen = []
+
+    def fake(request):
+        body = _json.loads(request.content)
+        seen.append(sorted(body))
+        if "max_tokens" in body:
+            return httpx.Response(400, json={"error": {"message": "Use 'max_completion_tokens'", "param": "max_tokens"}})
+        if "temperature" in body:
+            return httpx.Response(400, json={"error": {"message": "does not support 0", "param": "temperature"}})
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}],
+                                         "usage": {"prompt_tokens": 3, "completion_tokens": 1}})
+
+    monkeypatch.setattr(client, "TRANSPORT", httpx.MockTransport(fake))
+    reply = client.chat(provider="custom", provider_name="api.openai.com", url="https://api.openai.com/v1",
+                        key="k", model="gpt-6.2-sol", messages=[{"role": "user", "content": "hi"}], max_tokens=20)
+    assert reply.text == "ok" and len(seen) == 3
+    assert "max_completion_tokens" in seen[-1] and "temperature" not in seen[-1]
+
+
+def test_a_night_key_for_a_clock_near_zero():
+    """Windows' localtime refuses negative times; tests run with a fake clock."""
+    from songe.cloud.ledger import night_key
+
+    assert night_key(100.0)
