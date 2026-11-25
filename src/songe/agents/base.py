@@ -125,10 +125,14 @@ class Agent:
         """Its default model is a songe/ one."""
         return False
 
-    def stale(self, key, config):
+    def stale(self, path, key, config):
         """A top-level entry Songe wrote for a model it no longer serves
         (for files keyed by model name; opencode and pi use legacy_models)."""
         return False
+
+    def after_uninstall(self, home):
+        """A note for what uninstall cannot undo, or None."""
+        return None
 
     # How the user picks a Songe model there ("choose one with <pick>").
     pick = "a Songe model"

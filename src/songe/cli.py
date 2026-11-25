@@ -1112,6 +1112,9 @@ def main(argv=None):
                         ("Originals", "retained in backups"),
                     ]
                 )
+            notes = [(a.name, a.after_uninstall(Path.home())) for a in agents.ADAPTERS]
+            if any(note for _, note in notes):
+                facts([(name, note) for name, note in notes if note])
             result("Songe uninstalled")
             if not purged:
                 facts(

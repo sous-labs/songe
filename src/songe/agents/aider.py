@@ -68,10 +68,23 @@ class Aider(Agent):
                 }
         return data
 
-    def stale(self, key, config):
-        return str(key).startswith(PREFIX) and key not in {
-            model_name(public) for public in exposed(config)
-        }
+    def stale(self, path, key, config):
+        # Only metadata is dropped: a settings entry is what sends the model
+        # to Songe, and without it a default still naming the model (AIDER_MODEL,
+        # ~/.aider.conf.yml) would go to OpenAI instead of failing locally.
+        return (
+            Path(path).name == METADATA
+            and str(key).startswith(PREFIX)
+            and key not in {model_name(public) for public in exposed(config)}
+        )
+
+    def after_uninstall(self, home):
+        if self.on_songe(home):
+            return (
+                f"its default model is still {PREFIX}… · change AIDER_MODEL or model:"
+                " in ~/.aider.conf.yml, or it goes to OpenAI"
+            )
+        return None
 
     def on_songe(self, home):
         # Aider's own default: AIDER_MODEL, else `model:` in ~/.aider.conf.yml

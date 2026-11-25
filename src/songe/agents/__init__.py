@@ -153,7 +153,7 @@ def drop_stale(adapter, path, data, root, config):
     return {
         key: value
         for key, value in data.items()
-        if not (adapter.stale(key, config) and written.get(key) == value)
+        if not (adapter.stale(path, key, config) and written.get(key) == value)
     }
 
 
@@ -440,15 +440,24 @@ def refresh_limits(config, home=None, root=None):
     home = home or Path.home()
     changed = []
     for adapter in ADAPTERS:
+        loaded = []
         for path, codec in adapter.files(home):
             if not path.exists() or path.suffix == ".jsonc":
-                continue
+                break
             try:
                 data = codec.load(path.read_bytes())
             except NotEditable:
-                continue
+                break
             if not adapter.owns(path, data):
-                continue
+                break
+            loaded.append((path, codec, data))
+        if len(loaded) != len(adapter.files(home)):
+            # All of an agent's files or none, as in proposed(): a file the
+            # user deleted, commented or took Songe out of leaves the others
+            # alone too (Aider's metadata for a model the settings file has
+            # no api_base for would send it to OpenAI).
+            continue
+        for path, codec, data in loaded:
             new = adapter.configure(path, data, config, default=False)
             if root and not adapter.legacy_models:
                 new = drop_stale(adapter, path, new, root, config)

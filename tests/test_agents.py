@@ -611,27 +611,64 @@ def test_unknown_codec_is_a_conflict_and_uninstall_carries_on(tmp_path, config):
     assert not (home / ".aider.model.metadata.json").exists()  # the rest is undone
 
 
-def test_aider_drops_a_renamed_models_entries_unless_the_user_changed_them(
-    tmp_path, config
-):
+def test_aider_drops_a_renamed_models_metadata_but_keeps_its_endpoint(tmp_path, config):
+    # The settings entry is what sends the model to Songe: dropping it would
+    # send a default that still names the model to OpenAI. Metadata goes
+    # when unchanged; the user's edit stays.
     home = aider_home(tmp_path)
     settings = home / ".aider.model.settings.yml"
     metadata = home / ".aider.model.metadata.json"
     root = tmp_path / "songe"
     root.mkdir()
-    config.exposed_models = ["songe/test", "songe/other"]
+    config.exposed_models = ["songe/test", "songe/other", "songe/third"]
     agents.apply(agents.proposed(config, home), root)
     data = json.loads(metadata.read_text(encoding="utf-8"))
-    data["openai/songe/other"]["max_output_tokens"] = 1000  # the user's edit
+    data["openai/songe/third"]["max_output_tokens"] = 1000  # the user's edit
     metadata.write_text(json.dumps(data), encoding="utf-8")
     config.exposed_models = ["songe/renamed"]
     assert len(agents.refresh_limits(config, home, root=root)) == 2
     names = agents.load(settings).keys()
-    assert "openai/songe/other" not in names and "openai/songe/renamed" in names
+    assert {"openai/songe/other", "openai/songe/third", "openai/songe/renamed"} <= names
+    for name in names:
+        assert agents.load(settings)[name]["extra_params"]["api_base"] == "http://127.0.0.1:7613/v1"
     kept = json.loads(metadata.read_text(encoding="utf-8"))
-    assert "openai/songe/other" in kept and "openai/songe/renamed" in kept
+    assert "openai/songe/other" not in kept
+    assert "openai/songe/third" in kept and "openai/songe/renamed" in kept
     assert agents.restore(root) == []
     assert not settings.exists()
+
+
+@pytest.mark.parametrize("change", ["comment", "delete", "take-out"])
+def test_refresh_leaves_all_of_aider_alone_when_one_file_cannot_be_refreshed(
+    tmp_path, config, change
+):
+    # The service applies refresh_limits without review: a new model must
+    # not reach the metadata file alone, without an api_base in the settings.
+    home = aider_home(tmp_path)
+    settings = home / ".aider.model.settings.yml"
+    metadata = home / ".aider.model.metadata.json"
+    root = tmp_path / "songe"
+    root.mkdir()
+    agents.apply(agents.proposed(config, home), root)
+    if change == "comment":
+        settings.write_text("# note\n" + settings.read_text(encoding="utf-8"), encoding="utf-8")
+    elif change == "delete":
+        settings.unlink()
+    else:
+        settings.write_text("- name: gpt-4o\n", encoding="utf-8")
+    before = metadata.read_bytes()
+    config.exposed_models = ["songe/m2"]
+    assert agents.refresh_limits(config, home, root=root) == []
+    assert metadata.read_bytes() == before
+
+
+def test_uninstall_warns_when_aiders_default_is_still_a_songe_model(tmp_path, monkeypatch):
+    home = aider_home(tmp_path)
+    adapter = agents.adapter_for(home / ".aider.model.settings.yml")
+    monkeypatch.delenv("AIDER_MODEL", raising=False)
+    assert adapter.after_uninstall(home) is None
+    monkeypatch.setenv("AIDER_MODEL", "openai/songe/qwen")
+    assert "goes to OpenAI" in adapter.after_uninstall(home)
 
 
 def test_aider_on_songe_reads_its_default_model(tmp_path, monkeypatch):
