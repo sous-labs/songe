@@ -217,6 +217,8 @@ def status_copy(data):
             ) else "Starts when idle"
         return ready, "Starts when idle · " + quiet.replace("/", " of ", 1)
     if "proxy requests in flight" in reason:
+        if tools := re.search(r"waiting up to (\d+) min for the agent's tool results", reason):
+            return "In use", f"The agent is running tools · learning waits up to {tools[1]} min"
         return "In use", "Continues after this conversation"
     if "checks passed" in reason:
         return "Update ready", "Applies when idle"

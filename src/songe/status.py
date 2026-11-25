@@ -405,6 +405,12 @@ def activity(config, store, scheduler, training, models, *, live, ready=None):
         and (not training or ready)
     ):
         reason = "proxy requests in flight"
+        if waiting_on_agent and not any(getattr(scheduler, "in_flight", {}).values()):
+            # The agent asked for tools and will call back; Songe gives it up
+            # to AGENT_FOLLOWUP_SECONDS. Said, so the wait does not look stuck
+            # (reported by Jack in a test on 11-24).
+            left = max(1, -(-int(scheduler.last_traffic - time.monotonic()) // 60))
+            reason += f" · waiting up to {left} min for the agent's tool results"
     now = (
         work_text(training | {"model": name}, name) if training and not ready else None
     )

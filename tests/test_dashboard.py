@@ -676,3 +676,25 @@ def test_page_times_use_a_24_hour_clock():
     script = (Path(songe.__file__).parent / "ui" / "next.js").read_text(encoding="utf-8")
     calls = re.findall(r"toLocaleTimeString\(([^)]*)\)", script)
     assert calls and all("hourCycle: 'h23'" in call for call in calls)
+
+
+def test_waiting_for_the_agents_tools_says_so(config, store, monkeypatch):
+    """Reported by Jack in a test on 11-24: after an answer that asked for
+    tools, Songe waits up to five minutes for the agent to call back, and the
+    status said only "proxy requests in flight", which looked stuck."""
+    from songe.wording import readable, status_copy
+
+    models = learner(config, store)
+    monkeypatch.setattr("songe.status.time.monotonic", lambda: 1000)
+    worker = scheduler(config, last_traffic=1000 + 250, in_flight={}, process=None)
+    result = activity(config, store, worker, None, models, live=True)
+    assert result["now"] == (
+        "waiting · proxy requests in flight · waiting up to 5 min for the agent's tool results")
+    assert status_copy({"activity": result}) == (
+        "In use", "The agent is running tools · learning waits up to 5 min")
+    assert "conversations in progress · waiting up to 5 min" in readable(result["now"])
+    # A request still streaming: said as before.
+    worker.in_flight = {"admission": 1}
+    result = activity(config, store, worker, None, models, live=True)
+    assert result["now"] == "waiting · proxy requests in flight"
+    assert status_copy({"activity": result}) == ("In use", "Continues after this conversation")
