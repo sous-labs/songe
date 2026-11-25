@@ -495,3 +495,27 @@ def test_a_plain_message_copied_from_the_chat_is_dropped(store, monkeypatch):
     writer = ChatWriter(messages=["How do I install requests?"])
     rows = chat_written(store, monkeypatch, writer, variants=(1,))
     assert rows[0]["drop"] == "not_copy" and writer.replied == []
+
+
+def test_the_scenes_of_a_plain_chat_are_answered_several_at_a_time(store, monkeypatch):
+    """A scene costs two answers and a judgement from the served model. Asked
+    one after another, a 27B on vLLM wrote 8 scenes a minute while the server
+    sat at one running request; a Dream of 16 lessons with 60 scenes each
+    would have practised for two hours. The scenes of one plain-chat lesson
+    share nothing (no workspace, no tools), so AT_ONCE of them are answered
+    at the same time. Scenes with tools stay one at a time."""
+
+    class Slow(ChatWriter):
+        running = most = 0
+
+        async def reply(self, messages, *, max_tokens, temperature=0, think=None):
+            Slow.running += 1
+            Slow.most = max(Slow.most, Slow.running)
+            await asyncio.sleep(0.01)
+            Slow.running -= 1
+            return await super().reply(messages, max_tokens=max_tokens)
+
+    many = [f"Which command adds package number {n}?" for n in range(20)]
+    rows = chat_written(store, monkeypatch, Slow(messages=many), variants=tuple(range(1, 21)))
+    assert sorted(r["variant"] for r in rows) == list(range(1, 21))
+    assert 1 < Slow.most <= 2 * practice.AT_ONCE
