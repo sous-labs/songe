@@ -364,7 +364,9 @@ def test_hidden_status_lines_stay_hidden_at_phone_width():
     import re
     from pathlib import Path
 
-    css = (Path(__file__).resolve().parents[1] / "src/songe/ui/next.css").read_text()
+    css = (Path(__file__).resolve().parents[1] / "src/songe/ui/next.css").read_text(
+        encoding="utf-8"
+    )
     phone = css.split("@media (width < 46rem)", 1)[1]
     assert re.search(r"\.status p \{[^}]*display: grid", phone)
     assert re.search(r"\.status p\[hidden\] \{ display: none; \}", phone)
