@@ -47,6 +47,33 @@ jobs:
           bin=smoke-venv/bin; [ -d smoke-venv/Scripts ] && bin=smoke-venv/Scripts
           "$bin/python" .github/ci/smoke.py --songe "$bin/songe"
 
+  # The PyTorch backend (training on NVIDIA, AMD and CPU), on CPU. Its tests
+  # are skipped where torch is not installed, so without this job they went
+  # stale unnoticed (#145). The locked versions, with torch's CPU wheel
+  # instead of the CUDA one (docs/RELEASING.md), keep the download small.
+  torch:
+    name: ubuntu-latest / PyTorch (CPU)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync --locked
+      - name: Install the locked PyTorch stack (CPU wheels)
+        run: |
+          uv export --locked --extra torch --no-hashes --no-emit-project --no-header > torch-locked.txt
+          torch=$(grep -E '^torch==' torch-locked.txt | cut -d' ' -f1)
+          test -n "$torch"
+          uv pip install "$torch" --index-url https://download.pytorch.org/whl/cpu
+          grep -vE '^(torch|triton|nvidia-[a-z0-9-]+)==' torch-locked.txt > torch-rest.txt
+          uv pip install -r torch-rest.txt
+      # A broken install must fail here, not skip the tests quietly.
+      - run: uv run --no-sync python -c "import torch, transformers, peft; assert not torch.cuda.is_available(); print(torch.__version__)"
+      - run: uv run --no-sync pytest -rs
+
   macos:
     runs-on: macos-15
     timeout-minutes: 30
