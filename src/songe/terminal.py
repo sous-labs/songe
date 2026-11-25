@@ -117,6 +117,11 @@ def status(data):
     if data.get("upgrade_notice") and not os.environ.get("SONGE_NOTICE_SHOWN"):
         output.print(Text(data["upgrade_notice"], style="yellow"))
     output.print(status_text(data))
+    from .wording import cloud_line
+
+    cloud = cloud_line((data.get("settings") or {}).get("cloud"))
+    if cloud:
+        output.print(Text(f"{'cloud':<8}{cloud}"))
     if data.get("recordings_note"):
         output.print(Text(data["recordings_note"], style="yellow"))
     output.print()

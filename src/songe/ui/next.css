@@ -311,3 +311,36 @@ mark.after { background: color-mix(in srgb, var(--p) 18%, transparent); }
 .version-label { font-weight: 500; }
 .lesson-list .remove-lesson { margin-left: .5rem; font-size: .75rem; }
 .undo-quick { margin-right: 1rem; }
+
+/* Learn with a cloud model: a row in the rail, a badge by the wordmark,
+   and its two dialogs (what is sent; setup). */
+.rail-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: .5rem .75rem; }
+.cloud-badge { padding: .0625rem .5rem; border-radius: 999px; background: var(--lav); color: var(--p); font-size: .6875rem; font-weight: 500; letter-spacing: .04em; white-space: nowrap; }
+.cloud-badge[hidden] { display: none; }
+.cloud-setting { display: grid; gap: .25rem; font-size: .8125rem; }
+.cloud-setting .auto { padding-inline: 0; font-size: .8125rem; text-align: left; }
+.cloud-setting .auto:disabled { opacity: .5; cursor: default; }
+.cloud-links { color: var(--faint); }
+.cloud-links .text-action { font-size: .75rem; color: var(--muted); }
+.cloud-line { font-size: .75rem; line-height: 1.4; }
+.cloud-dialog { width: min(34rem, calc(100vw - 2rem)); max-height: calc(100svh - 2rem); padding: 1.5rem; border: 1px solid var(--line); border-radius: .75rem; background: var(--paper); color: var(--ink); box-shadow: 0 16px 48px rgba(0, 0, 0, .2); overflow-y: auto; }
+.cloud-dialog::backdrop { background: rgba(20, 16, 40, .35); }
+.cloud-title { margin-bottom: 1rem; font-size: 1.25rem; font-weight: 450; letter-spacing: -.01em; }
+.cloud-disclaimer { margin: 0 0 1rem; padding-left: 1.125rem; font-size: .875rem; }
+.cloud-disclaimer li + li { margin-top: .5rem; }
+.cloud-dialog a { color: var(--p); }
+.cloud-field { display: grid; gap: .25rem; margin-bottom: .875rem; }
+.cloud-field[hidden] { display: none; }
+.cloud-field input, .cloud-field select { width: 100%; padding: .4375rem .625rem; border: 1px solid var(--line); border-radius: .375rem; background: var(--tint); color: var(--ink); font: inherit; font-size: .875rem; }
+.cloud-field input[hidden], .cloud-key[hidden] { display: none; }
+.cloud-key { font-family: var(--mono); font-size: .8125rem; }
+.cloud-note { margin-bottom: .75rem; font-size: .8125rem; }
+.cloud-result { min-height: 1.25rem; font-size: .875rem; }
+.cloud-result[data-ok="false"] { color: var(--rust); }
+.cloud-result[data-ok="true"] { color: var(--p); }
+.cloud-actions { display: flex; align-items: center; justify-content: flex-end; gap: 1.25rem; margin-top: 1rem; }
+.cloud-actions .done:disabled { opacity: .5; cursor: default; }
+.cloud-calls { margin-top: 1.5rem; padding-top: 1rem; border-top: 1px solid var(--line); font-size: .8125rem; }
+.cloud-calls ul { margin: .5rem 0 0; padding: 0; list-style: none; }
+.cloud-calls li { padding: .375rem 0; border-bottom: 1px solid var(--line); }
+.cloud-preview { display: block; margin-top: .125rem; color: var(--faint); font: 400 .75rem/1.5 var(--mono); overflow-wrap: anywhere; }

@@ -13,7 +13,10 @@
   <div class="paper-grain" aria-hidden="true"></div>
   <div class="page">
     <aside class="rail">
-      <p class="wordmark">Songe</p>
+      <div class="rail-head">
+        <p class="wordmark">Songe</p>
+        <span id="cloud-badge" class="cloud-badge" hidden></span>
+      </div>
       <div id="nav"></div>
       <section class="status" aria-label="What Songe is doing">
         <p><span class="label">Now</span> <span id="now">Connecting to Songe</span></p>
@@ -22,7 +25,8 @@
         <p><span class="label">Paused</span> <span id="paused"></span></p>
         <p id="machine-line" hidden><span class="label">Machine</span> <span id="machine"></span></p>
       </section>
-      <p class="signature">Learning stays on this machine.</p>
+      <section id="cloud-setting" class="cloud-setting" aria-label="Learn with a cloud model"></section>
+      <p class="signature" id="signature">Learning stays on this machine.</p>
     </aside>
     <main id="models"></main>
   </div>

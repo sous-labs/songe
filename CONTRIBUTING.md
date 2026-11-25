@@ -32,7 +32,8 @@ pull request; `main` only changes through a pull request with passing CI.
 - User-facing wording lives in `src/songe/wording.py` and
   `src/songe/ui/wording.json`; keep it plain.
 - Songe never runs tools from recorded conversations and never sends data off
-  the machine; changes must keep it that way.
+  the machine, except through the opt-in cloud learning (`songe.cloud`: off by
+  default, redacted, budgeted, logged); changes must keep it that way.
 
 More detail on how it works: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md),
 [docs/CONTRACTS.md](docs/CONTRACTS.md) and [DESIGN.md](DESIGN.md).

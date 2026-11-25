@@ -411,6 +411,12 @@ def night_cycle(config, store, night, model, *, every=False):
     }
     if every:
         out["signals"] = signal_lines(store) if read is not None else []
+        # What this Dream sent to a cloud model, if cloud learning was on.
+        from .cloud.ledger import calls
+
+        out["cloud_calls"] = calls(
+            store, dream=out["id"], since=out["started_at"] or 0, until=out["ended_at"]
+        )
         if out["result"] is not None:
             out["result"]["all_examples"] = record.get("examples") or []
     return out

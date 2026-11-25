@@ -882,6 +882,7 @@ function render() {
   $('gpu-line').hidden = !gpu;
   if (gpu) $('gpu').textContent = fill(gpu.memory != null ? W.gpu_line : W.gpu_busy,
     {busy: gpu.busy, memory: `${(gpu.memory / 2 ** 30).toFixed(1)} GB`});
+  renderCloud(status?.settings?.cloud);
   $('nav').replaceChildren(all.length ? railNav(shown, models, inventory, active, rest) : '');
   $('models').replaceChildren(active ? modelView(active, models[active], inventory[active], Boolean(status?.paused)) : el('p', {class: 'empty'}, 'No models yet'));
 }
@@ -914,6 +915,166 @@ async function refresh() {
   }
 }
 window.refresh = refresh;
+
+// ---- Learn with a cloud model (optional, off by default) ----
+// One row in the rail: a switch, Configure, and "What's sent?". Turning it
+// on: the disclaimer first, then setup if anything is missing, then the
+// service's probe; it is on only if the probe passes. The key is write-only:
+// the page only ever sees its last four characters.
+let cloud = null;               // settings.cloud from the last poll
+let cloudBusy = false;
+const money = usd => usd == null ? W.cloud.cost_unknown : usd > 0 && usd < 0.01 ? '<$0.01' : `$${usd.toFixed(2)}`;
+async function cloudDetails() {
+  const r = await fetch('/api/cloud', {cache: 'no-store'});
+  if (!r.ok) throw new Error(`request failed (${r.status})`);
+  return r.json();
+}
+async function cloudPatch(changes) {
+  const r = await fetch('/api/settings', {method: 'PATCH', headers: {'content-type': 'application/json'}, body: JSON.stringify({cloud: changes})});
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || `request failed (${r.status})`);
+  return data;
+}
+function cloudConfigured(c) { return Boolean(c?.model && c?.key?.set && (c.provider !== 'custom' || c.base_url)); }
+function renderCloud(c) {
+  cloud = c || null;
+  const C = W.cloud;
+  const box = $('cloud-setting');
+  if (!box || !c) return;
+  const badge = $('cloud-badge');
+  badge.hidden = !c.enabled;
+  badge.textContent = C.badge;
+  badge.title = fill(C.badge_title, {model: c.model, provider: c.provider_label});
+  $('signature').textContent = c.enabled ? C.signature_on : 'Learning stays on this machine.';
+  const toggle = el('button', {type: 'button', class: 'auto', role: 'switch', 'aria-checked': String(c.enabled), disabled: cloudBusy ? '' : null,
+    onclick: () => c.enabled ? cloudOff() : cloudOn()},
+    el('span', {class: 'track', 'aria-hidden': 'true'}, el('span', {class: 'knob'})), C.row);
+  const tonight = c.tonight || {};
+  const spent = tonight.cost_known === false ? C.cost_unknown : money(tonight.usd || 0);
+  box.replaceChildren(...[
+    toggle,
+    el('p', {class: 'cloud-links'},
+      el('button', {type: 'button', class: 'text-action', onclick: () => cloudSetup(false)}, C.configure), ' · ',
+      el('button', {type: 'button', class: 'text-action', onclick: () => cloudDisclaimer(false)}, C.whats_sent)),
+    c.enabled ? el('p', {class: 'cloud-line muted'}, fill(C.on_line, {model: c.model, spent, budget: money(c.budget_usd)})) : null,
+    !c.enabled && c.off_reason ? el('p', {class: 'cloud-line bad'}, c.off_reason) : null].filter(Boolean));
+}
+async function cloudOff() {
+  cloudBusy = true;
+  try { await cloudPatch({enabled: false}); say(W.cloud.turned_off); }
+  catch (e) { say(fill(W.control_failed, {error: e.message}), true); }
+  finally { cloudBusy = false; refresh(); }
+}
+async function cloudOn() {
+  let details;
+  try { details = await cloudDetails(); } catch (e) { say(fill(W.control_failed, {error: e.message}), true); return; }
+  if (!await cloudDisclaimer(true, details)) return;
+  if (!cloudConfigured(details.settings)) { cloudSetup(true, details); return; }
+  cloudBusy = true; render();
+  try {
+    const s = await cloudPatch({accept_disclaimer: details.disclaimer.version, enabled: true});
+    say(fill(W.cloud.turned_on, {message: s.cloud?.last_test?.message || ''}));
+  } catch (e) {
+    say(e.message, true, {label: W.cloud.configure, run: () => cloudSetup(true)});
+  } finally { cloudBusy = false; refresh(); }
+}
+function modal(...children) {
+  const dialog = el('dialog', {class: 'cloud-dialog'}, ...children);
+  dialog.addEventListener('close', () => dialog.remove());
+  document.body.append(dialog);
+  dialog.showModal();
+  return dialog;
+}
+// The full disclaimer. accept: resolves true only when the viewer accepts.
+async function cloudDisclaimer(accept, details = null) {
+  const C = W.cloud;
+  try { details = details || await cloudDetails(); } catch (e) { say(fill(W.control_failed, {error: e.message}), true); return false; }
+  const d = details.disclaimer;
+  return new Promise(resolve => {
+    let answer = false;
+    const dialog = modal(
+      el('h2', {class: 'cloud-title'}, d.title),
+      el('ul', {class: 'cloud-disclaimer'}, d.lines.map(line => el('li', {}, line))),
+      d.terms_url ? el('p', {}, el('a', {href: d.terms_url, target: '_blank', rel: 'noopener noreferrer'}, C.terms)) : null,
+      el('div', {class: 'cloud-actions'},
+        accept ? el('button', {type: 'button', class: 'text-action', onclick: () => dialog.close()}, C.cancel) : null,
+        el('button', {type: 'button', class: 'done', onclick: () => { answer = accept; dialog.close(); }}, accept ? C.accept : C.close)));
+    dialog.addEventListener('close', () => resolve(answer));
+  });
+}
+// Provider, model, key, budget, Test, and the latest night's calls.
+async function cloudSetup(enabling, details = null) {
+  const C = W.cloud;
+  try { details = details || await cloudDetails(); } catch (e) { say(fill(W.control_failed, {error: e.message}), true); return; }
+  const s = details.settings;
+  const field = (label, control, hidden = false) => { const f = el('label', {class: 'cloud-field'}, el('span', {class: 'label'}, label), control); f.hidden = hidden; return f; };
+  const provider = el('select', {}, el('option', {value: 'openrouter'}, C.provider_openrouter), el('option', {value: 'custom'}, C.provider_custom));
+  provider.value = s.provider || 'openrouter';
+  const baseUrl = el('input', {type: 'url', placeholder: 'https://…/v1', value: s.base_url || ''});
+  const known = details.models.map(m => m.id);
+  const pick = el('select', {}, details.models.map(m => el('option', {value: m.id}, m.label)), el('option', {value: ''}, C.model_other));
+  const typed = el('input', {type: 'text', placeholder: 'provider/model-id', value: s.model || '', spellcheck: 'false'});
+  pick.value = s.model && known.includes(s.model) ? s.model : s.model ? '' : details.recommended;
+  const key = el('input', {type: 'password', autocomplete: 'off', placeholder: 'sk-…'});
+  const keyNow = s.key.set ? el('span', {class: 'cloud-key'}, fill(s.key.source === 'environment' ? C.key_env : C.key_set, {tail: s.key.tail}), ' ',
+    el('button', {type: 'button', class: 'text-action', onclick: () => { keyNow.hidden = true; key.hidden = false; key.focus(); }}, C.replace)) : null;
+  key.hidden = Boolean(s.key.set);
+  const budget = el('input', {type: 'number', min: '0.1', step: '0.5', value: String(s.budget_usd ?? 1)});
+  const resultLine = el('p', {class: 'cloud-result', role: 'status'}, s.last_test?.message ? `${s.last_test.ok ? '✓' : '✗'} ${s.last_test.message}` : '');
+  const custom = field(C.base_url, baseUrl, provider.value !== 'custom');
+  const typedField = field(C.model, typed, provider.value === 'openrouter' && pick.value !== '');
+  const pickField = field(C.model, pick, provider.value !== 'openrouter');
+  const sync = () => { custom.hidden = provider.value !== 'custom'; pickField.hidden = provider.value !== 'openrouter'; typedField.hidden = provider.value === 'openrouter' && pick.value !== ''; };
+  provider.addEventListener('change', sync);
+  pick.addEventListener('change', sync);
+  const changes = () => {
+    const out = {provider: provider.value, model: (provider.value === 'openrouter' && pick.value) || typed.value.trim(), budget_usd: Number(budget.value)};
+    if (provider.value === 'custom') out.base_url = baseUrl.value.trim();
+    if (!key.hidden && key.value.trim()) out.api_key = key.value.trim();
+    return out;
+  };
+  const show = (ok, text) => { resultLine.textContent = `${ok ? '✓' : '✗'} ${text}`; resultLine.dataset.ok = String(ok); };
+  let working = false;
+  const run = async (button, job) => {
+    if (working) return;
+    working = true; button.disabled = true;
+    const label = button.textContent; button.textContent = C.testing;
+    try { await job(); } catch (e) { show(false, e.message); }
+    finally { working = false; button.disabled = false; button.textContent = label; refresh(); }
+  };
+  const test = el('button', {type: 'button', class: 'text-action', onclick: () => run(test, async () => {
+    await cloudPatch(changes());
+    const r = await fetch('/api/cloud/test', {method: 'POST', headers: {'content-type': 'application/json'}, body: '{}'});
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || `request failed (${r.status})`);
+    show(data.ok, data.message);
+  })}, C.test);
+  const primary = el('button', {type: 'button', class: 'done', onclick: () => run(primary, async () => {
+    const out = changes();
+    if (enabling) { out.enabled = true; out.accept_disclaimer = details.disclaimer.version; }
+    const saved = await cloudPatch(out);
+    dialog.close();
+    say(enabling ? fill(C.turned_on, {message: saved.cloud?.last_test?.message || ''}) : C.saved);
+  })}, enabling ? C.turn_on : C.save);
+  const night = details.night;
+  const calls = details.calls || [];
+  const dialog = modal(
+    el('h2', {class: 'cloud-title'}, C.setup_title),
+    field(C.provider, provider), custom, pickField, typedField,
+    el('div', {class: 'cloud-field'}, el('span', {class: 'label'}, C.key), keyNow, key),
+    field(C.budget, budget),
+    s.cost_known === false && s.provider === 'custom' ? el('p', {class: 'muted cloud-note'}, C.best_effort) : null,
+    resultLine,
+    el('div', {class: 'cloud-actions'},
+      el('button', {type: 'button', class: 'text-action', onclick: () => dialog.close()}, C.cancel), test, primary),
+    el('section', {class: 'cloud-calls'},
+      el('p', {class: 'label'}, night ? fill(C.calls_title, {night: night.night}) : C.calls_none),
+      night ? el('p', {class: 'muted'}, fill(C.calls_total, {calls: night.calls, spent: night.cost_known ? money(night.usd) : C.cost_unknown})) : null,
+      calls.length ? el('ul', {}, calls.map(call => el('li', {},
+        el('span', {}, `${new Date(call.at * 1000).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'})} · ${call.purpose} · ${call.model}`),
+        el('span', {class: 'muted'}, ` · ${call.sent_chars} chars · ${call.sent ? money(call.cost_usd) : C.not_sent}${call.ok ? '' : ` · ${call.error || 'failed'}`}`),
+        call.preview ? el('span', {class: 'cloud-preview'}, call.preview) : null))) : null));
+}
 
 // The site's paper: a one-time grayscale noise tile.
 (() => {

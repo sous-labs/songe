@@ -422,7 +422,9 @@ contexts or performing model inference.
 
 ## 8. Local API (for GUI, TUI, CLI) — served by the proxy on loopback
 
-`GET /api/state`, `GET /api/nights`, `GET /api/nights/{id}`, `GET /api/scoreboard`, `GET /api/settings`, `GET /api/cycles`, `GET /api/cycles/{id}` (draft, see Learning cycle), `POST /api/control` `{action: pause|resume|sleep_now|dream|undo|forget|model, ...}` (JSON + Origin check as today), `PATCH /api/settings` for the few user-facing settings (model, schedule default, upstream). The CLI and TUI use the same endpoints when the service runs, and the store directly when it does not.
+`GET /api/state`, `GET /api/nights`, `GET /api/nights/{id}`, `GET /api/scoreboard`, `GET /api/settings`, `GET /api/cycles`, `GET /api/cycles/{id}` (draft, see Learning cycle), `POST /api/control` `{action: pause|resume|sleep_now|dream|undo|forget|model, ...}` (JSON + Origin check as today), `PATCH /api/settings` for the few user-facing settings (model, schedule default, upstream, `cloud`). The CLI and TUI use the same endpoints when the service runs, and the store directly when it does not.
+
+Learn with a cloud model (`songe/cloud/`, optional, off by default): `settings.cloud` summarises it (enabled, provider, model, budget, the key as `{set, tail, source}` only, tonight's calls and cost). `PATCH /api/settings {cloud: {enabled, provider, base_url, model, budget_usd, api_key, accept_disclaimer}}`: `api_key` is write-only (it goes to the OS keychain, or a 0600 file without one); `enabled: true` needs the current disclaimer accepted and runs the probe first, and stays off with a 400 and the probe's plain result if it fails. `GET /api/cloud`: summary, disclaimer text and version, suggested models, the latest night's calls. `POST /api/cloud/test`: probe the saved settings. Every call is a row in `cloud_calls` (purpose, model, redacted size and preview, tokens, cost, ok/error); a full cycle record lists its Dream's calls as `cloud_calls`. Only the Dream may call it; the proxy's upstream stays local.
 
 `POST /api/control` accepts `{action:"model", model:<upstream id>, level:"off"|"new"|"all"}`
 (legacy `enabled:<bool>` maps true → `new`, false → `off`)

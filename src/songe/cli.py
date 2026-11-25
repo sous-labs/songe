@@ -96,6 +96,24 @@ def parser():
         ("resume", "Resume learning"),
     ):
         commands.add_parser(name, help=text)
+    cloud = commands.add_parser(
+        "cloud", help="Learn with a cloud model (optional) · on|off|status|test"
+    )
+    cloud.add_argument(
+        "action", nargs="?", default="status", choices=("on", "off", "status", "test")
+    )
+    cloud.add_argument("--provider", choices=("openrouter", "custom"))
+    cloud.add_argument("--base-url", help="Custom OpenAI-compatible endpoint")
+    cloud.add_argument("--model", help="Model id at the provider")
+    cloud.add_argument("--budget", type=float, help="Nightly budget in USD")
+    cloud.add_argument(
+        "--accept-disclaimer",
+        action="store_true",
+        help="Accept what is sent without asking (scripts)",
+    )
+    cloud.add_argument(
+        "--forget-key", action="store_true", help="off: also delete the saved key"
+    )
     sleep = commands.add_parser("sleep", help="Learn now instead of waiting")
     sleep.add_argument("--now", action="store_true")
     sleep.add_argument("--dry-run", action="store_true")
@@ -1063,6 +1081,12 @@ def main(argv=None):
                     if waiting
                     else f"Learning requested · {NAME} status"
                 )
+        elif command == "cloud":
+            if not (root / "config.toml").exists():
+                raise ValueError(f"Uninitialized · {NAME} init")
+            from .cloud.command import main as cloud_main
+
+            return cloud_main(args, Store(private_dir(root)))
         elif command == "forget":
             if confirm("Delete experience and examples?", args.yes):
                 local.control("forget", confirm=True)
@@ -1109,6 +1133,10 @@ def main(argv=None):
                     keep = {"serve.lock", "worker.lock", "experience.lock"} | (
                         {"backups", "agent-backups.json"} if conflicts else set()
                     )
+                    # The cloud API key, wherever it is kept.
+                    from .cloud.keys import delete as delete_cloud_key
+
+                    delete_cloud_key(root)
                     # This process's own open database handles go first.
                     from .log import close_connections
 

@@ -56,6 +56,39 @@ def no_real_model_server(monkeypatch):
     monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", handle_async)
 
 
+class MemoryKeychain:
+    """A keychain in memory: tests never read or write the real one."""
+
+    def __init__(self):
+        self.items = {}
+
+    def get_password(self, service, account):
+        return self.items.get((service, account))
+
+    def set_password(self, service, account, value):
+        self.items[(service, account)] = value
+
+    def delete_password(self, service, account):
+        self.items.pop((service, account), None)
+
+
+@pytest.fixture(autouse=True)
+def no_real_cloud(monkeypatch):
+    """No test reaches a cloud provider or the developer's keychain, and no
+    key in the developer's environment leaks in."""
+    from songe.cloud import client, keys
+
+    def refuse(request):
+        raise httpx.ConnectError(
+            f"tests never contact a cloud provider ({request.url})", request=request
+        )
+
+    monkeypatch.setattr(client, "TRANSPORT", httpx.MockTransport(refuse))
+    monkeypatch.setattr(keys, "BACKEND", MemoryKeychain())
+    monkeypatch.delenv("SONGE_CLOUD_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+
 @pytest.fixture(autouse=True)
 def isolated_home(tmp_path, monkeypatch):
     # Interface tests must never inspect the developer's model library or

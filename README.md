@@ -27,7 +27,8 @@ Use your local model as usual through opencode, pi or any OpenAI-compatible
 tool. While you work, Songe notices what happens after each of the model's
 actions: the tool result, the error, your next message. When your agent is
 quiet, it teaches the model to see those coming. A new version is used only
-if it passes its checks, and nothing ever leaves your machine.
+if it passes its checks, and nothing leaves your machine unless you turn on
+the optional cloud learning.
 
 ## ✨ Highlights
 
@@ -40,7 +41,9 @@ if it passes its checks, and nothing ever leaves your machine.
   own conversations; one click goes back to any earlier version.
 - **Stays out of the way.** Runs only when your agent is quiet, memory is free
   and the battery is fine, and stops the moment you are back.
-- **Private.** No account, no telemetry, no cloud. Songe never runs your tools.
+- **Private.** No account, no telemetry, no cloud unless you opt in: `songe
+  cloud on` lets the nightly Dream ask a cloud model you choose, with secrets
+  redacted and a nightly budget. Songe never runs your tools.
 
 ## 📥 Install
 
@@ -161,6 +164,7 @@ once, and trains on what fits. See [DESIGN.md](DESIGN.md).
 | `songe sleep` | start a Deep Dream now |
 | `songe undo MODEL` | go back one version |
 | `songe pause` / `songe resume` | stop and restart learning |
+| `songe cloud on\|off\|status\|test` | optional: let Dreams ask a cloud model you choose |
 | `songe doctor` | check the setup |
 | `songe forget` | delete recorded conversations (learned versions stay) |
 | `songe uninstall` | stop the service and restore your agent settings |

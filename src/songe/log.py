@@ -200,6 +200,7 @@ SHARED_STATE = {
     "forgotten_at",
     "interface_settings",
     "memory_pressure_history",
+    "cloud",
 }
 
 
@@ -839,6 +840,11 @@ class Store:
                     )
             db.execute("DELETE FROM events")
             db.execute("DROP TABLE IF EXISTS observations")
+            # What cloud calls sent quotes the conversations; their costs stay
+            # so tonight's budget still holds.
+            from .cloud.ledger import forget_previews
+
+            forget_previews(db)
             for row in db.execute("SELECT id FROM models").fetchall():
                 db.execute(
                     "INSERT OR REPLACE INTO state VALUES (?, 'true')",
