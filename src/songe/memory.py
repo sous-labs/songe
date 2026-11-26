@@ -782,10 +782,18 @@ def guard(
                 rule = "attributed_paging"
             elif need is not None and memory.available - need < margin_bytes:
                 rule = "predicted_margin"
+            # Past its prediction (and its error), a child may grow by as
+            # much again as it has overrun so far. It stops when the room left
+            # would not hold twice that; an overrun of a few percent with room
+            # to spare is no danger (live: 7.0 GB over 6.7 GB with 147 GB
+            # free, 10.5 GB over 9.9 GB with 23.8 GB of the card free; each
+            # stop cost a reload).
             elif (
                 predicted_peak_bytes is not None
                 and rss is not None
                 and rss > predicted_peak_bytes + prediction_error_bytes
+                and memory.available - margin_bytes
+                < 2 * (rss - predicted_peak_bytes)
             ):
                 rule = "prediction_exceeded"
             elif any(
@@ -795,6 +803,8 @@ def guard(
                 rule = "predicted_device_margin"
             elif any(
                 d["used_bytes"] > predicted_device_bytes + device_prediction_error_bytes
+                and d["available_bytes"]
+                < 2 * (d["used_bytes"] - predicted_device_bytes)
                 for d in device_predictions
             ):
                 rule = "device_prediction_exceeded"
