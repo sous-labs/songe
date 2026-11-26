@@ -725,6 +725,9 @@ def test_calibration_persists_observed_unsupported_reason(learners, monkeypatch)
     )
     with pytest.raises(ValueError, match="gradients"):
         calibrate.main()
+    assert registry.find(store, "second")["support"] == "trainable"  # one try is not final
+    with pytest.raises(ValueError, match="gradients"):
+        calibrate.main()
     row = registry.find(store, "second")
     assert row["support"] == "unsupported"
     assert (
@@ -733,6 +736,45 @@ def test_calibration_persists_observed_unsupported_reason(learners, monkeypatch)
     )
     assert registry.find(store, "first")["support"] == "trainable"
 
+
+
+def test_one_load_error_does_not_mark_a_model_unsupported(learners, monkeypatch):
+    """Qwen3.8-27B-FP8 beside vLLM: transformers refused the 4-bit load Songe asked
+    for ("quantized with FineGrainedFP8Config but you are passing a
+    BitsAndBytesConfig"). That one ValueError marked the model unsupported for good,
+    so no later Dream ran, even after the cause was fixed. A ValueError is final
+    only when the next try raises the same one; a try that works clears it."""
+    import sys
+
+    from songe.sleep import calibrate
+
+    _, store = learners
+    refused = "The model is quantized with FineGrainedFP8Config but you are passing a BitsAndBytesConfig config."
+
+    def load(*a):
+        raise ValueError(refused)
+
+    monkeypatch.setattr(sys, "argv", ["calibrate", "--child", "--data-dir", str(store.root), "--model-key", "second"])
+    monkeypatch.setattr(calibrate, "_calibrate", load)
+    with pytest.raises(ValueError):
+        calibrate.main()
+    assert registry.find(store, "second")["support"] == "trainable"
+    monkeypatch.setattr(calibrate, "_calibrate", lambda *a: None)  # fixed: the next try works
+    calibrate.main()
+    monkeypatch.setattr(calibrate, "_calibrate", load)
+    with pytest.raises(ValueError):
+        calibrate.main()
+    assert registry.find(store, "second")["support"] == "trainable"  # a new first try
+    with pytest.raises(ValueError):
+        calibrate.main()
+    row = registry.find(store, "second")
+    assert row["support"] == "unsupported" and row["reason"] == refused
+    # An architecture that cannot train says so the first time.
+    monkeypatch.setattr(calibrate, "_calibrate", lambda *a: (_ for _ in ()).throw(NotImplementedError("no backward")))
+    registry.support(store, "second", "trainable")
+    with pytest.raises(NotImplementedError):
+        calibrate.main()
+    assert registry.find(store, "second")["support"] == "unsupported"
 
 @pytest.mark.parametrize("linux_mlx", [False, True])
 async def test_scheduler_runs_one_guarded_model_worker_and_yields_when_off(

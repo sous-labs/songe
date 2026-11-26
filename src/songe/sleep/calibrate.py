@@ -995,17 +995,22 @@ def main():
         )
         # A capability error (the architecture cannot train) is final. Anything
         # environmental (files mid-upgrade, servers, IO) is retried by the
-        # scheduler before the model is marked unsupported.
+        # scheduler before the model is marked unsupported. A ValueError is
+        # final only when the next try raises the same one: a load setting
+        # transformers refuses (live: a 4-bit request on an FP8 checkpoint)
+        # is fixed by an update, and one such error marked the model
+        # unsupported for good.
         if args.model_key and isinstance(exc, (ValueError, NotImplementedError)):
             from ..models.registry import support
 
-            support(
-                Store(args.data_dir),
-                args.model_key,
-                "unsupported",
-                (str(exc).splitlines() or [type(exc).__name__])[0][:300],
-            )
+            line = (str(exc).splitlines() or [type(exc).__name__])[0][:300]
+            again = scoped.get("capability_error") == line
+            scoped.set("capability_error", line)
+            if isinstance(exc, NotImplementedError) or again:
+                support(Store(args.data_dir), args.model_key, "unsupported", line)
         raise
+    else:
+        scoped.set("capability_error", None)
 
 
 if __name__ == "__main__":
