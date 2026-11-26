@@ -219,7 +219,7 @@ async def two_answers(row, reader):
     a server got no plain-chat practice at all. Both answers are then asked
     again down HOW_ASKED, and the reader remembers what worked for the scenes
     that follow. An answer asked any other way than the first counts as
-    reasoned, so it is judged and not stored to train along."""
+    reasoned: what its user would see of it is stored to train along."""
     first = getattr(reader, "reply_how", 0)
     for how in range(first, len(HOW_ASKED)):
         plain = await reader.reply(row["messages"], **({"max_tokens": ANSWER_TOKENS} | HOW_ASKED[how]))
@@ -284,10 +284,14 @@ async def check(row, signal, items, reader, lessons, *, plain=False):
         c["changes"], found, taught = await changes(row, signal, reader)
         why.update(found)
         # What a Deep Dream can train this scene along: the answer with the
-        # note, unless the server reasons first (the scene's own prompt does
-        # not lead into that reasoning).
-        if c["changes"] and not taught["reasoned"]:
-            row["teacher_answer"] = {"content": taught["content"], "finished": taught["finished"]}
+        # note. A server that reasons first gets the part its user sees,
+        # without the reasoning: reasoning was all it trained on otherwise.
+        if c["changes"]:
+            from ..quick import visible
+
+            text = visible(taught["content"]) if taught["reasoned"] else taught["content"]
+            if text:
+                row["teacher_answer"] = {"content": text, "finished": taught["finished"]}
     elif all(c[k] for k in ORDER[:4]):
         placebo, real_first = placebo_for(row["id"], signal, lessons)
         real = signal["lesson"]
