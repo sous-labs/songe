@@ -32,6 +32,17 @@ def pressure(available, total, psi, baseline, *, warn_ratio=2.0, critical_ratio=
     return "normal"
 
 
+def inactive_file(folder, kind):
+    """Reclaimable page cache a cgroup's usage includes (0 when unknown)."""
+    try:
+        stat = (folder / "memory.stat").read_text(encoding="utf-8")
+    except OSError:
+        return 0
+    name = "inactive_file" if kind == "v2" else "total_inactive_file"
+    match = re.search(rf"^{name}\s+(\d+)", stat, re.M)
+    return int(match[1]) if match else 0
+
+
 class Linux:
     name = "linux"
 
@@ -239,6 +250,9 @@ class Linux:
                 if limit != "max":
                     limit = int(limit)
                     used = int((folder / current_name).read_text(encoding="utf-8"))
+                    # Usage counts the page cache; its inactive part (files read
+                    # once, like downloaded weights) is reclaimed on demand.
+                    used -= min(used, inactive_file(folder, kind))
                     total = min(total, limit)
                     available = min(available, max(0, limit - used))
                 if folder == mount:

@@ -91,7 +91,27 @@ or by auto-dream:
   them in one call (merges same-meaning lessons, drops ones that fit only one
   kind of task, rewrites each as one short instruction; the candidates as they
   are if its answer is unusable), at most `prompt_lessons` and about 150
-  tokens. Quick Dream waits when the learner's model is not loaded. The proxy
+  tokens. Background work never loads a model: an automatic Quick Dream
+  waits when the learner's model is not loaded. A pressed Quick Dream on
+  Ollama or LM Studio loads it with the server's own load (Ollama: an
+  empty-prompt `/api/generate`; LM Studio: its load) when the memory
+  admission Songe uses for its own versions allows (sized by the weights;
+  weights Songe cannot measure are not loaded: `load_unknown`; without the
+  memory: `load_memory`; on other servers it waits as before: `no_model`).
+  The load does not hold the lock the agent's requests wait on, and a second
+  press meanwhile continues the first. While loaded for the press the model
+  is listed only to that press's own work, so no other reading starts on it
+  and learning waits. It is released once the Quick Dream is done (Ollama
+  `keep_alive: 0`, confirmed by `/api/ps`; LM Studio unload), also when it
+  fails, in its own task that waits until no request is in flight and no
+  reader is on it (retried, never dropped), and checks again right before the
+  unload and while waiting for it: a request admitted then stops the release
+  with Songe's claim kept, and it waits again. Once the agent asks for that
+  model, it is the user's and is left to the server's own idle timeout; a
+  request for it while the press still loads it waits for that load instead
+  of starting a second one. A model that was
+  already loaded is the user's and is never released; Songe's own requests
+  send no `keep_alive`, so the user's setting applies. The proxy
   adds them to the end of the system message of each new session; a session
   keeps the lessons it started with (`LessonPins`), and the recorded request
   stays the agent's own. Removed lessons (`remove_lesson`) never return. The

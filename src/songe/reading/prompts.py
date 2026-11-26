@@ -352,6 +352,45 @@ def now_only(message, wish=""):
         NOW_ONLY.search(part) and not FROM_NOW.search(part) and voiced(wish or "", part) > 0
         for part in SENTENCE_END.split(str(message or ""))
     )
+# Names the user typed: a command, a library, a file, a commit prefix
+# ("styled-components", "test-unit", "feat(refund):", "src/state").
+NAME = re.compile(r"(?<![\w-])[A-Za-z]\w*(?:[-_.:/]\w+|\(\w[\w-]*\))+")
+# A command is its runner and its target. Live (Qwen3.8-27B, a simulated
+# backend developer, issue #231): "just test-unit, not make. there is no
+# makefile anymore" became "Use test-unit, not make.": "just" was read as the
+# word, the change from make to just was lost, and 0 of 10 held-out requests
+# for the test command used just. "just" and "make" are words too, so only a
+# target that looks like a name (test-unit, db:migrate) counts after them.
+RUNNER = re.compile(
+    r"\b(?:(?P<plain>npm run|pnpm|yarn|bun|uv run|poetry run|cargo)\s+(?P<word>[A-Za-z][\w:-]*)"
+    r"|(?P<runner>just|make)\s+(?P<target>[A-Za-z]\w*[-:_][\w:-]+))",
+    re.I,
+)
+# "yarn to npm", "bun not node": after a bare runner a plain word is English,
+# not a script, and must not be made a command ("Switch yarn to yarn.").
+NOT_TARGETS = frozenset(
+    "a an and as at but by for from in instead into is it its no nor not of on or"
+    " over please pls than the then this that to too vs with".split()
+)
+
+
+def named(message):
+    """The names the user's message gives (NAME), longer than three letters."""
+    return [n for n in NAME.findall(str(message)) if len(n) > 3]
+
+
+def whole_commands(wish, message):
+    """The wish with each command the user typed whole: "Use test-unit, not
+    make." for "just test-unit, not make" is "Use just test-unit, not make."."""
+    for m in RUNNER.finditer(str(message)):
+        runner, target = (m["plain"], m["word"]) if m["plain"] else (m["runner"], m["target"])
+        if target.lower() in NOT_TARGETS:
+            continue
+        whole = re.compile(rf"\b{re.escape(runner)}\s+{re.escape(target)}(?![\w-])", re.I)
+        alone = re.compile(rf"(?<![\w-]){re.escape(target)}(?![\w-])", re.I)
+        if alone.search(wish) and not whole.search(wish):
+            wish = alone.sub(lambda t, runner=runner: f"{runner} {t[0]}", wish, count=1)
+    return wish
 
 
 def turn_verdict(answer, message="", earlier=""):
@@ -367,7 +406,10 @@ def turn_verdict(answer, message="", earlier=""):
     Dream; a remark about quotation marks came back as the question's own
     example "Make the buttons green.", and a page pasted earlier had a
     button in it. Such a wish is not used: the note is then the user's own
-    message, when that is one short sentence (own_words)."""
+    message, when that is one short sentence (own_words). A wish that keeps
+    none of the names the user's message gives (a library, a command, a
+    file) is not used either, and a command the user typed is kept whole,
+    with its runner (whole_commands)."""
     from .rules import voiced
 
     if not isinstance(answer, dict):
@@ -384,7 +426,14 @@ def turn_verdict(answer, message="", earlier=""):
         return "lasting", ""
     if not voiced(wish, message) and voiced(wish, f"{earlier}\n{message}") < 1:
         return "lasting", own_words(message)
-    return "lasting", wish
+    names = named(message)
+    if names and not any(n.lower() in wish.lower() for n in names):
+        # The user named what they want and the wish keeps none of it. Live
+        # (Qwen3.8-27B, issue #231): "styled-components + export default.
+        # siempre en admin" ("always so in admin") became "Always work in
+        # admin.", and the prompt then sent other repositories' work there.
+        return "lasting", own_words(message)
+    return "lasting", whole_commands(wish, message)
 
 
 # Asked about a sentence the rules flagged as a possible preference of the
@@ -443,6 +492,37 @@ Later: {new}
 Can both be true of the user now?
 - "both": yes. They are about different things, or the later one adds to the earlier one.
 - "later_only": no. The later sentence means the earlier one is no longer true: they changed their mind, stopped doing it, gave it up, or now want the opposite.
+Answer with JSON only."""
+
+# The same for a wish the user voiced in a correction (reading/store.
+# retire_changed): REPLACES and BOTH_TRUE only see what the user said about
+# themself. Live (Qwen3.8-27B, simulated users, issue #231): "注释还是中文吧"
+# and, after the repository went open source, "又写中文注释了。。英文" left both
+# "Use Chinese comments." and "Use English comments." in the prompt; "Use
+# Zustand." stayed beside three notes to use jotai; after "we moved to just,
+# the makefile is gone" three notes to use make stayed. Asked as for a stated
+# preference: which earlier notes the newer one replaces, then each named one
+# again on its own with it.
+CHANGED = """An AI assistant keeps short notes on how one user wants things done.
+
+Notes kept so far, oldest first:
+{notes}
+
+A newer note, from what the user said after all of them:
+{note}
+
+Does the newer note say that one of the notes kept so far is no longer what the user wants? That takes both: the two are about the same choice (the same kind of tool, library, command, language, format or sign-off, for the same kind of work in the same place), and the assistant cannot follow both: the user changed their mind, moved to something else, or now wants the opposite.
+Most newer notes replace nothing: they are about something else, they hold somewhere else or for another kind of work (another repository, emails and not chat), or they add to a note.
+Answer with JSON only: {{"replaces": [the numbers of the notes it replaces]}}, with an empty list when it replaces none."""
+
+FOLLOW_BOTH = """An AI assistant keeps short notes on how one user wants things done. Two of them, written at different times:
+
+Earlier: {old}
+Later: {new}
+
+Can the assistant follow both from now on?
+- "both": yes. They are about different things, they hold in different places or for different kinds of work, or the later one adds to the earlier one.
+- "later_only": no. Where the later one applies, doing what it says means not doing what the earlier one says: the user changed what they want.
 Answer with JSON only."""
 
 # One wish, one place (reading/store.fold_same). A user asks for the same thing

@@ -533,6 +533,22 @@ async def test_idle_discovery_adds_second_base_and_records_unsupported_reason(le
     assert "not discoverable" in row["reason"]
 
 
+async def test_a_served_model_without_local_weights_is_serving_only(learners):
+    """A fresh install against a vLLM whose weights are not on this machine:
+    discovery names the model, not a path, and saving it as the model to
+    train failed every scheduler tick ("Sleep failed" before anything ran)."""
+    from pathlib import Path
+
+    config, store = learners
+    registry.observe(config, store, "Qwen/Qwen3.8-27B")
+    ref = ModelRef(config.upstream, "Qwen/Qwen3.8-27B", "safetensors", Path("Qwen/Qwen3.8-27B"), "")
+    scheduler = ModelScheduler(config, store, SimpleNamespace(discover=lambda: [ref]))
+    await scheduler.discover_models()
+    row = registry.find(store, "Qwen/Qwen3.8-27B")
+    assert (row["support"], row["reason"]) == (
+        "unsupported", "Local weights are not accessible; serving only")
+
+
 async def test_unreachable_discovery_keeps_models_pending_without_failing(learners):
     # Issue #8: an httpx error from discovery ended every scheduler tick.
     config, store = learners

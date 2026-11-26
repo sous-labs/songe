@@ -302,9 +302,10 @@ class TorchBackend:
                     r=config.rank,
                     lora_alpha=config.rank * config.lora_scale,
                     lora_dropout=0.0,
-                    target_modules="all-linear",
-                    exclude_modules=(
-                        packed_experts.LORA_EXCLUDE if self.packed_experts else None
+                    target_modules=(
+                        packed_experts.LORA_TARGETS
+                        if self.packed_experts
+                        else "all-linear"
                     ),
                     bias="none",
                     task_type="CAUSAL_LM",

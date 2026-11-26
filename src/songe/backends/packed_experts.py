@@ -205,6 +205,72 @@ def load(path, device, dtype, experts_on_host=False):
     return model
 
 
-# Modules LoRA leaves alone in these models: the vision tower (text-only
-# experience) and the experts (frozen, packed).
-LORA_EXCLUDE = r".*(vision_tower|visual|experts).*"
+# LoRA goes where vLLM can serve it on Inkling-2: the attention projections
+# (vllm/models/inkling2/nvidia/lora.py). vLLM refuses an adapter with any other
+# module ("expected target modules in {...}"), so an adapter trained on every
+# linear layer (message gates, convolution taps...) could never be put in use.
+# The experts stay frozen and packed; the vision tower is not text experience.
+LORA_TARGETS = (
+    r"(.*\.)?layers\.\d+\.self_attn\.(q_proj\.linear|k_proj\.linear|v_proj\.linear"
+    r"|relative_position_bias\.linear|o_proj\.linear|o_proj\.gate_proj|sink_proj)"
+)
+# transformers' names for those modules -> the checkpoint's, which vLLM reads
+# (transformers' conversion_mapping for inkling2, reversed).
+CHECKPOINT_NAMES = (
+    (".self_attn.q_proj.linear.", ".attn.wq_du."),
+    (".self_attn.k_proj.linear.", ".attn.wk_dv."),
+    (".self_attn.v_proj.linear.", ".attn.wv_dv."),
+    (".self_attn.relative_position_bias.linear.", ".attn.wr_du."),
+    (".self_attn.o_proj.linear.", ".attn.wo_ud."),
+    (".self_attn.o_proj.gate_proj.", ".attn.gate_attn."),
+    (".self_attn.sink_proj.", ".attn.attn_sink_proj."),
+)
+PREFIXES = ("model.language_model.layers.", "model.layers.")
+
+
+def is_packed_base(base):
+    """True when base (a model folder) is a checkpoint this module trains."""
+    import json
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    try:
+        config = json.loads((Path(base) / "config.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(config, dict):
+        return False
+    return supports(SimpleNamespace(model_type=config.get("model_type"),
+                                    quantization_config=config.get("quantization_config")))
+
+
+def checkpoint_name(key):
+    """A PEFT adapter key under the checkpoint's module names (as vLLM loads
+    them): base_model.model.model.llm.layers.N.attn.wq_du.lora_A.weight."""
+    head = "base_model.model."
+    rest = key[len(head):] if key.startswith(head) else key
+    for prefix in PREFIXES:
+        if rest.startswith(prefix):
+            rest = "model.llm.layers." + rest[len(prefix):]
+            break
+    for ours, theirs in CHECKPOINT_NAMES:
+        rest = rest.replace(ours, theirs)
+    return head + rest
+
+
+def to_checkpoint_names(adapter):
+    """Rename an exported adapter folder's weights and target modules in place."""
+    import json
+    from pathlib import Path
+
+    from safetensors.torch import load_file, save_file
+
+    adapter = Path(adapter)
+    weights = adapter / "adapter_model.safetensors"
+    tensors = load_file(str(weights))
+    save_file({checkpoint_name(k): v for k, v in tensors.items()}, str(weights), metadata={"format": "pt"})
+    config_path = adapter / "adapter_config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["target_modules"] = sorted({theirs.strip(".").split(".")[-1] for _, theirs in CHECKPOINT_NAMES})
+    config["exclude_modules"] = None
+    config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")

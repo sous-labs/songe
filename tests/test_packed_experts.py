@@ -210,3 +210,43 @@ def test_a_frozen_prefix_reads_the_same_conv_states_when_checkpointing_replays_a
     assert grads.keys() == plain_grads.keys()
     for name in grads:
         torch.testing.assert_close(grads[name], plain_grads[name], atol=1e-5, rtol=1e-4)
+
+
+# What vLLM's Inkling2 LoRA loader accepts (vllm/models/inkling2/nvidia/lora.py):
+# these modules, under the checkpoint's names (model.llm.layers.N.attn.*).
+VLLM_INKLING_LORA = {"wq_du", "wk_dv", "wv_dv", "wr_du", "wo_ud", "gate_attn", "attn_sink_proj"}
+
+
+def test_an_inkling_adapter_exports_under_the_names_vllm_loads(tmp_path):
+    import json
+    import re
+
+    from peft import LoraConfig, get_peft_model
+
+    from songe.artifacts import export
+    from tests.crossplatform_helpers import fake_platform
+
+    model = get_peft_model(
+        tiny_inkling(),
+        LoraConfig(r=2, lora_alpha=4, target_modules=packed_experts.LORA_TARGETS),
+    )
+    adapter = tmp_path / "adapter"
+    model.save_pretrained(adapter, safe_serialization=True)
+    base = tmp_path / "base"
+    base.mkdir()
+    (base / "config.json").write_text(json.dumps(
+        {"model_type": "inkling2_loop", "quantization_config": {"quant_method": "modelopt"}}))
+    out = export("peft-adapter", base, adapter, tmp_path / "peft", fake_platform(tmp_path))
+
+    from safetensors.torch import load_file
+
+    keys = load_file(str(out / "adapter_model.safetensors")).keys()
+    pattern = re.compile(r"base_model\.model\.model\.llm\.layers\.\d+\.attn\.(\w+)\.lora_[AB]\.weight")
+    modules = {pattern.fullmatch(k).group(1) if pattern.fullmatch(k) else k for k in keys}
+    # Every module vLLM serves, nothing it would refuse, in every layer.
+    assert modules == VLLM_INKLING_LORA
+    assert len(keys) == 2 * len(VLLM_INKLING_LORA) * model.config.num_hidden_layers
+    config = json.loads((out / "adapter_config.json").read_text())
+    assert set(config["target_modules"]) == VLLM_INKLING_LORA
+    # The training adapter keeps transformers' names (a Dream resumes from it).
+    assert all(".self_attn." in k for k in load_file(str(adapter / "adapter_model.safetensors")))

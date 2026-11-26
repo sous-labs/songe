@@ -1003,6 +1003,384 @@ async def test_quick_dream_with_only_new_signals_under_memory_pressure_says_so(c
     assert learner.get("quick_checked")["error"] == "memory"
 
 
+def pressed_setup(config, store, monkeypatch, tmp_path, upstream, *, available=90_000, ollama=None):
+    """A learner with one unread conversation and a base version, a scheduler
+    on `upstream`, the reader's answers faked; `ollama` answers /api/*."""
+    from types import SimpleNamespace
+
+    from songe import schedule
+    from songe.platform import Memory
+    from songe.upstream import protection
+
+    config.learning = "dreams"
+    registry.migrate(config, store)
+    registry.observe(config, store, "learner")
+    registry.set_learning(store, "learner", "all")
+    record_session(store)
+    learner = store.scoped("learner")
+    learner.add_version({"id": "base-learner", "identifier": "learner", "artifact": str(tmp_path / "model"),
+                         "adapter": None, "created": 0, "night": 0, "kind": "gguf-full"})
+    learner.swap("base-learner", None)
+    asked = []
+
+    def route(request):
+        if request.url.path.startswith("/api/"):
+            return ollama(request)
+        if request.method == "GET":
+            return httpx.Response(200, json={"data": []})
+        body = json.loads(request.content)
+        name = (body.get("response_format") or {}).get("json_schema", {}).get("name")
+        asked.append((body["model"], name))
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(ANSWERS.get(name, {}))}}]})
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **k: REAL_CLIENT(**(k | {"transport": httpx.MockTransport(route)})))
+    memory = SimpleNamespace(
+        name="test", memory=lambda: Memory(100_000, available), accelerators=lambda: [],
+        on_ac_power=lambda: True, idle_seconds=lambda: None, thermal=lambda: None,
+        process_bytes=lambda pid: 100,
+    )
+    monkeypatch.setattr(protection, "current", lambda: memory)
+    pressure = SimpleNamespace(pressure="normal")
+    scheduler = schedule.ModelScheduler(config, store, upstream, platform=SimpleNamespace(memory=lambda: pressure))
+    return scheduler, learner, asked
+
+
+def fake_ollama(tmp_path, running, hooks=None):
+    """Ollama's API as Songe uses it: /api/ps lists what is in memory, an
+    empty /api/generate loads (keep_alive 0 unloads). hooks: async callables
+    run on a "show" or "generate" request; "keep" in hooks keeps a model
+    listed after keep_alive 0 (the agent's request loaded it again)."""
+    import hashlib
+    from types import SimpleNamespace
+
+    from songe.upstream.ollama import Ollama
+
+    hooks = {} if hooks is None else hooks
+    (tmp_path / "model").write_bytes(b"gguf weights")
+    digest = hashlib.sha256(b"gguf weights").hexdigest()
+    generated = []
+
+    async def handler(request):
+        if request.url.path == "/api/ps":
+            return httpx.Response(200, json={"models": [{"name": n, "model": n} for n in running]})
+        if request.url.path == "/api/show":
+            if "show" in hooks:
+                await hooks["show"]()
+            return httpx.Response(200, json={"modelfile": f"FROM /blobs/sha256-{digest}"})
+        if request.url.path == "/api/generate":
+            body = json.loads(request.content)
+            generated.append(body)
+            if "generate" in hooks:
+                await hooks["generate"](body)
+            if body.get("keep_alive") == 0:
+                if "keep" not in hooks:
+                    running[:] = [n for n in running if n != body["model"] + ":latest"]
+            elif body["model"] + ":latest" not in running:
+                running.append(body["model"] + ":latest")
+            return httpx.Response(200, json={"done": True})
+        return httpx.Response(404)
+
+    upstream = Ollama(SimpleNamespace(upstream_url="http://ollama.test/v1", upstream_timeout=5,
+                                      guard_min_interval=0.01, guard_grace_seconds=1))
+    return upstream, handler, generated
+
+
+async def settle(scheduler):
+    """The pressed Quick Dream and its release (its own task) are done."""
+    if getattr(scheduler, "dream_task", None):
+        await scheduler.dream_task
+    await asyncio.gather(*scheduler.release_tasks.values())
+
+
+async def test_a_pressed_quick_dream_loads_the_ollama_model_and_releases_it(config, store, monkeypatch, tmp_path):
+    """Background reading never loads a model; a pressed Quick Dream loads the
+    learner's model with Ollama's own load and releases it once it is done."""
+    running = []
+    upstream, handler, generated = fake_ollama(tmp_path, running)
+    scheduler, learner, asked = pressed_setup(config, store, monkeypatch, tmp_path, upstream, ollama=handler)
+    assert await scheduler.read_sessions() == 0  # background: waits, loads nothing
+    assert generated == [] and asked == []
+    assert await scheduler.quick_now("learner") == 1
+    # Loaded with Ollama's empty-prompt warm, no keep_alive of Songe's own.
+    assert generated[0] == {"model": "learner", "prompt": "", "stream": False}
+    await settle(scheduler)
+    assert ("learner", "classify") in asked  # it read with the learner's model
+    # Released after this Quick Dream, confirmed gone from /api/ps.
+    assert generated[-1]["keep_alive"] == 0 and running == []
+    assert scheduler.press_loads == {} and upstream.owned == {}
+
+
+async def test_a_pressed_quick_dream_never_releases_the_users_ollama_model(config, store, monkeypatch, tmp_path):
+    running = ["learner:latest"]  # the user loaded it
+    upstream, handler, generated = fake_ollama(tmp_path, running)
+    scheduler, learner, asked = pressed_setup(config, store, monkeypatch, tmp_path, upstream, ollama=handler)
+    assert await scheduler.quick_now("learner") == 1
+    await settle(scheduler)
+    assert ("learner", "classify") in asked
+    assert generated == [] and running == ["learner:latest"]
+    # Even a load request reuses the user's instance and never claims it.
+    assert await scheduler.load_for_press("learner") is None
+    assert scheduler.press_loads == {}
+    await scheduler.release_press_load("learner")
+    assert generated == [] and running == ["learner:latest"]
+
+
+async def test_a_model_the_agent_asked_for_is_left_to_the_server(config, store, monkeypatch, tmp_path):
+    """Loaded for a press, then the agent asked for it (and then for another
+    model): it is the user's now, and Ollama's own keep-alive decides."""
+    running = []
+    upstream, handler, generated = fake_ollama(tmp_path, running)
+    scheduler, learner, asked = pressed_setup(config, store, monkeypatch, tmp_path, upstream, ollama=handler)
+    assert await scheduler.load_for_press("learner") is None and running == ["learner:latest"]
+    scheduler.traffic()
+    await scheduler.ensure_model("learner", learner.version())
+    scheduler.traffic()
+    scheduler.serving_model = "other"  # the agent moved on to another model
+    await scheduler.release_press_load("learner")
+    assert running == ["learner:latest"] and all("keep_alive" not in g for g in generated)
+
+
+async def test_traffic_to_another_model_does_not_keep_a_press_load(config, store, monkeypatch, tmp_path):
+    """The agent last served this model before the press, and since then only
+    another one: the press's load is still Songe's and is released."""
+    running = []
+    upstream, handler, generated = fake_ollama(tmp_path, running)
+    scheduler, learner, asked = pressed_setup(config, store, monkeypatch, tmp_path, upstream, ollama=handler)
+    scheduler.serving_model = "learner"
+    assert await scheduler.load_for_press("learner") is None
+    scheduler.traffic()  # a request for another model
+    await scheduler.release_press_load("learner")
+    assert running == [] and generated[-1]["keep_alive"] == 0
+
+
+async def test_a_release_waits_for_requests_and_readers_and_is_never_dropped(config, store, monkeypatch, tmp_path):
+    running = []
+    upstream, handler, generated = fake_ollama(tmp_path, running)
+    scheduler, learner, asked = pressed_setup(config, store, monkeypatch, tmp_path, upstream, ollama=handler)
+    assert await scheduler.load_for_press("learner") is None
+    scheduler.acquire("admission")  # a request (for any model) in flight
+    scheduler.reading_activity = {"learner": {}}  # and a reader on it
+    release = asyncio.create_task(scheduler.release_press_load("learner"))
+    await asyncio.sleep(0.05)
+    assert running == ["learner:latest"] and "learner" in scheduler.press_loads
+    scheduler.release("admission")
+    await asyncio.sleep(0.05)
+    assert running == ["learner:latest"]  # the reader still reads
+    scheduler.reading_activity = {}
+    await asyncio.wait_for(release, 2)
+    assert running == [] and scheduler.press_loads == {}
+
+
+async def test_background_reading_never_starts_on_a_model_loaded_for_a_press(config, store, monkeypatch, tmp_path):
+    running = []
+    upstream, handler, generated = fake_ollama(tmp_path, running)
+    scheduler, learner, asked = pressed_setup(config, store, monkeypatch, tmp_path, upstream, ollama=handler)
+    assert await scheduler.load_for_press("learner") is None and running == ["learner:latest"]
+    assert await scheduler.read_sessions() == 0 and asked == []
+    assert await scheduler.reader_for("learner") is None
+    assert scheduler.reading_busy()  # learning waits for the press too
+
+
+async def test_a_press_loads_without_holding_the_agents_lock(config, store, monkeypatch, tmp_path):
+    running, loading, go = [], asyncio.Event(), asyncio.Event()
+
+    async def slow(body):
+        loading.set()
+        await go.wait()
+
+    upstream, handler, generated = fake_ollama(tmp_path, running, {"generate": slow})
+    scheduler, learner, asked = pressed_setup(config, store, monkeypatch, tmp_path, upstream, ollama=handler)
+    press = asyncio.create_task(scheduler.quick_now("learner"))
+    try:
+        await asyncio.wait_for(loading.wait(), 2)
+        assert not scheduler.lock.locked()
+        # A second press while the first loads continues it: no second load.
+        assert await asyncio.wait_for(scheduler.quick_now("learner"), 1) is None
+    finally:
+        go.set()
+    assert await press == 1
+    await settle(scheduler)
+    assert [g.get("keep_alive") for g in generated] == [None, 0]
+
+
+async def test_a_request_admitted_during_the_release_keeps_the_model(config, store, monkeypatch, tmp_path):
+    """A request admitted while Songe releases stops the release with Songe's
+    claim kept: one for another model sends it back to wait and release
+    later; one for this model leaves the model to the agent."""
+    running = []
+    hooks = {}
+    upstream, handler, generated = fake_ollama(tmp_path, running, hooks)
+    scheduler, learner, asked = pressed_setup(config, store, monkeypatch, tmp_path, upstream, ollama=handler)
+    assert await scheduler.load_for_press("learner") is None
+
+    async def admitted():
+        hooks.pop("show")
+        scheduler.acquire("admission")  # a request for another model
+
+    hooks["show"] = admitted  # same_weights, just before the unload
+    release = asyncio.create_task(scheduler.release_press_load("learner"))
+    await asyncio.sleep(0.05)
+    assert running == ["learner:latest"] and all("keep_alive" not in g for g in generated)
+    assert "learner" in upstream.owned and "learner" in scheduler.press_loads
+    scheduler.release("admission")  # it finished: the release goes on
+    await asyncio.wait_for(release, 2)
+    assert running == [] and generated[-1]["keep_alive"] == 0 and upstream.owned == {}
+    # Admitted after keep_alive 0 was sent, for this model: Ollama loads it
+    # again for the agent, and the release stops waiting for /api/ps at once.
+    assert await scheduler.load_for_press("learner") is None
+
+    async def agent_back(body):
+        if body.get("keep_alive") == 0:
+            scheduler.acquire("admission")
+
+    hooks.update({"generate": agent_back, "keep": True})
+    started = asyncio.get_running_loop().time()
+    release = asyncio.create_task(scheduler.release_press_load("learner"))
+    await asyncio.sleep(0.05)
+    await scheduler.ensure_model("learner", learner.version())  # the agent's request
+    scheduler.release("admission")
+    await asyncio.wait_for(release, 2)
+    assert asyncio.get_running_loop().time() - started < 2
+    assert running == ["learner:latest"] and scheduler.press_loads == {}
+    assert "learner" in upstream.owned  # Songe's claim is never just dropped
+
+
+async def test_the_agent_waits_for_a_press_load_instead_of_loading_again(config, store, monkeypatch, tmp_path):
+    """LM Studio: a request for the model while a press loads it used to drop
+    the press's pending claim and load a second instance beside it."""
+    from tests.test_lmstudio import FakeLMS
+
+    upstream = FakeLMS(tmp_path, appear_after=1)
+    upstream.config.upstream_url = "http://lms.test/v1"
+    scheduler, learner, asked = pressed_setup(config, store, monkeypatch, tmp_path, upstream)
+    folder = tmp_path / "lmstudio-community/granite-4.2-3b-MLX-4bit"
+    folder.mkdir(parents=True)
+    (folder / "model.safetensors").write_bytes(b"mlx weights")
+    with store.connect() as db:
+        db.execute("UPDATE versions SET artifact=? WHERE id='base-learner'", (str(folder),))
+    loading, go = asyncio.Event(), asyncio.Event()
+    request_load = upstream.request_load
+
+    async def slow(key, identifier, context=None):
+        loading.set()
+        await go.wait()
+        await request_load(key, identifier, context)
+
+    upstream.request_load = slow
+    press = asyncio.create_task(scheduler.load_for_press("learner"))
+    try:
+        await asyncio.wait_for(loading.wait(), 2)
+        agent = asyncio.create_task(scheduler.ensure_model("learner", learner.version()))
+        await asyncio.sleep(0.05)
+        assert not agent.done()  # it waits for the press's load
+    finally:
+        go.set()
+    assert await press is None
+    await asyncio.wait_for(agent, 2)
+    assert [c[0] for c in upstream.calls if c[0] == "load"] == ["load"]
+    assert [m["identifier"] for m in upstream.ps] == ["learner"]
+    await scheduler.release_press_load("learner")  # the agent's now: kept
+    assert len(upstream.ps) == 1 and scheduler.press_loads == {}
+
+
+async def test_a_press_that_fails_after_loading_releases_the_model(config, store, monkeypatch, tmp_path):
+    running = []
+    upstream, handler, generated = fake_ollama(tmp_path, running)
+    scheduler, learner, asked = pressed_setup(config, store, monkeypatch, tmp_path, upstream, ollama=handler)
+    probes = []
+
+    async def reader_for(model):
+        probes.append(model)
+        if len(probes) > 1:
+            raise RuntimeError("the reader could not start")
+        return None
+
+    monkeypatch.setattr(scheduler, "reader_for", reader_for)
+    with pytest.raises(RuntimeError):
+        await scheduler.quick_now("learner")
+    await settle(scheduler)
+    assert generated[-1]["keep_alive"] == 0 and running == []
+    assert scheduler.press_loads == {} and not scheduler.pressing
+
+
+async def test_a_pressed_quick_dream_without_the_memory_waits_and_says_why(config, store, monkeypatch, tmp_path):
+    from songe import quick
+
+    running = []
+    upstream, handler, generated = fake_ollama(tmp_path, running)
+    scheduler, learner, asked = pressed_setup(
+        config, store, monkeypatch, tmp_path, upstream, available=0, ollama=handler)
+    answer = await scheduler.dream("learner", "quick")
+    assert not answer["started"] and "not enough free memory to load the model" in answer["message"]
+    assert generated == [] and running == [] and asked == []
+    assert getattr(scheduler, "dream_task", None) is None
+    assert learner.get("quick_checked")["error"] == "load_memory"
+    assert (learner.get(quick.HISTORY) or [])[-1]["error"] == "load_memory"
+
+
+async def test_a_model_of_unknown_size_is_not_loaded_for_a_press(config, store, monkeypatch, tmp_path):
+    """Admission sizes a load by its weights: weights Songe cannot read (an
+    Ollama blob outside its view) would pass as 0 bytes."""
+    running = []
+    upstream, handler, generated = fake_ollama(tmp_path, running)
+    scheduler, learner, asked = pressed_setup(config, store, monkeypatch, tmp_path, upstream, ollama=handler)
+    (tmp_path / "model").unlink()
+    answer = await scheduler.dream("learner", "quick")
+    assert not answer["started"] and "can't measure the model" in answer["message"]
+    assert generated == [] and running == [] and scheduler.press_loads == {}
+    assert learner.get("quick_checked")["error"] == "load_unknown"
+
+
+async def test_a_pressed_quick_dream_loads_and_releases_on_lm_studio(config, store, monkeypatch, tmp_path):
+    from tests.test_lmstudio import FakeLMS
+
+    upstream = FakeLMS(tmp_path, appear_after=1)
+    scheduler, learner, asked = pressed_setup(config, store, monkeypatch, tmp_path, upstream)
+    folder = tmp_path / "lmstudio-community/granite-4.2-3b-MLX-4bit"
+    folder.mkdir(parents=True)
+    (folder / "model.safetensors").write_bytes(b"mlx weights")
+    with store.connect() as db:  # LM Studio's own copy of the model
+        db.execute("UPDATE versions SET artifact=? WHERE id='base-learner'", (str(folder),))
+    assert await scheduler.read_sessions() == 0  # background: waits, loads nothing
+    assert upstream.calls == [] and asked == []
+    assert await scheduler.quick_now("learner") == 1
+    assert [c[0] for c in upstream.calls if c[0] in {"load", "unload"}] == ["load"]
+    await settle(scheduler)
+    assert ("learner", "classify") in asked
+    assert [c[0] for c in upstream.calls if c[0] in {"load", "unload"}] == ["load", "unload"]
+    assert upstream.ps == []
+    # A request admitted just before the unload keeps the model loaded.
+    assert await scheduler.load_for_press("learner") is None
+    live_owned = upstream.live_owned
+
+    async def admitted():
+        scheduler.acquire("admission")
+        return await live_owned()
+
+    upstream.live_owned = admitted
+    upstream.calls.clear()
+    upstream.ps[0]["contextLength"] = 32768  # Songe's choice, not the user's
+    release = asyncio.create_task(scheduler.release_press_load("learner"))
+    await asyncio.sleep(0.05)
+    upstream.live_owned = live_owned
+    assert not any(c[0] == "unload" for c in upstream.calls) and len(upstream.ps) == 1
+    # The claim stays Songe's: its context is not taken for the user's.
+    await upstream.served_contexts()
+    assert "learner" in upstream.owned and "learner" not in upstream.user_contexts
+    scheduler.release("admission")  # that request (another model's) is done
+    await asyncio.wait_for(release, 2)
+    assert upstream.ps == [] and scheduler.press_loads == {}
+    # A model the user loaded in LM Studio is read with and never unloaded.
+    record_session(store, ask="fix the other failing test")
+    upstream.ps.append({"identifier": "learner", "path": "lmstudio-community/granite-4.2-3b-MLX-4bit",
+                        "instanceReference": "users"})
+    upstream.calls.clear()
+    assert await scheduler.quick_now("learner") == 1
+    await settle(scheduler)
+    assert not any(c[0] in {"load", "unload"} for c in upstream.calls)
+    assert [m["identifier"] for m in upstream.ps] == ["learner"]
+
+
 def test_a_pi_compaction_is_not_a_conversation_and_its_continuation_joins(store):
     """Live demo: pi's summarise calls were read as separate sessions and the
     user's conversation was split from its continuation."""
@@ -1991,3 +2369,108 @@ def test_a_failure_ends_an_attempt_only_once_the_agent_has_stopped(store):
     assert len(went_on) == 1 and len(ended) == 1 and len(reader.questions) == 2
     assert "command not found" in went_on[0]
     assert "No module named pytest" in ended[0]
+
+
+def test_a_wish_keeps_what_the_user_named():
+    """Live (Qwen3.8-27B, simulated users, issue #231): "styled-components +
+    export default. siempre en admin" became the note "Always work in
+    admin."; "just test-unit, not make" became "Use test-unit, not make.",
+    and the move from make to just was lost."""
+    from songe.reading import prompts as P
+
+    admin = {"standing": "yes", "kind": "once", "wish": "Always work in admin."}
+    # Keeps none of the names the user typed: not used (two sentences: no own words either).
+    assert P.turn_verdict(admin, "styled-components + export default. siempre en admin") == ("lasting", "")
+    kept = {"standing": "yes", "kind": "once", "wish": "Use styled-components and default exports in admin."}
+    assert P.turn_verdict(kept, "styled-components + export default. siempre en admin")[1] == kept["wish"]
+    # A command the user typed is kept whole.
+    just = {"standing": "yes", "kind": "once", "wish": "Use test-unit, not make."}
+    said = "just test-unit, not make. there is no makefile anymore, from now on its just"
+    assert P.turn_verdict(just, said) == ("lasting", "Use just test-unit, not make.")
+    assert P.whole_commands("Use make test-unit with ARGS.", "i said make test-unit. ARGS passes") == "Use make test-unit with ARGS."
+    # "just" and "make" as words are not commands.
+    assert P.whole_commands("Keep it short.", "make it short, just the code") == "Keep it short."
+    assert P.whole_commands("Use pnpm add, not npm install.", "pnpm add zod pls not npm") == "Use pnpm add, not npm install."
+    # A plain word after a bare runner is English, not a script.
+    assert P.whole_commands("Switch to yarn.", "i prefer yarn to npm") == "Switch to yarn."
+    assert P.whole_commands("Use bun, not node.", "use bun not node") == "Use bun, not node."
+    assert P.whole_commands("Do not use npm.", "pnpm not npm") == "Do not use npm."
+
+
+class Wishing(FakeReader):
+    """Judges each user message as a standing wish worded as given in
+    `wishes`; answers which notes a newer note replaces (`replaces`, by note)
+    and whether both can be followed (only the pairs in `not_both` cannot)."""
+
+    def __init__(self, wishes, replaces=None, not_both=(), same=()):
+        super().__init__()
+        self.wishes, self.replaces, self.not_both, self.listed, self.checked = wishes, replaces or {}, set(not_both), [], []
+        self.same = [set(pair) for pair in same]
+
+    async def ask(self, prompt, schema, name):
+        if name == "turn":
+            said = prompt.rsplit("The user's next message:\n", 1)[1].split("\n")[0].strip('"')
+            wish = self.wishes.get(said, "")
+            return {"standing": "yes" if wish else "no", "kind": "once" if wish else "task", "wish": wish, "about": ""}
+        if name == "same_wish":
+            pair = (prompt.split("Note 1: ", 1)[1].split("\n")[0], prompt.split("Note 2: ", 1)[1].split("\n")[0])
+            return {"note_1_asks": "", "note_2_asks": "", "kind": "same" if set(pair) in self.same else "different"}
+        if name == "changed":
+            note = prompt.split("A newer note, from what the user said after all of them:\n", 1)[1].split("\n")[0]
+            self.listed.append((prompt.split("oldest first:\n", 1)[1].split("\n\n")[0], note))
+            return {"replaces": self.replaces.get(note, [])}
+        if name == "follow_both":
+            pair = (prompt.split("Earlier: ", 1)[1].split("\n")[0], prompt.split("Later: ", 1)[1].split("\n")[0])
+            self.checked.append(pair)
+            return {"kind": "later_only" if pair in self.not_both else "both"}
+        return await super().ask(prompt, schema, name)
+
+
+def test_a_newer_wish_retires_the_note_it_changes(config, store):
+    """Live (Qwen3.8-27B, a simulated Go developer, issue #231): "注释还是中文吧"
+    early and "又写中文注释了。。英文" after the repository went open source left
+    both "Use Chinese comments." and "Use English comments." in the prompt:
+    only a preference the user stated about themself could retire an older
+    one. A note from a correction now does the same, asked the same two
+    questions."""
+    from songe import quick
+
+    old, new, other = "Use Chinese comments.", "Use English comments.", "Run make gen first."
+    wishes = {"注释还是中文吧": old, "make gen 先跑": other, "又写中文注释了。。英文": new}
+    record_chat(store, ("给 refund 加个注释", "// refund 退款"), ("注释还是中文吧", "// 退款处理"))
+    record_chat(store, ("生成 mock", "mockgen ..."), ("make gen 先跑", "make gen"))
+    read(store, Wishing(wishes))
+    quick.quick_dream(store, config)
+    assert {lesson["text"] for lesson in quick.active(store)} >= {old, other}
+
+    record_chat(store, ("给 settle 加注释", "// 结算"), ("又写中文注释了。。英文", "// settle the batch"))
+    # The model names both earlier notes; asked again about each pair alone,
+    # only the comments cannot both be followed.
+    reader = Wishing(wishes, replaces={new: [1, 2, 7, "1", True]}, not_both={(old, new)})
+    read(store, reader)
+    assert reader.listed[-1] == (f"1. {old}\n2. {other}", new)
+    assert reader.checked == [(old, new), (other, new)]
+    texts = {quick.wording(s)[0] for s in reading.signals(store) if s["type"] == "correction" and s.get("lesson")}
+    assert old not in texts and {new, other} <= texts
+    quick.quick_dream(store, config)
+    active = {lesson["text"] for lesson in quick.active(store)}
+    assert new in active and other in active and old not in active
+
+
+def test_the_same_wish_said_again_retires_nothing(config, store):
+    """Live (Qwen3.8-27B, a simulated email writer): "Always include 'Thanks,
+    Mi-rae' at the end of emails." was read as replaced by its restatement
+    "Use 'Thanks, / Mi-rae' as the sign-off.", that one by a third, and the
+    sign-off left the prompt. A wish said again is one wish (fold_same),
+    not a change; and a change wanted once replaces nothing."""
+    from songe import quick
+
+    first, again = "Always include Thanks, Mi-rae at the end of emails.", "Use Thanks, Mi-rae as the sign-off."
+    wishes = {"and Thanks, Mi-rae at end": first, "ugh i changed sign-off already. Thanks, Mi-rae": again}
+    record_chat(store, ("email to Dr Han", "Dear Dr Han, ... Best regards"), ("and Thanks, Mi-rae at end", "... Thanks, Mi-rae"))
+    record_chat(store, ("email to IT", "Hello, ... Best regards"), ("ugh i changed sign-off already. Thanks, Mi-rae", "... Thanks, Mi-rae"))
+    reader = Wishing(wishes, replaces={again: [1]}, not_both={(first, again)}, same=[(first, again)])
+    read(store, reader)
+    assert reader.checked == [(first, again)]
+    texts = {quick.wording(s)[0] for s in reading.signals(store) if s["type"] == "correction" and s.get("lesson")}
+    assert {first, again} <= texts

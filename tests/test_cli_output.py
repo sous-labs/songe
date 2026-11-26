@@ -69,6 +69,9 @@ def state():
 
 def assert_snapshot(name, output):
     assert "\x1b" not in output and "\r" not in output
+    # Rich pads a table's last column to its widest cell; none of it is
+    # printed (every `songe init` line ended in spaces).
+    assert [line for line in output.splitlines() if line != line.rstrip()] == []
     plain = "\n".join(line.rstrip() for line in output.splitlines()) + "\n"
     if os.environ.get("SONGE_UPDATE_SNAPSHOTS"):
         (SNAPSHOTS / f"cli_{name}.txt").write_text(plain, encoding="utf-8")

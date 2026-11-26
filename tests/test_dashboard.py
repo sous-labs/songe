@@ -1,6 +1,8 @@
 """Dashboard contracts use recorded fixtures and ASGI only."""
 
 import json
+import re
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
@@ -726,3 +728,109 @@ def test_waiting_for_the_agents_tools_says_so(config, store, monkeypatch):
     result = activity(config, store, worker, None, models, live=True)
     assert result["now"] == "waiting · proxy requests in flight"
     assert status_copy({"activity": result}) == ("In use", "Continues after this conversation")
+
+
+PAGE = Path(__file__).resolve().parents[1] / "src/songe/ui"
+
+
+def js_strings(js):
+    """String pieces of a JS source: quoted strings and template text."""
+    out, modes, braces, i, n = [], ["code"], [], 0, len(js)
+    while i < n:
+        c, mode = js[i], modes[-1]
+        if mode == "template":
+            j = i
+            while j < n and js[j] != "`" and not js.startswith("${", j):
+                j += 2 if js[j] == "\\" else 1
+            out.append(js[i:j])
+            if js.startswith("${", j):
+                modes.append("code")
+                braces.append(0)
+                i = j + 2
+            else:
+                modes.pop()
+                i = j + 1
+            continue
+        if js.startswith("//", i) and (i == 0 or js[i - 1] in " \t\n"):
+            i = js.find("\n", i) % (n + 1)
+            continue
+        if js.startswith("/*", i):
+            i = js.index("*/", i) + 2
+            continue
+        if c in "'\"":
+            j = i + 1
+            while js[j] != c:
+                j += 2 if js[j] == "\\" else 1
+            out.append(js[i + 1 : j])
+            i = j + 1
+            continue
+        if c == "`":
+            modes.append("template")
+        elif c == "{" and braces:
+            braces[-1] += 1
+        elif c == "}" and braces:
+            if braces[-1] == 0:
+                braces.pop()
+                modes.pop()
+            else:
+                braces[-1] -= 1
+        i += 1
+    return out
+
+STOP = {"of", "the", "to", "is", "it", "by", "for", "after", "left", "yet", "not", "and",
+        "or", "with", "at", "its", "your", "more", "than", "from", "about", "this", "no", "in"}
+
+def reads_as_english(piece):
+    """Words a person reads: a capitalised word, or a phrase with a small word."""
+    tokens = re.findall(r"[\w:'-]+", piece)
+    phrase = any(c.isspace() for c in piece) and any(t in STOP for t in tokens)
+    return phrase or bool(re.search(r"(?<![\w-])[A-Z][a-z]+", piece))
+
+
+def test_the_page_takes_its_words_from_wording_json():
+    """Words written into next.js missed every wording pass ("Show all 12",
+    "+ 3 more · learning off" on models that were unsupported, not off)."""
+    script = (PAGE / "next.js").read_text(encoding="utf-8")
+    # Before wording.json loads, and the key names a browser gives.
+    allowed = {"Songe not answering", "Run songe serve", "Escape"}
+    english = [s for s in js_strings(script) if reads_as_english(s) and s not in allowed]
+    assert english == []
+
+
+def test_every_word_the_page_asks_for_exists():
+    script = (PAGE / "next.js").read_text(encoding="utf-8")
+    words = json.loads((PAGE / "wording.json").read_text(encoding="utf-8"))
+    groups = {"C": "cloud", "R": "rail", "T": "train_state", "E": "empty"}
+    missing = [key for key in re.findall(r"\bW\.(\w+)", script) if key not in words]
+    for alias, group in groups.items():
+        missing += [f"{group}.{key}" for key in re.findall(rf"\b{alias}\.(\w+)", script)
+                    if key not in words[group]]
+    assert missing == []
+
+
+STATUSES = json.loads(
+    (Path(__file__).parent / "fixtures/wording.json").read_text(encoding="utf-8")
+)["statuses"]
+
+
+@pytest.mark.parametrize("case", STATUSES, ids=lambda c: c["name"])
+def test_the_page_and_songe_status_say_the_same_now_and_next(config, store, case, capsys):
+    """The page worded Now and Next itself: "Dreams again when your computer
+    is idle" where `songe status` said "Ready to train · Starts when idle ·
+    8m of 10m". Both now take the lines the service words once."""
+    from songe import cli
+    from songe.api import state_sections
+
+    learner(config, store)
+    data = snapshot(config, store, scheduler(config, last_traffic=0, process=None), live=True)
+    data |= case["data"]
+    page = state_sections(data)["status"]["lines"]
+    cli.print_status(data)
+    printed = dict(line.split(None, 1) for line in capsys.readouterr().out.splitlines()[:2])
+    assert page == {"now": printed["now"].removeprefix("● "), "next": printed["next"]}
+
+
+def test_the_page_shows_the_services_now_and_next_lines():
+    script = (PAGE / "next.js").read_text(encoding="utf-8")
+    assert "function statusLines" not in script
+    assert "status?.lines?.now" in script and "status?.lines?.next" in script

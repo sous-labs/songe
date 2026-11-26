@@ -187,3 +187,14 @@ def test_unlimited_host_controller_root_has_no_limit(controller):
     (mount / names[0]).unlink()
     sample = platform.memory()
     assert (sample.total, sample.available) == (1000000 * 1024, 900000 * 1024)
+
+
+@pytest.mark.parametrize("kind", ["v1", "v2"])
+def test_page_cache_of_files_read_once_counts_as_available(controller, kind):
+    # A container that downloaded a model: usage is nearly all inactive page cache.
+    platform, mount, names = controller(kind)
+    (mount / names[1]).write_text("9800000")
+    name = "inactive_file" if kind == "v2" else "total_inactive_file"
+    (mount / "memory.stat").write_text(f"{name} 9000000\nfile 9500000\n")
+    assert platform.memory().available == 9200000
+    assert admit(platform, required_bytes=7000000).pressure == "normal"

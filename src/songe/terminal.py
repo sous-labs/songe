@@ -52,11 +52,20 @@ def error(message, hint=None):
     console(error=True).print(Text(hint or f"check  {NAME} doctor", style="dim"))
 
 
+def trimmed(output, renderable):
+    """Print a table without the spaces Rich pads its last column with to
+    the widest cell (they ended every `songe init` line)."""
+    for line in output.render_lines(renderable, pad=False):
+        text = Text.assemble(*((s.text, s.style) for s in line if not s.control))
+        text.rstrip()
+        output.print(text, no_wrap=True, crop=False)
+
+
 def facts(rows):
     table = Table.grid(padding=(0, 2))
     for label, value in rows:
         table.add_row(Text(label, style="dim"), Text(str(value)))
-    console().print(Padding(table, (0, 0, 0, 2), expand=False))
+    trimmed(console(), Padding(table, (0, 0, 0, 2), expand=False))
 
 
 @contextmanager
@@ -109,7 +118,7 @@ def models_table(models, *, data=None):
             Text("  Connect your first model · Run songe init", style="dim")
         )
     else:
-        console().print(Padding(table, (0, 0, 0, 2), expand=False))
+        trimmed(console(), Padding(table, (0, 0, 0, 2), expand=False))
 
 
 def status(data):
@@ -141,7 +150,7 @@ def training_settings(model, rows, ignored):
         table.add_row(
             key, source, Text(json.dumps(value, ensure_ascii=False, sort_keys=True))
         )
-    output.print(table)
+    trimmed(output, table)
     if ignored:
         skipped = ", ".join(sorted(ignored))
         output.print(Text(f"{IGNORED_MODEL_SETTINGS} · {skipped}", style="yellow"))

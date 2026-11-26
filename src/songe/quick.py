@@ -651,7 +651,7 @@ def record(store, result, at, examples=None, **run):
     """Every finished Quick Dream joins the Dream history, also one that
     added nothing or could not read (live: a run read 5 conversations, found
     9 moments, added nothing, and left no trace). run: read, found, error
-    (unreadable, no_model, memory). Returns the entry."""
+    (unreadable, no_model, memory, load_memory, load_unknown). Returns the entry."""
     history = store.get(HISTORY) or []
     entry = {
         "id": f"q-{(history[-1]['n'] if history else 0) + 1:04d}",
@@ -943,6 +943,18 @@ def differs(before, after):
                    for (_, a), (_, b) in zip(x, y, strict=True))
     x, y = " ".join(visible(before["text"]).split()), " ".join(visible(after["text"]).split())
     return difflib.SequenceMatcher(None, x, y).ratio() < SAME_TEXT
+
+
+def identical(before, after):
+    """Whether two answers are the same action as written: the same tool calls
+    with the same arguments (JSON key order and whitespace aside) and the same
+    visible text (whitespace aside). User decision: only these settle the
+    judged gate's tie without the judge; a near match (a read from line 20 vs
+    21, a command with one flag added) is the judge's to call."""
+    def norm(a):
+        calls = [(c["name"], " ".join(_json_text(c["arguments"]).split())) for c in a["tool_calls"]]
+        return calls, " ".join(visible(a["text"]).split())
+    return norm(before) == norm(after)
 
 
 def visible(text):
