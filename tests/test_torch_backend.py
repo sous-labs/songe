@@ -129,6 +129,17 @@ def test_device_selection_and_live_memory_policy():
         needs_4bit(100, 0, 0.5)
 
 
+def test_a_checkpoint_stored_quantized_is_not_asked_for_4bit():
+    # Qwen3.8-27B-FP8 beside a vLLM holding 0.45 of a 96 GB card: its bf16 size
+    # (55.6 GB) did not fit, so a 4-bit bitsandbytes load was asked on top of FP8,
+    # which transformers refuses ("quantized with FineGrainedFP8Config but you
+    # are passing a BitsAndBytesConfig") and the Deep Dream failed at measuring.
+    fp8 = SimpleNamespace(quantization_config={"quant_method": "fp8"})
+    assert not needs_4bit(100, 300, 0.5, fp8)  # loads as stored
+    assert needs_4bit(100, 300, 0.5, SimpleNamespace(quantization_config=None))
+    assert needs_4bit(100, 300, 0.5)
+
+
 def test_calibration_samples_full_response_even_if_eos_is_first(backend):
     from songe.sleep.calibrate import full_length_sampler
 

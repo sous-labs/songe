@@ -165,11 +165,15 @@ def repage(optimizer):
             values[key] = paged
 
 
-def needs_4bit(parameter_count, available_bytes, memory_fraction):
+def needs_4bit(parameter_count, available_bytes, memory_fraction, model_config=None):
     if available_bytes <= 0 or not 0 < memory_fraction <= 1:
         raise ValueError(
             "Loading requires measured free memory and a valid memory_fraction"
         )
+    if getattr(model_config, "quantization_config", None):
+        # Stored quantized (FP8, NVFP4...): it loads with its own config, and
+        # transformers refuses a bitsandbytes config on top of it.
+        return False
     return parameter_count * 2 > available_bytes * memory_fraction
 
 
@@ -238,7 +242,7 @@ class TorchBackend:
             parameters = sum(p.numel() for p in skeleton.parameters())
             del skeleton
             self.quantized = needs_4bit(
-                parameters, self.available_bytes, config.memory_fraction
+                parameters, self.available_bytes, config.memory_fraction, model_config
             )
         dtype = torch.float32 if self.device.type == "cpu" else torch.bfloat16
         if (
