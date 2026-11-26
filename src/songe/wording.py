@@ -341,10 +341,23 @@ def model_level(model):
     return model.get("learning_level") or ("new" if model.get("enabled") else "off")
 
 
+GGUF_MARK = "from a GGUF file"
+
+
+def gguf_untrainable(architecture):
+    """A GGUF whose architecture nothing here can turn into trainable weights."""
+    return (
+        f"Songe cannot train {architecture} {GGUF_MARK} · "
+        "it keeps teaching it with notes"
+    )
+
+
 def model_problem(model):
     for item in [model, *(model.get("files") or [])]:
         reason = item.get("reason") or ""
         if item.get("support") == "unsupported" or item.get("status") == "unsupported":
+            if GGUF_MARK in reason:
+                return capitalize(reason) + "."  # says itself what is left
             if re.search("embedding", reason, re.I):
                 return (
                     "This model is for embeddings · Choose a chat model for learning."
@@ -695,6 +708,13 @@ def init_learning_line(learner=None, skipped=None):
             f" songe models {name} on"
         )
     return f"auto-dream with {learner} · starts when idle · skipped {why}"
+
+
+def missing_packages_wait(requirements):
+    """A quantized model that cannot train until packages are installed."""
+    quoted = " ".join(f'"{r}"' for r in requirements)
+    return (f"this model's quantized weights need {plural(len(requirements), 'package')} to learn"
+            f" · install where Songe runs: pip install {quoted} · then press Dream")
 
 
 def dream_message(*, blocked=None, reading=0, unread="", wait=None):

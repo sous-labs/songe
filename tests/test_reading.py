@@ -1680,6 +1680,36 @@ def test_a_session_whose_answers_could_not_be_read_stays_unread(store):
     assert reader.failed_sessions and len(reading.pending(store)) == 1  # read again next time
 
 
+async def test_a_bare_list_is_read_where_the_question_asks_for_that_list_alone(store):
+    """Live (mlx-lm, Qwen3-4B-Instruct-2507): mlx-lm does not hold the model
+    to a schema. The classify question's examples are bare lists and the
+    model answered with one, the right parts in it: every answer was
+    unreadable, and 39 of 39 sessions stayed unread."""
+    from songe.reading import prompts as P
+
+    answers = ANSWERS | {"classify": ANSWERS["classify"]["parts"], "review": []}
+    by_schema = {json.dumps(getattr(P, k.upper() + "_SCHEMA")): k for k in answers if hasattr(P, k.upper() + "_SCHEMA")}
+
+    def server(request):  # mlx starts plain: the schema is in the prompt, not enforced
+        body = json.loads(request.content)
+        name = by_schema[body["messages"][-1]["content"].rsplit("The JSON must match this schema: ", 1)[1]]
+        return httpx.Response(200, json={"choices": [{"finish_reason": "stop",
+                                                      "message": {"content": json.dumps(answers[name])}}]})
+
+    reader = Reader(store, "http://mlx/v1", "m", server="mlx",
+                    client=httpx.AsyncClient(transport=httpx.MockTransport(server)))
+    assert await reader.ask("split it", P.CLASSIFY_SCHEMA, "classify") == ANSWERS["classify"]
+    assert await reader.ask("any signals?", P.REVIEW_SCHEMA, "review") == {"signals": []}
+    record_session(store)
+    assert await reading.read(store, reader) == 1 and not getattr(reader, "failed_sessions", None)
+    assert {s["type"] for s in reading.signals(store)} == {"correction", "success"}
+    # Where the question asks for more than the list, a bare list is still no answer.
+    answers.update(responsible=[2], lesson=["Check the file first."])
+    assert "error" in await reader.ask("which steps?", P.RESPONSIBLE_SCHEMA, "responsible")
+    assert "error" in await reader.ask("what lesson?", P.LESSON_SCHEMA, "lesson")
+    await reader.close()
+
+
 def test_a_copied_example_is_no_lesson_and_conditional_rules_are_rules():
     """Live (Granite on LM Studio): every lesson was the prompt's renaming
     example, and "when writing search algorithms, always measure the
@@ -2604,3 +2634,26 @@ def test_a_command_written_as_a_list_is_read_as_its_command_line(store):
     assert not any(looks_around(a) for a in ('["ls", "-la"]', '"ls -la"'))
     assert command_of({"arguments": json.dumps({"command": ["cargo", "test"]})}) == "cargo test"
     assert command_of({"arguments": '["cargo", "test"]'}) == ""
+
+
+async def test_an_idle_deep_dream_writes_no_practice_a_quantized_base_cannot_train_on(
+    config, store, monkeypatch
+):
+    """#257: practice for a base whose packages are missing ended in a failed
+    calibration; it is written once they are installed."""
+    config.learning = "dreams"
+    registry.migrate(config, store)
+    registry.observe(config, store, "learner")
+    registry.set_learning(store, "learner", "all")
+    record_session(store)
+    record_session(store, ask="fix the other failing test")
+    learner = store.scoped("learner")
+    scheduler, _ = scheduler_for(config, store, monkeypatch, loaded=["learner"])
+    from songe.practice import store as practice
+
+    scheduler.missing_packages = lambda model: "packages missing"
+    assert await scheduler.read_sessions(practice=True) == 2  # read only
+    assert practice.counts(learner)["written"] == 0
+    scheduler.missing_packages = lambda model: None
+    assert await scheduler.read_sessions(practice=True) == 3
+    assert practice.counts(learner)["written"] == 3

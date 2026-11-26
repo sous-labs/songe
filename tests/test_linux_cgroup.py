@@ -107,6 +107,8 @@ def test_cgroup_psi_warning_allows_guarded_conversion_but_critical_stops(
     )
     assert result.stdout.strip() == "prepared"
     psi.write_text("some avg10=1.00\n")
+    assert admit(platform).pressure == "warn"
+    psi.write_text("some avg10=50.00\n")
     with pytest.raises(MemoryPressure):
         admit(platform)
 
@@ -198,3 +200,27 @@ def test_page_cache_of_files_read_once_counts_as_available(controller, kind):
     (mount / "memory.stat").write_text(f"{name} 9000000\nfile 9500000\n")
     assert platform.memory().available == 9200000
     assert admit(platform, required_bytes=7000000).pressure == "normal"
+
+
+@pytest.mark.parametrize("kind", ["v1", "v2"])
+def test_active_page_cache_no_program_maps_counts_as_available(controller, kind):
+    # Live (RunPod RTX 4090, cgroup v1, 62 GB): a 93 GB file written and read
+    # back left 7.4 GB inactive and 29.7 GB active cache with usage at the
+    # limit; counting the active part, the guard stopped a job beside 25 GB of
+    # programs, and the kernel never ran out.
+    platform, mount, names = controller(kind)
+    (mount / names[0]).write_text("62000")
+    (mount / names[1]).write_text("62000")
+    inactive, active, mapped, dirty = (
+        ("inactive_file", "active_file", "file_mapped", "file_dirty")
+        if kind == "v2"
+        else ("total_inactive_file", "total_active_file")
+        + ("total_mapped_file", "total_dirty")
+    )
+    stat = mount / "memory.stat"
+    stat.write_text(f"{inactive} 7400\n{active} 29700\n")
+    assert platform.memory().available == 37100
+    # What a program maps (a model server's weights) and what is not yet
+    # written back stay used.
+    stat.write_text(f"{inactive} 7400\n{active} 29700\n{mapped} 6000\n{dirty} 700\n")
+    assert platform.memory().available == 37100 - 6700
