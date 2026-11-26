@@ -42,7 +42,9 @@ class ScalarBackend:
         pass
 
     def optimizer(self, schedule):
-        return SimpleNamespace(state_dict=lambda: {}, load_state_dict=lambda _: None)
+        return SimpleNamespace(
+            state={}, state_dict=lambda: {}, load_state_dict=lambda _: None
+        )
 
     def train_step(self, step, optimizer, seed):
         self.seen.append((step["id"], seed))

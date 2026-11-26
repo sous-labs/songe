@@ -615,3 +615,35 @@ async def test_llamacpp_publication_load_restarts_parked_endpoint(tmp_path, kind
     with pytest.raises(httpx.ConnectError):
         await unmanaged.load(version)
     assert restarts == [version]
+
+
+async def test_ollama_lists_what_it_holds_so_background_work_never_loads_a_model():
+    """Reported by Jack in a test on 11-24: Songe could not tell what Ollama
+    had loaded, took every model as loaded, and Quick Dream's before and
+    after examples loaded an 8B (6 GB) beside the conversion for training."""
+    from songe.schedule import ModelScheduler
+
+    running = []
+
+    def handler(request):
+        if request.url.path == "/api/ps":
+            return httpx.Response(200, json={"models": running})
+        return httpx.Response(404)
+
+    upstream = Ollama(config("ollama"), transport=httpx.MockTransport(handler))
+
+    class Scheduler:
+        installation_config = SimpleNamespace(upstream_url="http://test/v1", server_source_url="")
+        answered_running = False
+        loaded_listing = ModelScheduler.loaded_listing
+        server_listing = ModelScheduler.server_listing
+        loaded_identifiers = ModelScheduler.loaded_identifiers
+
+    scheduler = Scheduler()
+    scheduler.upstream = upstream
+    assert await scheduler.loaded_identifiers() == set()  # nothing loaded: work waits
+    running.append({"name": "qwen3:8b", "model": "qwen3:8b"})
+    running.append({"name": "llama3:latest", "model": "llama3:latest"})
+    upstream.routes["songe/qwen3-8b"] = "qwen3:8b"  # the user's model, reused
+    assert await scheduler.loaded_identifiers() == {
+        "qwen3:8b", "llama3", "llama3:latest", "songe/qwen3-8b"}

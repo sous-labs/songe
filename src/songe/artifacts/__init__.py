@@ -148,6 +148,11 @@ def export(
         if kind == "peft-adapter":
             result = staging / "adapter"
             shutil.copytree(adapter, result)
+            from ..backends import packed_experts
+
+            if packed_experts.is_packed_base(base):
+                # vLLM reads Inkling-2 adapters under the checkpoint's names.
+                packed_experts.to_checkpoint_names(result)
         else:
             tools = tools or fetch(platform)
             result = staging / "model.gguf"

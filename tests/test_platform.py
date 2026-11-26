@@ -306,24 +306,114 @@ def test_a_later_gguf_learner_gets_the_converter_runtime_once(tmp_path, monkeypa
     monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
     installed = []
     monkeypatch.setattr(
-        install, "install", lambda commands, root: installed.append(commands)
+        install,
+        "install",
+        lambda commands, root, folder: installed.append((commands, folder)),
     )
-    monkeypatch.setattr(
-        install.subprocess,
-        "run",
-        lambda argv, **kw: subprocess.CompletedProcess(argv, 0),
-    )
+    probed = []
+
+    def run(argv, **kw):
+        probed.append(argv[0])
+        return subprocess.CompletedProcess(argv, 1 if "runtime" in argv[0] else 0)
+
+    monkeypatch.setattr(install.subprocess, "run", run)
     metal = SimpleNamespace(accelerators=lambda: [SimpleNamespace(kind="metal")])
+    from songe.log import Store
+
+    store = Store(tmp_path)
     platform = Rooted(metal, tmp_path)
     python = install.converter_python(platform)
-    assert python == str(install.runtime_python(tmp_path)) and len(installed) == 1
-    install.runtime_python(tmp_path).parent.mkdir(parents=True)
-    install.runtime_python(tmp_path).touch()
+    # Its own folder: <data dir>/runtime is the service's installation.
+    converter = install.converter_runtime_python(tmp_path)
+    assert python == str(converter) and converter.parent.parent == tmp_path / "converter"
+    assert [folder for _, folder in installed] == ["converter"]
+    assert installed[0][0][0][0] == str(converter)
+    assert not (tmp_path / "runtime").exists()
+    # The download shows in the dashboard's Flow while it runs.
+    assert [e["text"] for e in store.events(every_model=True)][::-1] == [
+        "Downloading the converter toolkit (about 1 GB, one time)",
+        "converter toolkit ready",
+    ]
+    converter.parent.mkdir(parents=True)
+    converter.touch()
     install.converter_python(platform)
     assert len(installed) == 1
+    # Conversions run on a platform rooted at their scratch volume; the
+    # toolkit is still the installation's one copy.
+    scratch = tmp_path / "scratch"
+    assert install.converter_python(Rooted(platform, scratch)) == str(converter)
+    assert not scratch.exists() and len(installed) == 1
     # CUDA/ROCm runtimes already carry torch; nothing is installed there.
     cuda = SimpleNamespace(accelerators=lambda: [SimpleNamespace(kind="cuda")])
     assert install.converter_python(Rooted(cuda, tmp_path)) == sys.executable
+
+
+def test_an_init_made_runtime_with_the_converter_is_used_as_before(
+    tmp_path, monkeypatch
+):
+    """A Mac whose init installed the private service runtime for a GGUF
+    model already has the converter modules there; no second copy."""
+    import importlib.util
+    import subprocess
+
+    from songe.backends import install
+    from songe.platform import Rooted
+
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
+    monkeypatch.setattr(
+        install, "install", lambda *a: pytest.fail("installed a second copy")
+    )
+    monkeypatch.setattr(
+        install.subprocess, "run", lambda argv, **kw: subprocess.CompletedProcess(argv, 0)
+    )
+    service = install.runtime_python(tmp_path)
+    service.parent.mkdir(parents=True)
+    service.touch()
+    metal = SimpleNamespace(accelerators=lambda: [SimpleNamespace(kind="metal")])
+    assert install.converter_python(Rooted(metal, tmp_path)) == str(service)
+
+
+def test_uninstall_removes_the_converter_toolkit():
+    from songe.storage import owned_entry
+
+    assert owned_entry("converter") and owned_entry("converter-install.log")
+
+
+def test_real_conversions_get_the_converter_runtime(monkeypatch):
+    """Conversion and merges pass artifacts.runtime.guarded_run; only the
+    inner memory.guarded_run was recognised, so a Mac without torch never
+    got the converter runtime and the panel said only "background work
+    failed" (reported by Jack in a test on 11-24)."""
+    from songe import memory
+    from songe.artifacts import runtime
+    from songe.backends import install
+
+    monkeypatch.setattr(install, "converter_python", lambda platform: "converter")
+    assert install.interpreter_for(None, runtime.guarded_run) == "converter"
+    assert install.interpreter_for(None, memory.guarded_run) == "converter"
+    assert install.interpreter_for(None, lambda *a, **k: None) == sys.executable
+
+
+def test_a_dreams_evaluation_conversion_gets_the_converter_runtime(tmp_path, monkeypatch):
+    """The Dream's own export and evaluation bound check= in a wrapper
+    function, which interpreter_for did not recognise either."""
+    from songe import models
+    from songe.artifacts import storage
+    from songe.backends import install
+    from songe.models import gguf
+    from songe.sleep import fuse
+
+    seen = []
+    monkeypatch.setattr(install, "converter_python", lambda platform: "converter")
+    monkeypatch.setattr(gguf, "read_gguf", lambda path: SimpleNamespace(architecture="qwen3"))
+    monkeypatch.setattr("songe.backends.resolve_kind", lambda config, platform: "torch")
+    monkeypatch.setattr(storage, "artifact_root", lambda config, store: tmp_path)
+    monkeypatch.setattr(models, "trainable_base", lambda ref, backend, platform, runner, artifact_directory:
+                        seen.append(install.interpreter_for(platform, runner)))
+    platform = SimpleNamespace(data_dir=lambda: tmp_path)
+    config = SimpleNamespace(upstream="http://127.0.0.1:11434")
+    fuse.evaluation_model(config, "gguf-full", tmp_path / "candidate.gguf", platform, lambda: None)
+    assert seen == ["converter"]
 
 
 @pytest.mark.parametrize(

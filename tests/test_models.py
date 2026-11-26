@@ -533,6 +533,22 @@ async def test_idle_discovery_adds_second_base_and_records_unsupported_reason(le
     assert "not discoverable" in row["reason"]
 
 
+async def test_a_served_model_without_local_weights_is_serving_only(learners):
+    """A fresh install against a vLLM whose weights are not on this machine:
+    discovery names the model, not a path, and saving it as the model to
+    train failed every scheduler tick ("Sleep failed" before anything ran)."""
+    from pathlib import Path
+
+    config, store = learners
+    registry.observe(config, store, "Qwen/Qwen3.8-27B")
+    ref = ModelRef(config.upstream, "Qwen/Qwen3.8-27B", "safetensors", Path("Qwen/Qwen3.8-27B"), "")
+    scheduler = ModelScheduler(config, store, SimpleNamespace(discover=lambda: [ref]))
+    await scheduler.discover_models()
+    row = registry.find(store, "Qwen/Qwen3.8-27B")
+    assert (row["support"], row["reason"]) == (
+        "unsupported", "Local weights are not accessible; serving only")
+
+
 async def test_unreachable_discovery_keeps_models_pending_without_failing(learners):
     # Issue #8: an httpx error from discovery ended every scheduler tick.
     config, store = learners
@@ -1065,6 +1081,48 @@ async def test_reader_reads_the_base_from_the_users_server(learners):
     reader = await scheduler.reader_for("first")
     try:
         assert reader.url == "http://127.0.0.1:8080/v1"
+    finally:
+        await reader.close()
+
+
+async def test_reader_reads_an_mlx_base_where_songe_serves_it(learners, monkeypatch):
+    # Live (0.1.0a15, mlx-lm): nothing listened at the init URL, so Songe
+    # started its own server on another port and the agent's requests went
+    # there; reading asked the init URL (:1235) and failed with ConnectError.
+    import asyncio
+
+    from songe import memory, platform
+    from songe.upstream import mlx, supervisor
+    from tests.test_review3 import memory_platform
+
+    config, store = learners
+    config.upstream, config.upstream_url = "mlx", "http://127.0.0.1:1235/v1"
+    supervisor.provision_endpoint(config)  # as songe init does
+    warmed = []
+
+    async def spawn(*args, **kwargs):
+        return SimpleNamespace(pid=None, returncode=None, wait=asyncio.Event().wait)
+
+    async def post(self, url, **kwargs):
+        warmed.append((url.removesuffix("/chat/completions"), kwargs["json"]["model"]))
+        return httpx.Response(200, json={}, request=httpx.Request("POST", url))
+
+    def nothing_listens(request):
+        raise httpx.ConnectError("refused", request=request)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    monkeypatch.setattr(memory, "guard", lambda *args, **kwargs: None)
+    monkeypatch.setattr(platform, "current", memory_platform)
+    monkeypatch.setattr(supervisor, "owns_endpoint", lambda *args: True)
+    monkeypatch.setattr(httpx.AsyncClient, "post", post)
+    upstream = mlx.MLX(config, store.root)
+    upstream.transport = httpx.MockTransport(nothing_listens)
+    await upstream.load(store.scoped("first").version())
+    upstream.watchdog.cancel()
+    reader = await ModelScheduler(config, store, upstream).reader_for("first")
+    try:
+        # Songe's own server, asked for the model it was started with.
+        assert [(reader.url, reader.model)] == warmed
     finally:
         await reader.close()
 
