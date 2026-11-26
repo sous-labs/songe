@@ -697,6 +697,13 @@ def init_learning_line(learner=None, skipped=None):
     return f"auto-dream with {learner} · starts when idle · skipped {why}"
 
 
+def missing_packages_wait(requirements):
+    """A quantized model that cannot train until packages are installed."""
+    quoted = " ".join(f'"{r}"' for r in requirements)
+    return (f"this model's quantized weights need {plural(len(requirements), 'package')} to learn"
+            f" · install where Songe runs: pip install {quoted} · then press Dream")
+
+
 def dream_message(*, blocked=None, reading=0, unread="", wait=None):
     """One line answering a press of Dream: what started, and what training
     still waits on."""

@@ -1672,3 +1672,35 @@ def test_llama_swap_init_offers_its_chat_models_from_the_source(monkeypatch):
                     server_source_url="http://127.0.0.1:9292/v1", server_owned=True)
     assert cli.llamaswap_offered(config) == ["qwen", "tiny"]
     assert asked == ["http://127.0.0.1:9292/v1"]
+
+
+async def test_a_deep_dream_on_a_quantized_model_says_what_to_install_before_practice(
+    learners, monkeypatch, tmp_path
+):
+    """Live (#257): an FP8 base without kernels practised for 11 to 23
+    minutes, then failed at calibration with only "songe doctor"."""
+    import json
+
+    from songe.backends import quantized
+
+    config, store = learners
+    scheduler = ModelScheduler(
+        config, store, SimpleNamespace(), platform=SimpleNamespace()
+    )
+    registry.support(store, "first", "trainable")
+    (tmp_path / "config.json").write_text(
+        json.dumps({"quantization_config": {"quant_method": "fp8"}}), encoding="utf-8")
+    policy = scheduler.config_for("first")
+    policy.model = str(tmp_path)
+    scheduler.config_for = lambda model: policy
+    monkeypatch.setattr(quantized.importlib.util, "find_spec", lambda name: None)
+
+    async def unread(model):
+        raise AssertionError("read and practised before the check")
+
+    scheduler.read_now = unread
+    reply = await scheduler.dream("first")
+    assert reply == {"started": False, "message": (
+        "Not yet · this model's quantized weights need 1 package to learn"
+        ' · install where Songe runs: pip install "kernels>=0.18.2,<0.19" · then press Dream')}
+    assert store.get("requested_sleep") is not True

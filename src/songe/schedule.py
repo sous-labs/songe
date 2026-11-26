@@ -1818,6 +1818,11 @@ class ModelScheduler(Scheduler):
                 # The page puts `since` in the viewer's local time.
                 return {"started": False, "message": quick_message(None, nothing_since=0), "since": last}
             return {"started": True, "message": quick_message(unread)}
+        missing = await asyncio.to_thread(self.missing_packages, model)
+        if missing:
+            # Before practice: found only at calibration, it cost 11 to 23
+            # minutes of practice first (#257).
+            return {"started": False, "message": dream_message(blocked=missing)}
         pressed = self.installation_store.scoped(model)
         pressed.set("dream_stopped", None)
         pressed.set("dream_growth", None)
@@ -2166,6 +2171,15 @@ class ModelScheduler(Scheduler):
         if any(self.in_flight.values()):
             return "the model is in use"
         return None
+
+    def missing_packages(self, model):
+        """What this model's quantized weights need installed to train, in a
+        few words; None when nothing is missing."""
+        from .backends.quantized import missing_packages
+        from .wording import missing_packages_wait
+
+        needed = missing_packages(self.config_for(model).model)
+        return missing_packages_wait(needed) if needed else None
 
     async def training_wait(self, model):
         """What this model's training waits on right now, in a few words; None
@@ -2888,7 +2902,13 @@ class ModelScheduler(Scheduler):
                     continue  # Waits for its own model (code model_server).
                 per_signal = self.config_for(row["id"]).practice_per_signal
                 unread = await asyncio.to_thread(reading.pending, learner, 1)
-                wants_practice = practice and await asyncio.to_thread(
+                # No practice a quantized base could never train on (#257):
+                # it failed at calibration after it. A press says why.
+                untrainable = practice and bool(
+                    await asyncio.to_thread(self.missing_packages, row["id"]))
+                if untrainable:
+                    logger.warning("practice_skipped %s: missing packages", row["id"])
+                wants_practice = practice and not untrainable and await asyncio.to_thread(
                     practice_store.wanted, learner, per_signal
                 )
                 if not unread and not wants_practice:
@@ -2928,7 +2948,7 @@ class ModelScheduler(Scheduler):
 
                 async def read_then_write(
                     learner=learner, reader=reader, per_signal=per_signal,
-                    activity=activity, model=row["id"],
+                    activity=activity, model=row["id"], untrainable=untrainable,
                 ):
                     last = [time.monotonic()]
 
@@ -3002,7 +3022,7 @@ class ModelScheduler(Scheduler):
                         learner.set("quick_checked", {"at": time.time(), "nothing_new": False,
                                                       "error": "unreadable", "failed": len(failed)})
                     written = 0
-                    if practice:
+                    if practice and not untrainable:
                         activity["stage"] = "practice"
                         written = await practice_store.write(learner, reader, per_signal)
                         reader.log_stats("practice")

@@ -2634,3 +2634,26 @@ def test_a_command_written_as_a_list_is_read_as_its_command_line(store):
     assert not any(looks_around(a) for a in ('["ls", "-la"]', '"ls -la"'))
     assert command_of({"arguments": json.dumps({"command": ["cargo", "test"]})}) == "cargo test"
     assert command_of({"arguments": '["cargo", "test"]'}) == ""
+
+
+async def test_an_idle_deep_dream_writes_no_practice_a_quantized_base_cannot_train_on(
+    config, store, monkeypatch
+):
+    """#257: practice for a base whose packages are missing ended in a failed
+    calibration; it is written once they are installed."""
+    config.learning = "dreams"
+    registry.migrate(config, store)
+    registry.observe(config, store, "learner")
+    registry.set_learning(store, "learner", "all")
+    record_session(store)
+    record_session(store, ask="fix the other failing test")
+    learner = store.scoped("learner")
+    scheduler, _ = scheduler_for(config, store, monkeypatch, loaded=["learner"])
+    from songe.practice import store as practice
+
+    scheduler.missing_packages = lambda model: "packages missing"
+    assert await scheduler.read_sessions(practice=True) == 2  # read only
+    assert practice.counts(learner)["written"] == 0
+    scheduler.missing_packages = lambda model: None
+    assert await scheduler.read_sessions(practice=True) == 3
+    assert practice.counts(learner)["written"] == 3
