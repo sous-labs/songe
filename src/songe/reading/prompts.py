@@ -265,7 +265,9 @@ TURN_SCHEMA = {
         "wish": {"type": "string"},
         "about": {"type": "string"},
     },
-    "required": ["standing", "kind", "wish", "about"],
+    # "about" may be missing: an answer without it is read as holding for
+    # any answer (scope_of), not as an answer off the schema.
+    "required": ["standing", "kind", "wish"],
 }
 
 TURN = """A user is talking with an AI assistant.
