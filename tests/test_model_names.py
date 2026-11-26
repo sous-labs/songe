@@ -22,3 +22,15 @@ def test_a_hugging_face_cache_model_is_named_after_the_model():
     assert public_name("/models/Qwen3-8B") == "songe/Qwen3-8B"
     assert public_name("lmstudio-community/Qwen3-8B-GGUF") == "songe/Qwen3-8B-GGUF"
     assert public_name("songe/kept") == "songe/kept"
+
+
+def test_a_hugging_face_cache_model_without_an_org_and_a_folder_called_snapshots():
+    """A repository without an org (models--gpt2) is named after the model
+    too; a folder that is only called snapshots is not a cache snapshot."""
+    commit = "607a30d783dfa663caf39e06633721c8d4cfcd7e"
+    mac = f"/Users/someone/.cache/huggingface/hub/models--gpt2/snapshots/{commit}"
+    assert public_name(mac) == "songe/gpt2"
+    windows = mac.replace("/Users/someone", "C:\\Users\\someone").replace("/", "\\")
+    assert public_name(windows) == "songe/gpt2"
+    assert public_name("/Users/someone/models/snapshots") == "songe/snapshots"
+    assert public_name("/Users/someone/backups/snapshots/Qwen3-8B") == "songe/Qwen3-8B"

@@ -210,6 +210,8 @@ REASONS = (
     ("Held-out improvement passed", "passed"),
     ("does not exceed bootstrap noise", "no_gain"),
     ("Not clearly better", "no_gain"),
+    ("Worse than what you have now", "no_gain"),
+    ("Not better than what you have now", "no_gain"),
     ("drift exceeds the limit", "drift_limit"),
     ("validity dropped", "capability_drop"),
     ("Repetition rate increased", "repetition_rate"),  # the older, stricter rule

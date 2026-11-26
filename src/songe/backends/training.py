@@ -204,11 +204,24 @@ def train(backend, pool, anchors, work, progress):
             step_started = time.monotonic()
             gradients, loss, pending, used = None, 0.0, set(), 0
             batch = plan[cursor : cursor + accumulation]
+            samples = [anchors[i] if anchor else pool[i] for anchor, i in batch]
+            seeds = [7613 + cursor + micro for micro in range(len(batch))]
+            # The samples of one step are answered by the same weights; a
+            # backend that can answer them together does it here, once.
+            ahead = (
+                backend.rollouts(samples, seeds)
+                if len(batch) > 1 and hasattr(backend, "rollouts")
+                else [None] * len(batch)
+            )
             for micro, (is_anchor, index) in enumerate(batch):
-                step = anchors[index] if is_anchor else pool[index]
+                step = samples[micro]
                 try:
-                    value, grad, count = backend.train_step(
-                        step, optimizer, seed=7613 + cursor + micro
+                    value, grad, count = (
+                        backend.train_step(
+                            step, optimizer, seed=seeds[micro], rollout=ahead[micro]
+                        )
+                        if ahead[micro]
+                        else backend.train_step(step, optimizer, seed=seeds[micro])
                     )
                 except Exception as error:
                     # A mixture-of-experts model can route a token to another

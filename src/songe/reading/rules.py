@@ -58,12 +58,30 @@ def opencode_error(body):
     return error if isinstance(error, dict) and "type" in error else None
 
 
-def command_of(call):
+def arguments_of(call):
+    """A call's arguments, empty when they are not a JSON object (a small
+    model can write a list or a bare string there)."""
     try:
         args = json.loads(call.get("arguments") or "{}")
     except ValueError:
-        return ""
-    return str(args.get("command") or args.get("code") or "")
+        return {}
+    return args if isinstance(args, dict) else {}
+
+
+def command_line(value):
+    """A command argument as the line it stands for. Live (qwen3:1.7b on
+    Ollama, an agent with a run_command tool): the model wrote it as a list
+    of words ({"command": ["pip", "install", "rich"]}), and reading raised on
+    it. The words are joined with spaces, not shell-quoted: CHECK and INSPECT
+    read the words of a line, and ["cd", "src", "&&", "ls"] stays that line."""
+    if isinstance(value, list):
+        return " ".join(str(part) for part in value)
+    return str(value or "")
+
+
+def command_of(call):
+    args = arguments_of(call)
+    return command_line(args.get("command") or args.get("code"))
 
 
 def classify(tool, body, call=None):
@@ -172,7 +190,12 @@ LASTING = re.compile(
 # Words that point back at the conversation ("whatever that was"): such a
 # sentence means nothing in a later task.
 DEICTIC = re.compile(
-    r"\b(whatever|that was|like that|it again|that again|do that|do this|this one|that one|those ones)\b", re.I
+    r"\b(whatever|that was|like that|it again|that again|do that|do this|this one|that one|those ones)\b"
+    # Ending on what it points at: "always start your reply with that" names
+    # the thing in the sentence before it (#266). After a comma the thing is
+    # in the same sentence ("Never use semicolons, I hate those."): a rule.
+    r"|^[^,;]*\b(that|this|those|these)\W*$",
+    re.I,
 )
 SENTENCES = re.compile(r"(?<=[.!?])\s+")
 

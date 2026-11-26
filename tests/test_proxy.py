@@ -526,3 +526,24 @@ async def test_a_failed_upstream_says_what_failed(config, store, error, said):
         assert message.startswith("Local upstream unavailable · ")
         assert said in message and type(error).__name__ in message
     await upstream.aclose()
+
+
+def test_a_new_chat_with_an_earlier_opening_gets_the_current_lessons(monkeypatch):
+    from types import SimpleNamespace
+
+    from songe import quick
+    from songe.proxy import LessonPins
+
+    lessons = ["Use uv."]
+    monkeypatch.setattr(quick, "active", lambda learner: list(lessons))
+    monkeypatch.setattr(quick, "block", lambda found: "\n".join(found))
+    learner, pins = SimpleNamespace(model_key="m"), LessonPins()
+    opening = [{"role": "user", "content": "Write an email to my landlord."}]
+    assert pins.block_for(learner, opening) == "Use uv."
+    going_on = [*opening, {"role": "assistant", "content": "Dear..."}, {"role": "user", "content": "Shorter."}]
+    lessons.append("Sign with Sam.")
+    assert pins.block_for(learner, going_on) == "Use uv."
+    assert pins.block_for(learner, opening) == "Use uv.\nSign with Sam."
+    assert pins.block_for(learner, opening, "session-1") == "Use uv.\nSign with Sam."
+    lessons.append("Use metric.")
+    assert pins.block_for(learner, opening, "session-1") == "Use uv.\nSign with Sam."
