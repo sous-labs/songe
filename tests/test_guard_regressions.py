@@ -156,7 +156,8 @@ def test_prediction_remaining_need_reserves_learned_margin(monkeypatch):
 
 @pytest.mark.parametrize("excess,stops", [(100, False), (101, True)])
 def test_actual_peak_respects_learned_prediction_error(monkeypatch, excess, stops):
-    baseline = Memory(24 * GB, 8 * GB)
+    # 150 bytes of room past the margin: less than twice a 101-byte overrun.
+    baseline = Memory(24 * GB, GB + 150)
     events = run_guard(
         monkeypatch,
         [baseline],
@@ -164,12 +165,61 @@ def test_actual_peak_respects_learned_prediction_error(monkeypatch, excess, stop
         rss=[GB + excess],
         predicted_peak_bytes=GB,
         prediction_error_bytes=100,
+        margin=GB,
         events=True,
     )
     assert bool(events) == stops
     if stops:
         assert events[0][1].stop_reason["rule"] == "prediction_exceeded"
         assert events[0][1].stop_reason["observed"]["tree_rss_bytes"] == GB + excess
+
+
+def test_a_small_overrun_with_room_to_spare_continues(monkeypatch):
+    # Live: a slice's tree reached 7.0 GB over a 6.7 GB prediction (+0.34 GB
+    # error) with 172 GB free and a 25 GB margin; the stop cost a reload.
+    baseline = Memory(188 * GB, 172 * GB)
+    assert (
+        run_guard(
+            monkeypatch,
+            [baseline],
+            baseline=baseline,
+            rss=[int(7.1 * GB)],
+            predicted_peak_bytes=int(6.7 * GB),
+            prediction_error_bytes=int(0.34 * GB),
+            margin=25 * GB,
+        )
+        == []
+    )
+
+
+@pytest.mark.parametrize(
+    "card,used,predicted,free,stops",
+    [
+        # L40S: 10.5 GB over 9.87 GB predicted, 23.8 GB of the card free.
+        (48, 10.5, 9.87, 23.8, False),
+        # RTX 5090 beside a vLLM server: 18.77 GB over 17.63 GB, 1.45 GB free.
+        (32, 18.77, 17.63, 1.45, True),
+    ],
+)
+def test_a_card_overrun_stops_only_without_room_for_more(
+    monkeypatch, card, used, predicted, free, stops
+):
+    def gpu(free_gb):
+        return Accel("cuda", "card", card * GB, int(free_gb * GB))
+
+    events = run_guard(
+        monkeypatch,
+        [Memory(188 * GB, 61 * GB)],
+        baseline=memory.Snapshot(188 * GB, 61 * GB, "normal", (gpu(free + used),)),
+        rss=[GB],
+        accelerators=lambda _: [gpu(free)],
+        predicted_device_bytes=int(predicted * GB),
+        device_prediction_error_bytes=int(predicted * GB) // 20,
+        events=True,
+    )
+    assert bool(events) == stops
+    if stops:
+        assert events[0][1].stop_reason["rule"] == "device_prediction_exceeded"
 
 
 def test_critical_pressure_stops_with_exact_reason(monkeypatch):
