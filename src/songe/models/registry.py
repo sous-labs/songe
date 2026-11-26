@@ -481,6 +481,7 @@ def prepare(config, store, platform):
             resolve_kind(config, platform),
             Rooted(platform, store.root),
             artifact_directory=artifact_root(config, store),
+            download=bool(store.get("download_original")),
         )
     )
     config.save(store.root)

@@ -352,11 +352,20 @@ def gguf_untrainable(architecture):
     )
 
 
+OFFER_MARK = "download · songe models "
+
+
+def gguf_original_offer(repo, size, model):
+    """Training needs the GGUF's original weights; nothing is fetched before
+    the user says so."""
+    return f"train from {repo} · about {size} {OFFER_MARK}{model} download"
+
+
 def model_problem(model):
     for item in [model, *(model.get("files") or [])]:
         reason = item.get("reason") or ""
         if item.get("support") == "unsupported" or item.get("status") == "unsupported":
-            if GGUF_MARK in reason:
+            if GGUF_MARK in reason or OFFER_MARK in reason:
                 return capitalize(reason) + "."  # says itself what is left
             if re.search("embedding", reason, re.I):
                 return (

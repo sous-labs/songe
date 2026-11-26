@@ -95,10 +95,10 @@ def parser():
         help="Show the resolved training settings for a model (default: primary model)",
     )
     models = commands.add_parser(
-        "models", help="List models · auto-dream on|off"
+        "models", help="List models · auto-dream on|off · download original weights"
     )
     models.add_argument("model", nargs="?")
-    models.add_argument("level", nargs="?", choices=("on", "off"))
+    models.add_argument("level", nargs="?", choices=("on", "off", "download"))
     for name, text in (
         ("open", "Dashboard in your browser"),
         ("pause", "Pause learning"),
@@ -1076,14 +1076,19 @@ def main(argv=None):
                 "Previous version restored" + (f" · {args.model}" if args.model else "")
             )
         elif command == "models":
-            if args.model and args.level:
+            if args.model and args.level == "download":
+                # A GGUF's original weights, offered on the panel.
+                local.control("download_original", model=args.model)
+                result(f"{args.model} · the next Deep Dream downloads its original weights")
+                console().print()
+            elif args.model and args.level:
                 # What it learns from is Songe's decision; this only says
                 # whether Dreams start on their own.
                 local.control("auto_dream", model=args.model, on=args.level == "on")
                 result(f"{args.model} · auto-dream {args.level}")
                 console().print()
             elif args.model or args.level:
-                raise UsageError(f"{NAME} models <model> on|off")
+                raise UsageError(f"{NAME} models <model> on|off|download")
             data = local.snapshot()
             print_models(data.get("models", []), data=data)
         elif command == "sleep":
