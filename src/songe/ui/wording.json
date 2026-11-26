@@ -1,5 +1,5 @@
 {
-  "_note": "Draft for the Learning cycle (docs/CONTRACTS.md §8). One table for every surface; the service sends only the keys. Not read by the shipped dashboard yet.",
+  "_note": "Every word the page (next.js) shows; the service sends only keys (docs/CONTRACTS.md §8).",
   "stage": {
     "measure": "Getting ready",
     "read": "Rewind",
@@ -73,6 +73,14 @@
     "conversations_read": [
       "conversation",
       "conversations"
+    ],
+    "chars": [
+      "char",
+      "chars"
+    ],
+    "answers_right": [
+      "answer it already got right",
+      "answers it already got right"
     ]
   },
   "signal_type": {
@@ -94,10 +102,11 @@
     "thermal": "Waits for the machine to cool down",
     "disk": "Waits for disk space",
     "no_data": "Waits for new conversations",
-    "model_server": "Waits for the model to be loaded in your model server",
-    "paused": "Paused",
+    "model_server": "Waits for the model server · load the model",
+    "paused": "Paused · press Resume to continue",
     "unsupported": "This model cannot learn here yet",
-    "error": "Stopped by an error · run songe doctor"
+    "error": "Stopped by an error · run songe doctor",
+    "numbers": "{have} {unit} free · needs {need} {unit}"
   },
   "practice_drop": {
     "built": "could not be built",
@@ -113,11 +122,11 @@
     "drift": "Didn't change what it already did right",
     "health": "Answers stayed healthy"
   },
-  "health_ok": "no rise in loops, empty answers or broken tool calls",
-  "health_not_reached": "not checked: it did not answer better",
-  "check_change": "changed {change} (allowed up to {limit})",
+  "health_ok": "no more loops, empty answers or broken calls",
+  "health_not_reached": "not checked · no gain",
+  "check_change": "{share}% of limit",
   "check_not_measured": "not measured",
-  "checks_rule": "The new version is used only if every check passes.",
+  "checks_rule": "All must pass to use the new version",
   "health_fail": {
     "Looping answers increased": "more answers stuck in loops",
     "Repetition rate increased": "repeated phrases more often (older, stricter check)",
@@ -155,8 +164,8 @@
   "example_lesson": "Lesson",
   "improved": "Better on {count} of {checked} checked",
   "judged": "Better on {count}, worse on {worse}, same on {same}",
-  "examples_unchecked": "This Dream's before/after examples were made before they were checked, so none are shown",
-  "nothing_improved": "No answer got clearly better this time",
+  "examples_unchecked": "Examples not checked · not shown",
+  "nothing_improved": "No answer clearly better",
   "before": "Before",
   "after": "After",
   "dream": "Dream",
@@ -166,8 +175,8 @@
     "resume": "Resume"
   },
   "dream_notice": {
-    "pause": "Learning paused · nothing learned so far is lost",
-    "resume": "Learning resumed · the Dream carries on where it stopped"
+    "pause": "Learning paused · nothing lost",
+    "resume": "Learning resumed · the Dream continues"
   },
   "signal_kind": {
     "correction": [
@@ -198,23 +207,23 @@
   "read_headline": "{signals} found in {conversations}",
   "restored": "Version restored",
   "restore": "Go back to {version}",
-  "restore_confirm": "Go back to {version}? New sessions use it from now on; the newer version is kept and you can return to it.",
+  "restore_confirm": "Go back to {version}? New sessions use it · newer versions are kept",
   "versions_title": "Versions",
-  "versions_only_original": "The original model is in use. A new version appears here when a Deep Dream passes its checks, and you can always go back.",
+  "versions_only_original": "New versions come from Deep Dreams that pass their checks",
   "version_in_use": "in use",
   "remove_lesson": "Remove",
   "remove_lesson_title": "Remove this preference from new sessions",
-  "remove_lesson_confirm": "Remove this preference? New sessions stop getting it, and Songe will not add it again.",
+  "remove_lesson_confirm": "Remove this preference? New sessions stop getting it · not added again",
   "undo_quick": "Undo this Quick Dream",
-  "undo_quick_confirm": "Undo this Quick Dream? The preferences it added leave new sessions, and Songe will not add them again.",
+  "undo_quick_confirm": "Undo this Quick Dream? Its preferences leave new sessions · not added again",
   "quick_undone": "Undone {when} · its preferences were removed",
   "undone": "{version} is kept but no longer in use · {current} in use",
-  "held_out_passed": "Closer to the corrected answers on held-out conversations: {change}, more than the noise of {margin}",
-  "held_out_failed": "Not clearly closer on held-out conversations: {change}, within the noise of {margin}",
-  "control_failed": "Could not do that · {error} · try again; if it still fails, run songe doctor",
+  "held_out_passed": "Held-out conversations · closer by {change} · noise {margin}",
+  "held_out_failed": "Held-out conversations · {change} · within noise {margin}",
+  "control_failed": "Failed · {error} · try again or run songe doctor",
   "adopted_then": "Adopted {version}",
   "auto_dream": "Auto-dream",
-  "auto_dream_title": "Dream on its own when your computer is idle",
+  "auto_dream_title": "Dreams on its own when idle",
   "dream_kinds": {
     "quick": {
       "title": "Quick Dream",
@@ -232,13 +241,13 @@
   "view": "View",
   "learned_title": "What it has learned",
   "preferences_title": "Preferences in the prompt",
-  "preferences_about": "Added to every new session. When a Deep Dream learns one, it leaves the prompt.",
-  "preferences_empty": "None yet · a Quick Dream adds the preferences it learns from your feedback",
+  "preferences_about": "In every new session · leaves the prompt once a Deep Dream learns it",
+  "preferences_empty": "None yet · Quick Dreams add them from your feedback",
   "waiting_title": "Waiting for a Deep Dream",
-  "waiting_about": "Skills it will practise and train in its next Deep Dream.",
+  "waiting_about": "Practised and trained in the next Deep Dream",
   "waiting_empty": "Nothing waiting",
   "cancel_dream": "Cancel Dream",
-  "cancel_confirm": "Cancel this Dream? What it has done so far is thrown away; what it practised waits for the next Deep Dream.",
+  "cancel_confirm": "Cancel this Dream? Its progress is lost · practice waits for the next Deep Dream",
   "quick_running": "Quick Dream · reading your newest conversations…",
   "quick_done": "Quick Dream done · {total}",
   "quick_changes": {
@@ -254,7 +263,7 @@
   "done": "Done",
   "view_all": "View all",
   "quick_report_title": "Quick Dream",
-  "quick_nothing": "Nothing new since your last Quick Dream ({when}) · talk to your agent first, then dream again",
+  "quick_nothing": "Nothing new since {when} · talk to your agent, then dream again",
   "now_line": "Now · {prefs} · {waiting} waiting for a Deep Dream",
   "loading_report": "Loading this Dream…",
   "how_it_went": "How it went",
@@ -282,39 +291,39 @@
     "outcome": "tool feedback"
   },
   "dream_stopped": {
-    "practice": "Your Deep Dream stopped while writing practice: the model kept failing to answer. Nothing was changed.",
-    "reading": "Your Deep Dream stopped while reading your conversations: {detail}. Nothing was changed.",
-    "training": "Your Deep Dream stopped before training: {detail}. Nothing was changed.",
-    "restart": "Your Deep Dream was interrupted when Songe restarted. Nothing was changed."
+    "practice": "Deep Dream stopped in practice · the model kept failing to answer",
+    "reading": "Deep Dream stopped while reading · {detail}",
+    "training": "Deep Dream stopped before training · {detail}",
+    "restart": "Deep Dream interrupted by a Songe restart"
   },
   "dream_stopped_why": {
-    "Waiting for calibration growth": "it had to measure this machine again for the longer practice scenes and could not",
-    "Waiting for memory": "there was not enough free memory",
-    "Waiting for usable held-out conversations": "it needs a few more of your conversations to check its work",
-    "Waiting for learnable experience": "none of the practice fit what this machine can train",
-    "Waiting for new learnable experience": "there was no new practice to train on",
-    "Waiting for experience": "there was no practice to train on yet (practice is written from your conversations' lessons)",
-    "ReadTimeout": "the model did not answer in time (it may have been busy or unloaded)",
-    "ConnectTimeout": "the model server did not answer (it may have been busy or unloaded)",
-    "ConnectError": "the model server could not be reached (is it running?)",
+    "Waiting for calibration growth": "longer scenes could not be measured here",
+    "Waiting for memory": "not enough free memory",
+    "Waiting for usable held-out conversations": "needs more conversations to check its work",
+    "Waiting for learnable experience": "no practice fits this machine",
+    "Waiting for new learnable experience": "no new practice",
+    "Waiting for experience": "no practice yet",
+    "ReadTimeout": "the model did not answer in time",
+    "ConnectTimeout": "the model server did not answer",
+    "ConnectError": "model server unreachable · start it",
     "RemoteProtocolError": "the model server closed the connection"
   },
   "dream_stopped_retry": "Try again",
-  "dream_stopped_kept": "{kept} practice scenes kept for next time.",
-  "collecting_next": "A Deep Dream needs {count} more test moment{s} to check its work · each conversation where you give feedback adds up to 3",
+  "dream_stopped_kept": "{scenes} kept",
   "back_to_dreams": "← All Dreams",
   "view_progress": "View progress",
-  "measuring_machine": "Getting to know this machine · measuring how much {name} can learn at once · a few minutes · nothing is learned yet",
-  "measuring_short": "getting to know this machine",
-  "measuring_next": "Then it can learn in Dreams",
+  "measuring_machine": "Measuring this machine for {name} · a few minutes · nothing learned yet",
   "measuring_progress": "{done} of {total} tokens measured",
-  "measured_can": "{name} can learn on this machine · Dreams can train it from now on",
-  "measured_cannot": "{name} can't learn on this machine: {reason} · Songe still works for it, without training",
-  "control_unreachable": "Can't reach Songe · it may have restarted · reload the page",
+  "measured_can": "{name} · trains on this machine",
+  "measured_cannot": "{name} can't train here · {reason} · still served, no training",
+  "control_unreachable": "Songe not answering · reload the page",
   "page_error": "The page hit an error · reload it",
   "quick_failed": {
-    "unreadable": "Quick Dream {when} couldn't read your conversations: the model's answers weren't readable · they stay unread and are read next time",
-    "no_model": "Quick Dream {when} couldn't start: no model is loaded in your model server"
+    "unreadable": "Quick Dream {when} · model answers unreadable · retried next time",
+    "no_model": "Quick Dream {when} · no model loaded · load one in your model server",
+    "memory": "Quick Dream {when} · memory tight · close some apps, then dream again",
+    "load_memory": "Quick Dream {when} · not enough memory to load the model · close some apps or load it in your model server",
+    "load_unknown": "Quick Dream {when} · model size unknown · load it in your model server"
   },
   "quick_checked_read": "Quick Dream {when} read {read} · found {found} · no new preferences",
   "chip_failed": "failed",
@@ -322,30 +331,31 @@
   "no_new_preferences": "No new preferences",
   "quick_read_found": "Read {read} · found {found}",
   "quick_failed_card": {
-    "unreadable": "Couldn't read your conversations: the model's answers weren't readable · they stay unread and are read next time",
-    "no_model": "Couldn't start: no model is loaded in your model server"
+    "unreadable": "Model answers unreadable · retried next time",
+    "no_model": "No model loaded · load one in your model server",
+    "memory": "Memory tight · close some apps, then dream again",
+    "load_memory": "Not enough memory to load the model · close some apps or load it in your model server",
+    "load_unknown": "Model size unknown · load it in your model server"
   },
-  "getting_ready": "Getting ready · testing how much your computer can learn at once · {done} of {total} tokens so far",
-  "getting_ready_title": "Getting ready to train · testing how much your computer can learn at once · {done} of {total} tokens so far",
-  "measure_about": "Measuring how much this computer can learn at once · nothing is trained in this step",
+  "getting_ready": "Getting ready · measuring memory · {done} of {total} tokens",
+  "getting_ready_title": "Getting ready to train · measuring memory · {done} of {total} tokens",
+  "measure_about": "Measures what fits in memory · no training",
   "measure_fits": "Fits: {sizes} tokens",
-  "measure_longer": "now testing longer readings (the teacher sees more of the conversation) · {done} of {total} tokens",
+  "measure_longer": "Longer readings · {done} of {total} tokens",
   "measure_limit": "limit found at {limit} tokens",
   "gpu_line": "{busy}% busy · {memory} in use",
   "gpu_busy": "{busy}% busy",
-  "quick_checked": "Quick Dream checked {when}: nothing new",
+  "quick_checked": "Quick Dream {when} · nothing new",
   "quick_example_where": "On the conversation it came from",
   "quick_example_asked": "When you asked “{asked}”",
   "quick_example_said": "you said “{said}”",
   "quick_example_tool": "the tool reported “{said}”",
   "quick_example_same": "No visible change at the moment it came from",
-  "catching_up": "Catching up on your earlier conversations. After this, Quick Dreams take a few minutes.",
-  "next_after_quick": "Then the preferences in the prompt update",
-  "next_after_reading": "Then the preferences in the prompt update · a Deep Dream starts after a long quiet period",
+  "catching_up": "Catching up on earlier conversations · later Quick Dreams take minutes",
   "machine_line": "{name} · {memory} GB · can train models up to about {size}B (estimate)",
   "machine_gpus": "GPU {index} of {gpus}: ",
   "machine_cannot": "{name} · no GPU for training (serves only)",
-  "machine_title": "An estimate from this machine's memory, for dense models trained in 4-bit. Each model's real limit is measured before its first Deep Dream and shown on its page.",
+  "machine_title": "Estimate · dense models in 4-bit · each model is measured before its first Deep Dream",
   "training_window": "trains on up to {window} tokens per conversation",
   "training_served": "serves up to {served} · ",
   "training_limit": {
@@ -353,7 +363,7 @@
     "conversations": "enough for your conversations so far"
   },
   "training_example": "about {time} per example",
-  "training_unmeasured": "Training window: measured before its first Deep Dream",
+  "training_unmeasured": "Training window · measured before the first Deep Dream",
   "cloud": {
     "row": "Learn with a cloud model",
     "whats_sent": "What's sent?",
@@ -390,6 +400,96 @@
     "calls_total": "{calls} calls · {spent}",
     "not_sent": "not sent",
     "cost_unknown": "cost unknown",
-    "best_effort": "This endpoint reports no prices · the budget is best effort"
-  }
+    "best_effort": "This endpoint reports no prices · the budget is best effort",
+    "signature_off": "Learning stays on this machine",
+    "failed": "failed"
+  },
+  "check_change_raw": "{change} of {limit} allowed",
+  "original": "Original",
+  "yes": "Yes",
+  "no": "No",
+  "close": "Close",
+  "show_all": "Show all",
+  "no_tool_call": "No tool call",
+  "after_you_said": "after you said",
+  "after_signal": "after {signal}",
+  "dream_finished": "Dream finished",
+  "started": "started {when}",
+  "took": "took {time}",
+  "step_of": "step {step} of {total}",
+  "left": "about {time} left",
+  "count_of": "{done} of {total}",
+  "did": {
+    "read": "read {conversations}",
+    "kept": "{kept} of {scenes} kept",
+    "trained": "trained {steps}",
+    "ran": "ran {checks}"
+  },
+  "what_changed": "What changed",
+  "this_dream": "This Dream",
+  "show_fewer": "Show fewer",
+  "show_all_count": "Show all {count}",
+  "loading_all": "Loading all {count}…",
+  "load_failed": "Could not load · try again",
+  "no_practice": "No practice yet",
+  "no_signals": "No signals yet",
+  "successes_kept": "Kept aside · {answers}",
+  "not_measured_run": "not measured in this run",
+  "checking": "checking…",
+  "keeps_current": "Current version stays unless the new one passes",
+  "dreaming": "Dreaming",
+  "dreaming_paused": "Dreaming · paused",
+  "dreaming_waiting": "Dreaming · waiting",
+  "train_state": {
+    "done": "{steps} trained",
+    "ahead": "Not started",
+    "now": "Step {step} of {total} · loss after this step",
+    "stopped": "At step {step} of {total} · resumes here"
+  },
+  "train_samples": "{steps} · {practice} practice + {rehearsal} rehearsal",
+  "loss_line": "loss {first} → {last} over {steps}",
+  "loss_label": "Training loss by step",
+  "chip_reworded": "reworded",
+  "chip_not_used": "not used",
+  "chip_stopped": "stopped",
+  "chip_adopted": "adopted",
+  "rail": {
+    "label": "Models",
+    "unsupported": "Can't learn here",
+    "waiting": "Waiting · {wait}",
+    "dreaming": "Dreaming · {stage}",
+    "adopted": "{version} · better on {moments}",
+    "kept": "Kept its version",
+    "off": "Not learning",
+    "empty": "No conversations yet",
+    "collecting": "Collecting · {conversations}",
+    "more": "+ {count} more",
+    "fewer": "Fewer"
+  },
+  "lines": {
+    "not_answering": "Songe not answering",
+    "run_serve": "Run songe serve"
+  },
+  "no_models": "No models yet",
+  "empty": {
+    "off": [
+      "Not learning",
+      "Turn on Auto-dream to learn from new conversations"
+    ],
+    "none": [
+      "No conversations yet",
+      "Pick a songe/ model in your agent · /models in opencode, /model in pi"
+    ],
+    "pending": [
+      "No Dream yet",
+      "{conversations} collected · {next}"
+    ],
+    "next_auto": "dreams when idle, or press Dream",
+    "next_manual": "Auto-dream off · press Dream",
+    "next_idle": "dreams when idle · {idle}, or press Dream"
+  },
+  "request_failed": "request failed ({status})",
+  "label_in_use": "{version} in use",
+  "dream_stopped_early": "it ended early",
+  "idle_of": "{elapsed} of {limit}"
 }

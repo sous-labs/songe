@@ -49,7 +49,7 @@ def readable(value):
         (r"checks pass \+", "after checks pass and"),
         (r"needs more data", "after more conversations"),
         (r"needs data", "after your first conversations"),
-        (r"\bresume → ", "turn learning on → "),
+        (r"\bresume → ", "run songe resume → "),
         (r" → ", ", then "),
         (r"\bserve (?=\S)", "use "),
         (r"step (\d+)/(\d+)", r"Step \1 of \2"),
@@ -116,7 +116,7 @@ def status_copy(data):
             )
         )
     if data.get("paused") and not reason.startswith("pausing"):
-        return "Paused", "Turn Learning on to continue"
+        return "Paused", "Run songe resume to continue"
     if reason.startswith("pausing · "):
         # Progress is saved first, so the work picks up where it stopped.
         return "Pausing", capitalize(reason[10:]) + " · saving progress"
@@ -147,7 +147,8 @@ def status_copy(data):
             " · retries automatically"
         )
     if unsupported := re.match(r"unsupported · (.+)", reason):
-        return "Not supported yet", f"{unsupported[1]} · Choose another model"
+        # Next says "Choose another model"; Now names the model once.
+        return "Not supported yet", unsupported[1]
     if reason.startswith("preparing examples"):
         return "Preparing training data", re.sub(
             r"(\d+) examples waiting to learn",
@@ -216,13 +217,16 @@ def status_copy(data):
             ) else "Starts when idle"
         return ready, "Starts when idle · " + quiet.replace("/", " of ", 1)
     if "proxy requests in flight" in reason:
+        if tools := re.search(r"waiting up to (\d+) min for the agent's tool results", reason):
+            return "In use", f"The agent is running tools · learning waits up to {tools[1]} min"
         return "In use", "Continues after this conversation"
     if "checks passed" in reason:
         return "Update ready", "Applies when idle"
     if "the model server" in reason:
         # LM Studio (or another server) is closed: nothing is wrong with Songe.
         return "Model server not running", "Start it · retries automatically"
-    if "serving retained" in reason:
+    # "serving retained": the same failure as older services word it.
+    if re.search(r"learning failed · current version kept|serving retained", reason):
         return "Retrying after an error", "Current version kept · run songe doctor"
     if re.search(r"failed|doctor|unavailable", reason, re.I) and raw.startswith(
         "waiting"
@@ -414,6 +418,9 @@ def base_summary(model, data):
             "",
             re.sub(r" not supported yet$", "", readable(model.get("reason"))),
         )
+        # A reason that only repeats the title ("unsupported") is left out.
+        if detail.lower() in {"unsupported", "not supported yet"}:
+            detail = ""
         return "Not supported yet", " · ".join(
             filter(None, (detail, may_not_load(model)))
         )
@@ -607,7 +614,7 @@ def flow_state(value):
         ),
         (
             r"(?i)^Sleep could not complete; current version preserved$",
-            "a check failed · current version kept · retries automatically",
+            "learning failed · current version kept · retries automatically",
         ),
         (
             r"^[Nn]eeds ([\d.]+) GB free on (.+?); ([\d.]+) GB available$",

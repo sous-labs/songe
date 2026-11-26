@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 # scenes in a row stop the run.
 RETRY_WAITS = (10, 30)
 FAILED_IN_A_ROW = 3
+AT_ONCE = 8  # scenes of one plain-chat lesson answered at the same time
 
 
 class PracticeFailed(RuntimeError):
@@ -224,22 +225,58 @@ def asked(request):
     return ""
 
 
-async def like_messages(reader, request, count):
+LIKE_BATCH = 12
+
+
+def answered(store, signal):
+    """The answer the user's feedback was about: the logged response at the
+    earliest responsible step ("" when it is gone or has no text)."""
+    from ..parts import request_of
+
+    step = min(int(n) for n in signal["exchanges"])
+    with store.connect() as db:
+        row = request_of(db, signal["exchanges"][str(step)], "*")
+    try:
+        response = json.loads((row or {}).get("response") or "null")
+    except (TypeError, ValueError):
+        return ""
+    message = timeline.response_message(response) or {}
+    return timeline.text(message.get("content")).strip()
+
+
+async def like_messages(reader, request, count, answer=""):
     """`count` new user messages of the same kind as the one a plain chat's
-    lesson came from, in one answer (fewer when the model wrote fewer)."""
-    answer = await reader.ask(
-        P.LIKE.format(asked=timeline.clip(asked(request), 1200), count=count),
-        P.LIKE_SCHEMA,
-        "dream",
-        temperature=0.8,
-        max_tokens=300 + 150 * count,
-    )
+    lesson came from, asked for twelve at a time (fewer when the model wrote
+    fewer). With the answer the feedback was about, the writer sees it too."""
     seen, messages = set(), []
-    for text in answer.get("messages") or []:
-        text = text.strip() if isinstance(text, str) else ""
-        if text and text.lower() not in seen:
-            seen.add(text.lower())
-            messages.append(text)
+    for _ in range(-(-count // LIKE_BATCH) + 1):
+        n = min(LIKE_BATCH, count - len(messages))
+        if n <= 0:
+            break
+        said = timeline.clip(asked(request), 1200)
+        prompt = (
+            P.LIKE_ANSWER.format(asked=said, answer=answer[:1200], count=n)
+            if answer
+            else P.LIKE.format(asked=said, count=n)
+        )
+        if messages:
+            # A second call with the same words would get the first call's
+            # answer back (the reader caches by question): it is told what
+            # is written already.
+            prompt = prompt.replace(
+                "\n\nAnswer with JSON only",
+                "\n\nAlready written, write different ones:\n"
+                + "\n".join(f"- {m}" for m in messages)
+                + "\n\nAnswer with JSON only",
+            )
+        got = await reader.ask(
+            prompt, P.LIKE_SCHEMA, "dream", temperature=0.8, max_tokens=300 + 150 * n
+        )
+        for text in got.get("messages") or []:
+            text = text.strip() if isinstance(text, str) else ""
+            if text and text.lower() not in seen:
+                seen.add(text.lower())
+                messages.append(text)
     return messages[:count]
 
 
@@ -273,6 +310,25 @@ async def write_like(store, reader, signal, variant, request, items, lessons, te
     return row
 
 
+async def scene_row(store, reader, signal, v, request, items, lessons, workdir, text):
+    """One scene with its retries, as (row, None); (None, the last error)
+    after the last retry; or (Stopped, None), returned and not raised so the
+    scenes answered beside it are still saved. `text` is the new message of a
+    plain chat's scene, None for a scene with tools."""
+    for wait in (*RETRY_WAITS, None):
+        try:
+            if text is not None:
+                return await write_like(store, reader, signal, v, request, items, lessons, text), None
+            return await write_one(store, reader, signal, v, request, items, lessons, workdir), None
+        except Stopped as stop:
+            return stop, None
+        except Exception as exc:
+            logger.warning("practice_scene_failed %s#v%s: %s: %s", signal["id"], v, type(exc).__name__, exc)
+            if wait is None:
+                return None, exc
+            await asyncio.sleep(wait)
+
+
 async def write(store, reader, per_signal, *, limit=None):
     """Write missing scenes until done or the user returns. Returns how many
     scenes were written (kept or not)."""
@@ -292,35 +348,54 @@ async def write(store, reader, per_signal, *, limit=None):
         # kind the user sent, all written in one answer.
         plain = not request.get("tools") and bool(asked(request))
         texts = None
-        for v in variants:
-            row = None
+        if plain:
             for wait in (*RETRY_WAITS, None):
                 try:
-                    if plain and texts is None:
-                        texts = await like_messages(reader, request, len(variants))
-                    row = await (
-                        write_like(
-                            store, reader, signal, v, request, items, lessons,
-                            texts[variants.index(v)] if variants.index(v) < len(texts) else "",
-                        )
-                        if plain
-                        else write_one(store, reader, signal, v, request, items, lessons, workdir)
+                    texts = await like_messages(
+                        reader, request, len(variants),
+                        await asyncio.to_thread(answered, store, signal),
                     )
                     break
                 except Stopped:
                     return done
                 except Exception as exc:
-                    logger.warning("practice_scene_failed %s#v%s: %s: %s", signal["id"], v, type(exc).__name__, exc)
+                    logger.warning("practice_scene_failed %s: %s: %s", signal["id"], type(exc).__name__, exc)
                     last = exc
                     if wait is None:
                         break
                     await asyncio.sleep(wait)
-            if row is None:
+            if texts is None:
                 failed += 1
                 if failed >= FAILED_IN_A_ROW:
                     raise PracticeFailed(f"{type(last).__name__}: {last}") from last
                 continue
-            failed = 0
-            await asyncio.to_thread(save, store, row)
-            done += 1
+
+        # A plain chat's scenes do not share a workspace: AT_ONCE of them are
+        # answered at the same time. Scenes with tools stay one at a time.
+        step = AT_ONCE if plain else 1
+        for start in range(0, len(variants), step):
+            got = await asyncio.gather(
+                *(
+                    scene_row(
+                        store, reader, signal, v, request, items, lessons, workdir,
+                        (texts[variants.index(v)] if variants.index(v) < len(texts) else "") if plain else None,
+                    )
+                    for v in variants[start : start + step]
+                )
+            )
+            stopped = False
+            for row, error in got:
+                if isinstance(row, Stopped):
+                    stopped = True
+                elif row is None:
+                    failed += 1
+                    last = error
+                else:
+                    failed = 0
+                    await asyncio.to_thread(save, store, row)
+                    done += 1
+            if stopped:
+                return done
+            if failed >= FAILED_IN_A_ROW:
+                raise PracticeFailed(f"{type(last).__name__}: {last}") from last
     return done

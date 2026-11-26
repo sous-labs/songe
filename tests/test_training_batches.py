@@ -691,3 +691,173 @@ def test_mlx_teacher_is_the_cycle_start_snapshot(monkeypatch):
         assert not backend.model.training
     assert backend.model.weights["lora_a"].tolist() == [7.0, 8.0]
     assert backend.model.training and based == [True]
+
+
+def test_frozen_undoes_in_place_conv_and_recurrent_state_writes():
+    """A hybrid cache layer (Inkling-2) writes its convolution and recurrent
+    states in place. Under a frozen prefix those writes must be undone, or the
+    backward pass replays the layer on the window's own tail (CheckpointError).
+    Runs on transformers' own cache layer, without the Inkling-2 model code."""
+    from types import SimpleNamespace
+
+    torch = pytest.importorskip("torch")
+    cache_utils = pytest.importorskip("transformers.cache_utils")
+    from transformers.modeling_layers import GradientCheckpointingLayer
+
+    from songe.backends.torch import TorchBackend
+
+    layer = GradientCheckpointingLayer()
+    layer.gradient_checkpointing = True
+    state = cache_utils.LinearAttentionAndFullAttentionLayer()
+    state.update_conv_state(torch.arange(8.0).reshape(1, 2, 4))
+    state.update_recurrent_state(torch.ones(1, 2, 3))
+    conv = state.conv_states[0].clone()
+    recurrent = state.recurrent_states[0].clone()
+    owner = SimpleNamespace(torch=torch, _causal=lambda: torch.nn.Sequential(layer))
+    past = SimpleNamespace(layers=[state])
+
+    with TorchBackend.frozen(owner, past) as kept:
+        assert kept
+        full = state.update_conv_state(torch.full((1, 2, 2), 9.0))
+        assert full.shape[-1] == 6  # the prefix's states were read
+        state.update_recurrent_state(torch.full((1, 2, 3), 5.0))
+        torch.testing.assert_close(state.conv_states[0], conv, atol=0, rtol=0)
+        torch.testing.assert_close(state.recurrent_states[0], recurrent, atol=0, rtol=0)
+
+    assert "update_conv_state" not in vars(state)
+    assert "update_recurrent_state" not in vars(state)
+    state.update_conv_state(torch.full((1, 2, 2), 9.0))
+    assert not torch.equal(state.conv_states[0], conv)  # writes again after
+
+
+def test_a_resumed_paged_optimizer_gets_paged_states_again(monkeypatch):
+    """torch.load brings a paged state back flagged is_paged in ordinary
+    memory; bitsandbytes would then prefetch it as managed memory and the
+    process dies (Inkling-2-Mini, a Deep Dream resumed after a slice
+    deadline)."""
+    import sys
+    from types import ModuleType, SimpleNamespace
+
+    torch = pytest.importorskip("torch")
+    from songe.backends.torch import repage
+
+    made = []
+
+    def get_paged(*shape, dtype, device):
+        tensor = torch.zeros(*shape, dtype=dtype, device=device)
+        tensor.is_paged, tensor.page_deviceid = True, 0
+        made.append(tensor)
+        return tensor
+
+    functional = ModuleType("bitsandbytes.functional")
+    functional.get_paged = get_paged
+    monkeypatch.setitem(sys.modules, "bitsandbytes", ModuleType("bitsandbytes"))
+    monkeypatch.setitem(sys.modules, "bitsandbytes.functional", functional)
+    stale = torch.arange(6, dtype=torch.uint8)
+    stale.is_paged = True  # as torch.load restores it
+    small = torch.ones(3)
+    optimizer = SimpleNamespace(state={"p": {"step": 2, "state1": stale, "absmax1": small}})
+    repage(optimizer)
+    state = optimizer.state["p"]
+    assert state["state1"] is made[0] and torch.equal(state["state1"], stale)
+    assert state["absmax1"] is small and state["step"] == 2
+
+    # Without paged memory (no bitsandbytes build) the flag goes instead.
+    monkeypatch.setitem(sys.modules, "bitsandbytes.functional", ModuleType("bitsandbytes.functional"))
+    stale = torch.arange(6, dtype=torch.uint8)
+    stale.is_paged = True
+    optimizer = SimpleNamespace(state={"p": {"state1": stale}})
+    repage(optimizer)
+    assert optimizer.state["p"]["state1"] is stale and not stale.is_paged
+
+
+def test_the_samples_of_a_step_are_answered_together_and_each_gets_its_own(
+    config, tmp_path, monkeypatch
+):
+    pool = [{"id": name, "values": [0.1]} for name in ("a", "b", "c", "d", "e")]
+    backend = scalar_backend(config, monkeypatch, "torch", 2)
+    asked, given = [], []
+    backend.rollouts = lambda steps, seeds: (
+        asked.append(([s["id"] for s in steps], seeds))
+        or [[ord(s["id"])] for s in steps]
+    )
+    microbatch = backend.train_step
+
+    def train_step(step, optimizer, seed, rollout=None):
+        given.append((step["id"], seed, rollout))
+        return microbatch(step, optimizer, seed)
+
+    backend.train_step = train_step
+    train(backend, pool, [], private_dir(tmp_path / "work"), lambda *_: None)
+    # One batch per optimizer step; a step of one sample is answered alone.
+    assert asked == [(["a", "b"], [7613, 7614]), (["c", "d"], [7615, 7616])]
+    assert given == [
+        ("a", 7613, [97]),
+        ("b", 7614, [98]),
+        ("c", 7615, [99]),
+        ("d", 7616, [100]),
+        ("e", 7617, None),
+    ]
+
+
+def test_answers_made_together_are_the_answers_made_alone(tmp_path):
+    pytest.importorskip("torch")
+    from songe.backends.torch import TorchBackend
+    from songe.sleep.prompts import paired_prompts
+    from tests.crossplatform_helpers import tiny_model, torch_config
+
+    config = replace(torch_config(tiny_model(tmp_path / "base")), response_tokens=12)
+    config.torch_options = {**config.torch_options, "temperature": 0.0}
+    backend = TorchBackend(config)
+    steps = [
+        {"context": [{"role": "user", "content": text}], "hindsight": [], "tools": []}
+        for text in ("hi", "a much longer question than the others", "why?")
+    ]
+    seeds = [1, 2, 3]
+    together = backend.rollouts(steps, seeds)
+    alone = [
+        backend.sample(paired_prompts(backend.tokenizer, s, config)[0], seed=k)[0]
+        for s, k in zip(steps, seeds, strict=True)
+    ]
+    # Left padding is masked: each row reads only its own prompt.
+    assert together == alone
+    # A prompt longer than one read chunk is left to the one-at-a-time path.
+    backend.read_chunk = 4
+    assert backend.rollouts(steps, seeds) == [None, None, None]
+
+
+def test_answers_that_cannot_be_made_together_are_made_alone(tmp_path):
+    """An accelerator that runs out of memory without torch's own error (MPS
+    raises a RuntimeError), or a model that refuses a padded batch, ended the
+    Dream: the batch is only a shortcut, so its rows are answered one by one."""
+    pytest.importorskip("torch")
+    from songe.backends.torch import TorchBackend
+    from tests.crossplatform_helpers import tiny_model, torch_config
+
+    config = replace(torch_config(tiny_model(tmp_path / "base")), response_tokens=4)
+    backend = TorchBackend(config)
+    steps = [
+        {"context": [{"role": "user", "content": text}], "hindsight": [], "tools": []}
+        for text in ("hi", "why?")
+    ]
+    model = backend.model
+
+    def refuse(*args, **kwargs):
+        raise RuntimeError("MPS backend out of memory")
+
+    backend.model = _Calling(model, refuse)
+    assert backend.rollouts(steps, [1, 2]) == [None, None]
+    assert backend.model.training == model.training
+
+
+class _Calling:
+    """A model whose forward raises; everything else is the real model's."""
+
+    def __init__(self, model, forward):
+        self._model, self._forward = model, forward
+
+    def __call__(self, *args, **kwargs):
+        return self._forward(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._model, name)

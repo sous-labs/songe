@@ -105,14 +105,19 @@ def not_admitted(store):
 
 def practice_revisions(store):
     """{step id: revision} of every kept scene practice_steps returns (both
-    splits), read by SQLite: no scene is decoded."""
+    splits), read by SQLite: no scene is decoded. Like there, the scenes of
+    a lesson that may not be learned now are left out: measuring records the
+    scenes it measured, and counting more here asked for a new measurement
+    after every one (live: 87 minutes of measuring, no training)."""
     with store.connect() as db:
         rows = db.execute(
-            "SELECT id, rowid FROM practice WHERE model_id=? AND kept=1"
+            "SELECT id, rowid, json_extract(payload,'$.signal_id') FROM practice"
+            " WHERE model_id=? AND kept=1"
             " AND COALESCE(json_array_length(payload,'$.messages'), 0) > 0",
             (store.model_id,),
         ).fetchall()
-    return {"practice:" + scene: rowid for scene, rowid in rows}
+    waiting = not_admitted(store) if rows else set()
+    return {"practice:" + scene: rowid for scene, rowid, signal in rows if signal not in waiting}
 
 
 MOMENTS_PER_CONVERSATION = 3  # judged.PER_UNIT: a conversation's test moments

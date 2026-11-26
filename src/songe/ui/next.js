@@ -30,14 +30,19 @@ function duration(s) {
   if (s == null) return '';
   s = Math.round(s);
   if (s < 60) return `${s}s`;
-  if (s < 3600) return `${Math.round(s / 60)}m`;
-  return `${Math.floor(s / 3600)}h ${Math.round(s % 3600 / 60)}m`;
+  // Round to minutes first: 7170 s is "2h 0m", not "1h 60m".
+  const m = Math.round(s / 60);
+  return m < 60 ? `${m}m` : `${Math.floor(m / 60)}h ${m % 60}m`;
 }
 function value(unit, v) {
   if (v == null) return '–';
   if (unit === 'accuracy' || unit === 'share') return `${Math.round(v * 100)}%`;
-  return v.toFixed(4);
+  return v.toFixed(3);
 }
+// Spaces that never break: "step 4 of 5" stays on one line at phone width.
+const keep = text => String(text).replace(/ /g, ' ');
+const left = s => keep(fill(W.left, {time: duration(s)}));
+const countOf = (done, total, unit) => keep(fill(W.count_of, {done, total: plural(total, unit)}));
 function short(text, n) {
   text = String(text || '').replace(/\s+/g, ' ').trim();
   return text.length > n ? text.slice(0, n - 1) + '…' : text;
@@ -77,16 +82,17 @@ function noticeView() {
   return el('div', {class: 'notice', role: 'status', 'data-failure': String(notice.failure)},
     el('p', {}, notice.text, notice.action ? [' · ', el('button', {type: 'button', class: 'notice-action',
       onclick: () => { const run = notice.action.run; notice = null; run(); }}, notice.action.label)] : null),
-    el('button', {type: 'button', class: 'notice-close', 'aria-label': 'Close',
+    el('button', {type: 'button', class: 'notice-close', 'aria-label': W.close,
       onclick: () => { notice = null; clearTimeout(noticeTimer); render(); }}, '×'));
 }
+const failed = r => fill(W.request_failed, {status: r.status});
 async function control(action, payload) {
   if (busy) return;
   busy = true;
   try {
     const r = await fetch('/api/control', {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({action, ...payload})});
     const data = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(data.error || `request failed (${r.status})`);
+    if (!r.ok) throw new Error(data.error || failed(r));
     if (action === 'undo') say(W.restored);
     else if (action === 'pause' || action === 'resume') say(W.dream_notice[action]);
     else if (data.since) say(fill(W.quick_nothing, {when: when(data.since)}));  // nothing new since then
@@ -97,56 +103,12 @@ async function control(action, payload) {
   } finally { busy = false; refresh(); }
 }
 
-// ---- the three status lines ----
-function statusLines(models, inventory, paused) {
-  const name = id => inventory[id]?.name || id;
-  const activeId = Object.keys(models).find(id => models[id].current);
-  const active = activeId ? models[activeId] : null;
-  const lastId = Object.keys(models).filter(id => models[id].last).sort((a, b) => (models[b].last.ended_at || 0) - (models[a].last.ended_at || 0))[0];
-  const last = lastId ? models[lastId] : null;
-  if (active) {
-    const c = active.current;
-    const i = c.stages.findIndex(s => s.key === c.stage);
-    const stage = c.stages[i];
-    const p = stage.progress;
-    const now = p?.unit === 'calibration' ? fill(W.getting_ready_title, p)
-      : [W.stage[c.stage], p && (p.total ? `${p.done} of ${plural(p.total, p.unit)}` : plural(p.done, p.unit)), stage.state === 'now' && stage.eta_seconds != null && `about ${duration(stage.eta_seconds)} left`].filter(Boolean).join(' · ');
-    const following = c.stages.slice(i + 1).find(s => s.state === 'ahead');
-    const next = following && following.key !== 'result' ? `${W.stage[following.key]} · after ${W.stage[c.stage].toLowerCase()}`
-      : 'Result · uses the new version only if it passes its checks';
-    return [`${name(activeId)} · ${now}`, c.wait ? W.wait[c.wait.code] : next];
-  }
-  // Measuring this machine (not a Dream).
-  const measuringId = Object.keys(models).find(id => models[id].measuring_machine);
-  if (measuringId) {
-    const m = models[measuringId].measuring_machine;
-    return [`${name(measuringId)} · ${W.measuring_short}${m.total ? ` · ${fill(W.measuring_progress, m)}` : ''}`, W.measuring_next];
-  }
-  // Reading (in the background, or a Quick Dream): say that, and what follows.
-  const readingId = Object.keys(models).find(id => models[id].quick_running);
-  if (readingId) {
-    const q = models[readingId].quick_running;
-    const now = [W.quick_title[q.kind] || W.quick_title.quick,
-      q.stage === 'read' && q.total ? `${q.done} of ${plural(q.total, 'conversations_read')}` : null,
-      q.stage === 'read' && q.eta_seconds != null ? `about ${duration(q.eta_seconds)} left` : null].filter(Boolean).join(' · ');
-    return [`${name(readingId)} · ${now}`, q.kind === 'quick' ? W.next_after_quick : W.next_after_reading];
-  }
-  // What the next Deep Dream waits on, when it is conversations to check with.
-  const short = Object.values(models).map(m => m.collecting).find(Boolean);
-  const needs = short && fill(W.collecting_next, {count: short.need - short.have, s: short.need - short.have === 1 ? '' : 's'});
-  if (last) {
-    const r = last.last.result;
-    const auto = inventory[lastId]?.auto_dream ?? true;
-    return [`Idle · ${r?.outcome === 'adopted' ? `${name(lastId)} moved to ${r.version}` : `last Deep Dream not used`} ${when(last.last.ended_at)}`,
-      needs || (auto ? 'Dreams again when your computer is idle' : 'Auto-dream is off · press Dream to run one')];
-  }
-  const firstId = Object.keys(models)[0];
-  const pending = models[firstId]?.pending;
-  const auto = inventory[firstId]?.auto_dream ?? true;
-  return [`Collecting · ${pending ? plural(pending.conversations, 'conversations') : ''} recorded`,
-    auto ? 'Press Dream to learn now, or it starts when idle' : 'Auto-dream is off · press Dream to run one'];
+// What a Dream waits for, with its numbers when the service sends them
+// ("Waits for free memory · 9.6 GB free · needs 13.2 GB").
+function waitText(wait) {
+  const words = W.wait[wait.code] || W.wait.error;
+  return wait.have != null && wait.need != null ? `${words} · ${fill(W.wait.numbers, wait)}` : words;
 }
-
 // ---- before/after ----
 // Long absolute paths say little; keep the last two parts.
 // What the user would see of an answer: no private reasoning, no tool-call
@@ -204,23 +166,23 @@ function answerBox(kind, answer, other, key) {
   const text = tidy(visible(answer.text)), otherText = tidy(visible(other.text));
   const call = callText(answer), otherCall = callText(other);
   const body = callBody(answer), otherBody = callBody(other);
-  const more = el('button', {type: 'button', class: 'more'}, open.has(key) ? 'Show less' : 'Show all');
+  const more = el('button', {type: 'button', class: 'more'}, open.has(key) ? W.view_less : W.show_all);
   const box = el('div', {class: `answer ${kind}`, 'data-open': String(open.has(key))},
     el('h4', {}, W[kind]),
-    el('div', {class: call ? 'call' : 'call none'}, call ? marked(call, otherCall, kind) : 'No tool call'),
+    el('div', {class: call ? 'call' : 'call none'}, call ? marked(call, otherCall, kind) : W.no_tool_call),
     body ? el('pre', {class: 'call-body'}, marked(body, otherBody, kind)) : null,
     text ? el('div', {class: 'prose'}, marked(text, otherText, kind)) : null,
     text.length > 280 || body.split('\n').length > 8 ? more : null);
   more.onclick = () => {
     if (open.has(key)) open.delete(key); else open.add(key);
     box.dataset.open = String(open.has(key));
-    more.textContent = open.has(key) ? 'Show less' : 'Show all';
+    more.textContent = open.has(key) ? W.view_less : W.show_all;
   };
   return box;
 }
 function example(e) {
   const from = e.source === 'original' ? W.example_source.original : W.example_source.practice;
-  const said = e.signal.source === 'user' ? 'after you said' : `after ${W.signal_type[e.signal.type]}`;
+  const said = e.signal.source === 'user' ? W.after_you_said : fill(W.after_signal, {signal: W.signal_type[e.signal.type]});
   return el('article', {class: 'example'},
     // What to look for first: the lesson this moment is about.
     e.lesson ? el('p', {class: 'example-lesson'}, el('span', {class: 'muted'}, `${W.example_lesson} · `), short(e.lesson, 160)) : null,
@@ -234,8 +196,9 @@ function example(e) {
 function when(sec) {
   if (sec == null) return '';
   const d = new Date(sec * 1000), today = new Date();
-  const time = d.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
-  return d.toDateString() === today.toDateString() ? `today ${time}` : `${d.toLocaleDateString([], {month: 'short', day: 'numeric'})} ${time}`;
+  // English like the rest of the page, whatever the browser's language.
+  const time = d.toLocaleTimeString('en-US', {hour: '2-digit', minute: '2-digit', hourCycle: 'h23'});
+  return d.toDateString() === today.toDateString() ? `today ${time}` : `${d.toLocaleDateString('en-US', {month: 'short', day: 'numeric'})} ${time}`;
 }
 // The result in words. After an undo, an adopted version was used then,
 // not now.
@@ -248,37 +211,41 @@ function finished(c, current) {
   const done = r.outcome === 'adopted';
   const by = Object.fromEntries(c.stages.map(s => [s.key, s.progress]));
   const did = [
-    by.read && `read ${plural(by.read.total, 'conversations')}`,
+    by.read && fill(W.did.read, {conversations: plural(by.read.total, 'conversations')}),
     // Practice counts scenes written (no total): the same words as its row.
-    c.practice?.written && `${c.practice.kept} of ${plural(c.practice.written, 'scenes')} kept`,
-    c.train.total && `trained ${plural(c.train.total, 'steps')}`,
-    by.check && `ran ${plural(by.check.done, 'checks')}`,
+    c.practice?.written && fill(W.did.kept, {kept: c.practice.kept, scenes: plural(c.practice.written, 'scenes')}),
+    c.train.total && fill(W.did.trained, {steps: plural(c.train.total, 'steps')}),
+    by.check && fill(W.did.ran, {checks: plural(by.check.done, 'checks')}),
   ].filter(Boolean).join(' · ');
   return el('div', {class: `finished ${done ? 'adopted' : 'kept'}`},
-    el('p', {class: 'finished-title'}, el('span', {class: 'tick'}, '✓'), ' Dream finished',
-      el('span', {class: 'muted'}, ` · ${when(c.ended_at)} · took ${duration(c.ended_at - c.started_at)}`)),
+    el('p', {class: 'finished-title'}, el('span', {class: 'tick'}, '✓'), ` ${W.dream_finished}`,
+      el('span', {class: 'muted'}, ' · ', meta(when(c.ended_at), fill(W.took, {time: duration(c.ended_at - c.started_at)})))),
     // After an undo it was adopted then, and is not what runs now.
     el('p', {class: 'finished-outcome'}, outcomeText(r), el('span', {class: 'muted'}, ` · ${W.reason[r.reason]}`)),
-    done && r.in_use === false ? el('p', {class: 'finished-outcome muted'}, fill(W.undone, {version: r.version, current: current?.label || 'Original'})) : null,
+    done && r.in_use === false ? el('p', {class: 'finished-outcome muted'}, fill(W.undone, {version: r.version, current: current?.label || W.original})) : null,
     el('p', {class: 'muted'}, did));
 }
+// Parts of a meta line, each kept whole when the line wraps.
+const meta = (...parts) => parts.filter(Boolean).map(keep).join(' · ');
 // The same spot as "Dream finished", while a Dream runs: which stage, how far.
 function dreaming(c) {
   const i = c.stages.findIndex(s => s.key === c.stage);
   const stage = c.stages[i], p = stage.progress;
   const now = c.stage === 'measure' || p?.unit === 'calibration' ? fill(W.getting_ready_title, p || {done: 0, total: '?'})
-    : [W.stage[c.stage], p && p.total && `${p.done} of ${plural(p.total, p.unit)}`,
-      stage.state === 'now' && stage.eta_seconds != null && `about ${duration(stage.eta_seconds)} left`].filter(Boolean).join(' · ');
+    : [W.stage[c.stage], p && p.total && countOf(p.done, p.total, p.unit),
+      stage.state === 'now' && stage.eta_seconds != null && left(stage.eta_seconds)].filter(Boolean).join(' · ');
   const steps = el('div', {class: 'steps', 'aria-hidden': 'true', style: `grid-template-columns:repeat(${c.stages.length},1fr)`}, c.stages.map(s => {
     const share = s.state === 'done' ? 1 : s.state === 'now' || s.state === 'waiting' ? (s.progress?.total ? s.progress.done / s.progress.total : 0) : 0;
     return el('span', {title: W.stage[s.key]}, el('i', {style: `width:${Math.round(share * 100)}%`}));
   }));
   return el('div', {class: `finished running${c.wait ? ' waiting' : ''}`},
-    el('p', {class: 'finished-title'}, el('span', {class: 'tick'}, c.wait ? '‖' : '●'), c.wait ? ' Dreaming · paused' : ' Dreaming',
-      el('span', {class: 'muted'}, ` · started ${when(c.started_at)} · step ${i + 1} of ${c.stages.length}`)),
-    el('p', {class: 'finished-outcome'}, c.wait ? W.wait[c.wait.code] : now),
+    el('p', {class: 'finished-title'}, el('span', {class: 'tick'}, c.wait ? '‖' : '●'),
+      // Paused is the viewer's own choice; any other wait is Songe's.
+      ` ${c.wait ? (c.wait.code === 'paused' ? W.dreaming_paused : W.dreaming_waiting) : W.dreaming}`,
+      el('span', {class: 'muted'}, ' · ', meta(fill(W.started, {when: when(c.started_at)}), fill(W.step_of, {step: i + 1, total: c.stages.length})))),
+    el('p', {class: 'finished-outcome'}, c.wait ? waitText(c.wait) : now),
     steps,
-    el('p', {class: 'muted'}, 'Keeps the current version unless the new one passes its checks'),
+    el('p', {class: 'muted'}, W.keeps_current),
     el('p', {class: 'dream-actions'},
       // Pause only suspends a Dream; Cancel throws this one away.
       el('button', {type: 'button', class: 'text-action', onclick: () => {
@@ -294,15 +261,15 @@ function improvedText(i) {
 function whatChanged(c) {
   const r = c.result;
   const section = el('section', {class: 'changed'},
-    el('h3', {class: 'section-title'}, 'What changed', r.improved?.count != null ? el('span', {class: 'muted'}, ` · ${improvedText(r.improved)}`) : null));
+    el('h3', {class: 'section-title'}, W.what_changed, r.improved?.count != null ? el('span', {class: 'muted'}, ` · ${improvedText(r.improved)}`) : null));
   if (!r.examples.length) {
     // Never judged (made before the check existed): say so, not "none improved".
     section.append(el('p', {class: 'empty'}, r.improved?.count == null && r.improved?.available ? W.examples_unchecked : W.nothing_improved));
     const h = r.held_out;
     if (h && h.change != null && h.margin != null) {
-      const n = v => (v >= 0 ? '+' : '') + v.toFixed(4);
+      const n = v => (v >= 0 ? '+' : '') + v.toFixed(3);
       section.append(el('p', {class: 'muted'}, fill(h.change > h.margin ? W.held_out_passed : W.held_out_failed,
-        {change: n(h.change), margin: h.margin.toFixed(4)})));
+        {change: n(h.change), margin: h.margin.toFixed(3)})));
     }
   } else section.append(el('div', {class: 'examples'}, r.examples.map(example)));
   return section;
@@ -315,9 +282,9 @@ function deepReport(c, current, done) {
     // The outcome is the heading (no "Dream finished" box).
     el('div', {class: 'report-head'},
       el('p', {class: 'report-title'}, outcomeText(r), el('span', {class: 'muted'}, ` · ${W.reason[r.reason]}`)),
-      el('p', {class: 'muted'}, `${W.dream_kinds.deep.title} · ${when(c.ended_at)} · took ${duration(c.ended_at - c.started_at)}`),
+      el('p', {class: 'muted'}, meta(W.dream_kinds.deep.title, when(c.ended_at), fill(W.took, {time: duration(c.ended_at - c.started_at)}))),
       r.outcome === 'adopted' && r.in_use === false
-        ? el('p', {class: 'muted'}, fill(W.undone, {version: r.version, current: current?.label || 'Original'})) : null),
+        ? el('p', {class: 'muted'}, fill(W.undone, {version: r.version, current: current?.label || W.original})) : null),
     whatChanged(c),
     cycleView(c, W.how_it_went),
     done ? el('p', {class: 'report-done'}, el('button', {type: 'button', class: 'done', onclick: done}, W.done)) : null);
@@ -344,7 +311,7 @@ function quickReport(entry, {card = false, done = null, lessons = [], model = nu
     entry.error ? el('p', {class: 'bad'}, W.quick_failed_card[entry.error] || W.quick_failed_card.unreadable)
       : added.length ? el('p', {}, plural(added.length, 'new_preferences'), el('span', {class: 'muted'}, ` · ${plural(entry.lessons, 'preferences')}`))
       : el('p', {}, W.no_new_preferences, el('span', {class: 'muted'}, ` · ${plural(entry.lessons, 'preferences')}`)),
-    entry.read != null && !entry.error ? el('p', {class: 'muted'}, fill(W.quick_read_found, {read: plural(entry.read, 'conversations'), found: plural(entry.found || 0, 'moments')})) : null,
+    entry.read != null && !entry.error ? el('p', {class: 'muted'}, fill(W.quick_read_found, {read: plural(entry.read, 'conversations'), found: plural(entry.found || 0, 'signals')})) : null,
     added.length ? el('ul', {class: 'changes'}, added.map(t => el('li', {class: 'added'},
       el('span', {class: 'sign'}, '+'), el('span', {class: 'text'}, t,
         quickExample(entry, t))))) : null,
@@ -382,8 +349,8 @@ function dreamRow(id, dreams, chosen) {
     el('span', {class: 'chip-kind'}, d.kind === 'quick' ? W.chip_quick : W.chip_deep),
     el('span', {class: 'chip-what'}, d.kind === 'quick'
       ? (d.error ? W.chip_failed : d.changes.added.length ? `+${d.changes.added.length}`
-        : d.changes.reworded.length ? 'reworded' : `${W.chip_no_change}${d.repeat > 1 ? ` ×${d.repeat}` : ''}`)
-      : d.outcome === 'adopted' ? d.version || 'adopted' : d.outcome === 'kept' ? 'not used' : 'stopped'),
+        : d.changes.reworded.length ? W.chip_reworded : `${W.chip_no_change}${d.repeat > 1 ? ` ×${d.repeat}` : ''}`)
+      : d.outcome === 'adopted' ? d.version || W.chip_adopted : d.outcome === 'kept' ? W.chip_not_used : W.chip_stopped),
     el('span', {class: 'chip-when'}, when(d.at)),
     d.seen ? null : el('span', {class: 'chip-new'}, W.chip_new))));
 }
@@ -418,7 +385,7 @@ function nowLine(id, ml) {
     fill(W.now_line, {prefs: plural((ml?.lessons || []).length, 'preferences'), waiting: plural(waiting.total, 'skills')}),
     // A Quick Dream that found nothing new leaves no card: this line says it ran.
     ml?.quick_checked?.nothing_new ? el('span', {class: 'muted'}, ` · ${ml.quick_checked.read
-      ? fill(W.quick_checked_read, {when: when(ml.quick_checked.at), read: plural(ml.quick_checked.read, 'conversations'), found: plural(ml.quick_checked.found || 0, 'moments')})
+      ? fill(W.quick_checked_read, {when: when(ml.quick_checked.at), read: plural(ml.quick_checked.read, 'conversations'), found: plural(ml.quick_checked.found || 0, 'signals')})
       : fill(W.quick_checked, {when: when(ml.quick_checked.at)})}`) : null,
     // A Quick Dream that could not read, or not start: said, not "nothing new".
     ml?.quick_checked?.error ? el('span', {class: 'bad'}, ` · ${fill(W.quick_failed[ml.quick_checked.error] || W.quick_failed.unreadable, {when: when(ml.quick_checked.at), count: ml.quick_checked.failed || ''})}`) : null,
@@ -445,7 +412,7 @@ function lossChart(losses) {
   const points = losses.map((v, i) => `${(i / (losses.length - 1) * w).toFixed(1)},${(h - 2 - (v - min) / (max - min || 1) * (h - 4)).toFixed(1)}`).join(' ');
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
   svg.setAttribute('viewBox', `0 0 ${w} ${h}`); svg.setAttribute('width', w); svg.setAttribute('height', h);
-  svg.setAttribute('class', 'loss'); svg.setAttribute('aria-label', 'Training loss by step');
+  svg.setAttribute('class', 'loss'); svg.setAttribute('aria-label', W.loss_label);
   const line = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
   line.setAttribute('points', points);
   svg.append(line);
@@ -464,12 +431,12 @@ function practiceRows(lines) {
 function stageDetail(c, s) {
   const p = s.progress;
   switch (s.key) {
-    case 'read': return p ? `${p.done} of ${plural(p.total, 'conversations')} · ${c.read.signals.total} signals` : '';
-    case 'practice': return c.practice.written ? `${c.practice.kept} of ${plural(c.practice.written, 'scenes')} kept` : '';
-    case 'train': return s.state === 'done' ? `${plural(c.train.total, 'steps')} · ${c.train.samples.practice} practice + ${c.train.samples.rehearsal} rehearsal`
+    case 'read': return p ? `${countOf(p.done, p.total, 'conversations')} · ${plural(c.read.signals.total, 'signals')}` : '';
+    case 'practice': return c.practice.written ? fill(W.did.kept, {kept: c.practice.kept, scenes: plural(c.practice.written, 'scenes')}) : '';
+    case 'train': return s.state === 'done' ? fill(W.train_samples, {steps: plural(c.train.total, 'steps'), practice: c.train.samples.practice, rehearsal: c.train.samples.rehearsal})
       // Step 0 is a real position (the first step is running), not "nothing".
-      : s.state !== 'ahead' && c.train.total ? `step ${c.train.step || 0} of ${c.train.total}${s.state === 'now' && s.eta_seconds != null ? ` · about ${duration(s.eta_seconds)} left` : ''}` : '';
-    case 'check': return p?.done ? `${p.done} of ${plural(p.total, p.unit || 'checks')}` : '';
+      : s.state !== 'ahead' && c.train.total ? meta(fill(W.step_of, {step: c.train.step || 0, total: c.train.total}), s.state === 'now' && s.eta_seconds != null && left(s.eta_seconds)) : '';
+    case 'check': return p?.done ? countOf(p.done, p.total, p.unit || 'checks') : '';
     case 'result': return c.result ? `${outcomeText(c.result)} · ${W.reason[c.result.reason]}` : '';
   }
   return '';
@@ -489,10 +456,10 @@ function stageBody(c, s) {
       total ? el('p', {class: 'read-headline'}, fill(W.read_headline, {
         signals: plural(total, 'signals'),
         conversations: plural(c.read.conversations.done, 'conversations'),
-      })) : el('p', {}, 'No signals yet'),
+      })) : el('p', {}, W.no_signals),
       groups.length ? el('dl', {class: 'signal-groups'}, groups.map(([source, text]) => [
         el('dt', {}, W.signal_source[source]), el('dd', {}, text)])) : null,
-      el('p', {class: 'muted'}, `${c.read.successes.confirmed} things it already did right are kept aside, to check it does not lose them.`),
+      el('p', {class: 'muted'}, fill(W.successes_kept, {answers: plural(c.read.successes.confirmed, 'answers_right')})),
     ].filter(Boolean));
   } else if (s.key === 'practice') {
     const full = fullRecords.get(c.id);
@@ -500,16 +467,16 @@ function stageBody(c, s) {
     // The list's toggle sits above it, in the same place open or closed,
     // so the long list never needs a scroll down to collapse.
     if (full && lines.length > 5) {
-      body.append(el('button', {type: 'button', class: 'show-all', onclick: () => { fullRecords.delete(c.id); render(); }}, 'Show fewer'));
+      body.append(el('button', {type: 'button', class: 'show-all', onclick: () => { fullRecords.delete(c.id); render(); }}, W.show_fewer));
     } else if (!full && c.practice.written > lines.length) {
       const state = loadingFull.get(c.id);
       body.append(state === 'loading'
         ? el('button', {type: 'button', class: 'show-all loading', disabled: true, 'aria-busy': 'true'},
-            el('span', {class: 'spinner', 'aria-hidden': 'true'}), `Loading all ${c.practice.written}…`)
+            el('span', {class: 'spinner', 'aria-hidden': 'true'}), fill(W.loading_all, {count: c.practice.written}))
         : el('button', {type: 'button', class: 'show-all', onclick: () => loadFull(c.id)},
-            state === 'failed' ? 'Could not load · try again' : `Show all ${c.practice.written}`));
+            state === 'failed' ? W.load_failed : fill(W.show_all_count, {count: c.practice.written})));
     }
-    body.append(lines.length ? practiceRows(lines) : el('p', {class: 'muted'}, 'No practice yet'));
+    body.append(lines.length ? practiceRows(lines) : el('p', {class: 'muted'}, W.no_practice));
   } else if (s.key === 'measure') {
     // Its own step: sizes tried, the limit, no loss chart or step counter.
     body.append(el('p', {class: 'muted'}, W.measure_about),
@@ -523,21 +490,25 @@ function stageBody(c, s) {
     // Before the first loss: where training stands, not "Not started".
     // Measuring what fits before the first step: getting ready, not "Not started".
     const measuring = s.progress?.unit === 'calibration' && !losses.length;
-    const waiting = s.state === 'done' ? `${plural(total || 0, 'steps')} trained`
+    const T = W.train_state;
+    const waiting = s.state === 'done' ? fill(T.done, {steps: plural(total || 0, 'steps')})
       : measuring ? fill(W.getting_ready, s.progress)
-      : !total || s.state === 'ahead' ? 'Not started'
-      : s.state === 'now' ? `Working on step ${step + 1} of ${total} · the loss line starts after it`
-      : `At step ${step} of ${total} · carries on where it stopped`;
-    body.append(...[lossChart(losses)].filter(Boolean), losses.length ? el('p', {class: 'muted'}, `loss ${losses[0].toFixed(3)} → ${losses.at(-1).toFixed(3)} over ${plural(losses.length, 'steps')}`) : el('p', {class: 'muted'}, waiting));
+      : !total || s.state === 'ahead' ? T.ahead
+      : fill(s.state === 'now' ? T.now : T.stopped, {step: s.state === 'now' ? step + 1 : step, total});
+    body.append(...[lossChart(losses)].filter(Boolean), losses.length ? el('p', {class: 'muted'}, fill(W.loss_line, {first: losses[0].toFixed(3), last: losses.at(-1).toFixed(3), steps: plural(losses.length, 'steps')})) : el('p', {class: 'muted'}, waiting));
   } else if (s.key === 'check') {
+    // A limit check reads as a share of what is allowed ("22% of limit");
+    // the raw numbers stay in its tooltip.
+    const limited = k => el('span', {title: fill(W.check_change_raw, {change: value(k.unit, k.after), limit: value(k.unit, k.limit)})},
+      fill(W.check_change, {share: k.limit ? Math.round(k.after / k.limit * 100) : '–'}));
     body.append(el('div', {class: 'rows checks'}, ...c.checks.map(k => el('div', {class: 'row'},
       el('span', {}, W.check[k.key]),
       el('span', {},
-        k.missing ? el('span', {class: 'muted'}, 'not measured in this run')
-          : k.state !== 'done' ? el('span', {class: 'muted'}, k.state === 'now' ? 'checking…' : '')
+        k.missing ? el('span', {class: 'muted'}, W.not_measured_run)
+          : k.state !== 'done' ? el('span', {class: 'muted'}, k.state === 'now' ? W.checking : '')
           : k.unit === 'judged' ? improvedText(k.judged)
           : k.unit === 'health' ? (k.passed === false ? (W.health_fail[k.text] || k.text) : k.passed ? W.health_ok : k.text === 'not_reached' ? el('span', {class: 'muted'}, W.health_not_reached) : '')
-          : k.limit != null ? (k.after != null ? fill(W.check_change, {change: value(k.unit, k.after), limit: value(k.unit, k.limit)}) : el('span', {class: 'muted'}, W.check_not_measured))
+          : k.limit != null ? (k.after != null ? limited(k) : el('span', {class: 'muted'}, W.check_not_measured))
           : `${value(k.unit, k.before)} → ${value(k.unit, k.after)}`,
         k.passed === true ? el('span', {class: 'good'}, ' ✓') : k.passed === false ? el('span', {class: 'bad'}, ' ✗')
           : k.state === 'done' ? el('span', {class: 'muted'}, ' –') : null))),
@@ -608,6 +579,16 @@ function trainingLine(ml) {
   const line = parts.join(' · ');
   return el('p', {class: 'model-facts muted'}, line[0].toUpperCase() + line.slice(1));
 }
+// How long it has been idle, when a Dream for this model starts on idle
+// ("6m of 10m"); null when idle time is not what it waits on.
+let activity = null;          // status.activity from the last poll
+function idleFor(id) {
+  const a = activity;
+  if (!a || a.model !== id || !String(a.now || '').startsWith('waiting · proxy idle')) return null;
+  if (a.idle_elapsed_seconds == null || !a.idle_threshold_seconds) return null;
+  const limit = a.idle_threshold_seconds;
+  return fill(W.idle_of, {elapsed: duration(Math.min(a.idle_elapsed_seconds, limit)), limit: duration(limit)});
+}
 function quiet(ml, inv, text) {
   return el('section', {class: 'changed'}, el('div', {class: 'finished kept'},
     el('p', {class: 'finished-title'}, text[0]), text[1] ? el('p', {class: 'finished-outcome muted'}, text[1]) : null));
@@ -619,7 +600,7 @@ function modelView(id, ml, inv, paused = false) {
   // practice replayed); the viewer only chooses whether Dreams start alone.
   const auto = inv?.auto_dream ?? level !== 'off';
   const autoSwitch = el('button', {type: 'button', class: 'auto', role: 'switch', 'aria-checked': String(auto),
-    title: W.auto_dream_title, onclick: () => control('auto_dream', {model: id, on: !auto})},
+    title: [W.auto_dream_title, idleFor(id)].filter(Boolean).join(' · '), onclick: () => control('auto_dream', {model: id, on: !auto})},
     el('span', {class: 'track', 'aria-hidden': 'true'}, el('span', {class: 'knob'})), W.auto_dream);
   const current = ml?.versions?.find(v => v.current);
   // One button follows the Dream: start it, pause it, resume it. Pausing is
@@ -645,7 +626,8 @@ function modelView(id, ml, inv, paused = false) {
   const node = el('section', {class: 'model'},
     el('div', {class: 'model-head'},
       el('h2', {class: 'model-name'}, inv?.name || id),
-      el('span', {class: 'version'}, current ? `${current.label} in use` : ''),
+      // A model that cannot learn here has no versions to speak of.
+      el('span', {class: 'version'}, current && !unsupported ? fill(W.label_in_use, {version: current.label}) : ''),
       el('span', {class: 'spacer'}), unsupported ? null : autoSwitch, unsupported ? null : dream),
     unsupported ? null : trainingLine(ml),
     noticeView(),
@@ -656,7 +638,7 @@ function modelView(id, ml, inv, paused = false) {
     !ml?.measuring_machine && ml?.machine_measured ? el('div', {class: 'notice', role: 'status', 'data-failure': String(ml.machine_measured.support === 'unsupported')},
       el('p', {}, fill(ml.machine_measured.support === 'unsupported' ? W.measured_cannot : W.measured_can,
         {name: inv?.name || id, reason: ml.machine_measured.reason || ''})),
-      el('button', {type: 'button', class: 'notice-close', 'aria-label': 'Close',
+      el('button', {type: 'button', class: 'notice-close', 'aria-label': W.close,
         onclick: () => control('seen', {model: id, id: 'measured'})}, '×')) : null,
     // A pressed Deep Dream that stopped before training says so until closed.
     ml?.stopped && !ml?.current ? stoppedNote(id, ml.stopped) : null,
@@ -669,22 +651,24 @@ function modelView(id, ml, inv, paused = false) {
   const dreams = ml?.dreams || [];
   const latest = dreams[0];
   const seen = d => () => control('seen', {model: id, id: d.id});
-  if (unsupported) node.append(quiet(ml, inv, [W.wait.unsupported, inv.reason && `It is ${inv.reason}.`]));
+  if (unsupported) node.append(quiet(ml, inv, [W.wait.unsupported, inv.reason]));
   else if (running === 'deep' && !away) {
     // A Deep Dream running: the learning view.
-    node.append(backLink(id), el('section', {class: 'changed'}, dreaming(ml.current)), cycleView(ml.current, 'This Dream'));
+    node.append(backLink(id), el('section', {class: 'changed'}, dreaming(ml.current)), cycleView(ml.current, W.this_dream));
   } else if (running === 'quick' && !away) {
     // A Quick Dream running: its view above is the page.
   } else if (latest && !latest.seen && latest.kind === 'deep' && ml.last?.id === latest.id) {
     // Just finished and not seen yet: its report, until Done.
     node.append(deepReport(ml.last, ml.versions?.find(v => v.current), seen(latest)));
   } else if (!dreams.length) {
+    const E = W.empty;
     node.append(level === 'off'
-      ? quiet(ml, inv, ['Not learning yet', 'Turn on auto-dream to let it learn from your new conversations.'])
+      ? quiet(ml, inv, E.off)
       : !ml?.pending?.conversations
         // Nothing recorded yet: the agent is probably not on a songe/ model.
-        ? quiet(ml, inv, ['No conversations yet', 'Pick a Songe model in your agent (/models in opencode, /model in pi) and work as usual. Songe learns from those conversations.'])
-        : quiet(ml, inv, ['No Dream yet', `${plural(ml.pending.conversations, 'conversations')} collected so far. ${auto ? 'It dreams when your computer is idle, or press Dream.' : 'Auto-dream is off: press Dream to run one.'}`]));
+        ? quiet(ml, inv, E.none)
+        : quiet(ml, inv, [E.pending[0], fill(E.pending[1], {conversations: plural(ml.pending.conversations, 'conversations'), next: !auto ? E.next_manual
+          : idleFor(id) ? fill(E.next_idle, {idle: idleFor(id)}) : E.next_auto})]));
     if (level !== 'off') node.append(nowLine(id, ml));
   } else {
     // The dashboard: a new Quick Dream on top, the Dream row, the chosen
@@ -695,11 +679,13 @@ function modelView(id, ml, inv, paused = false) {
     }
     // While the new Quick Dream is the card on top, the row opens on the
     // Dream before it, so its report is not shown twice.
+    // When that card is the only Dream, the row has nothing else to open.
     const chosen = dreams.find(d => d.id === selectedDream[id]) || (card && dreams[1]) || dreams[0];
-    node.append(
+    const twice = card && chosen.id === latest.id;
+    node.append(...[
       el('section', {class: 'dreams'}, el('h3', {class: 'section-title'}, W.dreams_title), dreamRow(id, dreams, chosen.id)),
-      el('section', {class: 'chosen-report'}, rowReport(id, ml, chosen)),
-      nowLine(id, ml));
+      twice ? null : el('section', {class: 'chosen-report'}, rowReport(id, ml, chosen)),
+      nowLine(id, ml)].filter(Boolean));
   }
   if (!unsupported && ml?.versions?.length) node.append(versionsView(id, ml.versions));
   return node;
@@ -709,15 +695,17 @@ function modelView(id, ml, inv, paused = false) {
 function stoppedDetail(detail) {
   const known = Object.entries(W.dream_stopped_why).find(([k]) => String(detail || '').startsWith(k));
   if (known) return known[1];
-  const d = String(detail || 'it ended early').replace(/\.$/, '');
+  const d = String(detail || W.dream_stopped_early).replace(/\.$/, '');
   return d.charAt(0).toLowerCase() + d.slice(1);
 }
 function stoppedNote(id, stopped) {
+  const text = [fill(W.dream_stopped[stopped.reason] || W.dream_stopped.reading, {detail: stoppedDetail(stopped.detail)}),
+    stopped.kept ? fill(W.dream_stopped_kept, {scenes: plural(stopped.kept, 'scenes')}) : null].filter(Boolean).join(' · ');
   return el('div', {class: 'notice', role: 'status', 'data-failure': 'true'},
-    el('p', {}, `${fill(W.dream_stopped[stopped.reason] || W.dream_stopped.reading, {detail: stoppedDetail(stopped.detail)})} ${stopped.kept ? fill(W.dream_stopped_kept, {kept: stopped.kept}) + ' ' : ''}`, el('span', {class: 'muted'}, when(stopped.at)), ' · ',
+    el('p', {}, text, ' · ', el('span', {class: 'muted'}, when(stopped.at)), ' · ',
       el('button', {type: 'button', class: 'notice-action', title: stopped.detail || '',
         onclick: () => control('dream', {model: id, kind: 'deep'})}, W.dream_stopped_retry)),
-    el('button', {type: 'button', class: 'notice-close', 'aria-label': 'Close',
+    el('button', {type: 'button', class: 'notice-close', 'aria-label': W.close,
       onclick: () => control('seen', {model: id, id: 'stopped'})}, '×'));
 }
 // While a Dream runs the viewer may go back to all Dreams; remembered per
@@ -734,14 +722,15 @@ function runningCard(id, ml, kind) {
   let text;
   if (kind === 'deep') {
     const c = ml.current, i = c.stages.findIndex(s => s.key === c.stage), stage = c.stages[i], p = stage.progress;
-    text = !c.wait && p?.unit === 'calibration' ? `${W.chip_deep} Dream · ${fill(W.getting_ready_title, p)}` : [W.chip_deep + ' Dream', c.wait ? W.wait[c.wait.code] : W.stage[c.stage],
-      !c.wait && p && p.total ? `${p.done} of ${plural(p.total, p.unit)}` : `step ${i + 1} of ${c.stages.length}`,
-      !c.wait && stage.eta_seconds != null ? `about ${duration(stage.eta_seconds)} left` : null].filter(Boolean).join(' · ');
+    const deep = W.dream_kinds.deep.title;
+    text = !c.wait && p?.unit === 'calibration' ? `${deep} · ${fill(W.getting_ready_title, p)}` : [deep, c.wait ? waitText(c.wait) : W.stage[c.stage],
+      !c.wait && p && p.total ? countOf(p.done, p.total, p.unit) : fill(W.step_of, {step: i + 1, total: c.stages.length}),
+      !c.wait && stage.eta_seconds != null ? left(stage.eta_seconds) : null].filter(Boolean).join(' · ');
   } else {
     const q = ml.quick_running, reading = q.stage === 'read';
     text = [W.quick_title[q.kind] || W.quick_title.quick, reading ? W.quick_steps.read : W.quick_steps.prompt,
-      reading && q.total ? `${q.done} of ${plural(q.total, 'conversations_read')}` : null,
-      reading && q.eta_seconds != null ? `about ${duration(q.eta_seconds)} left` : null].filter(Boolean).join(' · ');
+      reading && q.total ? countOf(q.done, q.total, 'conversations_read') : null,
+      reading && q.eta_seconds != null ? left(q.eta_seconds) : null].filter(Boolean).join(' · ');
   }
   return el('div', {class: 'running-card', role: 'status'},
     el('span', {class: 'tick'}, '●'), el('span', {class: 'running-text'}, text),
@@ -755,15 +744,15 @@ function quickRunning(q) {
   const steps = ['read', 'pick', 'prompt'];
   const at = reading ? 0 : 2;
   const share = reading ? (q.total ? q.done / q.total : 0) : 1;
-  const left = q.eta_seconds != null && reading ? `about ${duration(q.eta_seconds)} left` : null;
+  const remaining = q.eta_seconds != null && reading ? left(q.eta_seconds) : null;
   const limit = q.budget && reading ? fill(W.quick_budget, {limit: duration(q.budget)}) : null;
   return el('div', {class: 'finished running quick-running'},
     el('p', {class: 'finished-title'}, el('span', {class: 'tick'}, '●'), ` ${W.quick_title[q.kind] || W.quick_title.quick}`,
-      el('span', {class: 'muted'}, ` · started ${when(q.started_at)}`)),
+      el('span', {class: 'muted'}, ' · ', meta(fill(W.started, {when: when(q.started_at)})))),
     el('p', {class: 'finished-outcome'}, [
       reading ? W.quick_steps.read : q.stage === 'compare' ? W.quick_steps.compare : W.quick_steps.prompt,
-      reading && q.total ? `${q.done} of ${plural(q.total, 'conversations_read')}` : null,
-      left, limit,
+      reading && q.total ? countOf(q.done, q.total, 'conversations_read') : null,
+      remaining, limit,
     ].filter(Boolean).join(' · ')),
     el('div', {class: 'steps', 'aria-hidden': 'true', style: 'grid-template-columns:repeat(3,1fr)'}, steps.map((key, i) =>
       el('span', {title: W.quick_steps[key]}, el('i', {style: `width:${i < at ? 100 : i === at ? Math.round(share * 100) : 0}%`})))),
@@ -800,18 +789,20 @@ let selected = null;          // model id the viewer picked
 let showAll = false;          // the "more" list is open
 let navOpen = false;          // phone: the list is open
 function railState(ml, inv) {
-  if (inv?.support === 'unsupported') return ["Can't learn here", 'muted'];
+  const R = W.rail;
+  if (inv?.support === 'unsupported') return [R.unsupported, 'muted'];
   if (ml?.current) {
     const c = ml.current;
-    return c.wait ? [`Waiting · ${W.wait[c.wait.code]}`, 'warn'] : [`Dreaming · ${W.stage[c.stage]}`, 'live'];
+    return c.wait ? [fill(R.waiting, {wait: waitText(c.wait)}), 'warn'] : [fill(R.dreaming, {stage: W.stage[c.stage]}), 'live'];
   }
   if (ml?.last?.result) {
     const r = ml.last.result;
-    return r.outcome === 'adopted' ? [r.in_use === false ? outcomeText(r) : `${r.version} · better on ${r.improved.count}`, ''] : ['Kept its version', ''];
+    return r.outcome === 'adopted' ? [r.in_use === false || r.improved?.count == null ? outcomeText(r)
+      : fill(R.adopted, {version: r.version, moments: plural(r.improved.count, 'moments')}), ''] : [R.kept, ''];
   }
-  if (inv?.learning_level === 'off') return ['Not learning', 'muted'];
-  if (!ml?.pending?.conversations && !ml?.last) return ['No conversations yet', 'muted'];
-  return [`Collecting · ${plural(ml?.pending?.conversations || 0, 'conversations')}`, ''];
+  if (inv?.learning_level === 'off') return [R.off, 'muted'];
+  if (!ml?.pending?.conversations && !ml?.last) return [R.empty, 'muted'];
+  return [fill(R.collecting, {conversations: plural(ml?.pending?.conversations || 0, 'conversations')}), ''];
 }
 function pickDefault(ids, models) {
   const dreaming = ids.find(id => models[id]?.current);
@@ -832,15 +823,16 @@ function railNav(ids, models, inventory, active, rest) {
     el('span', {class: 'nav-name'}, inventory[active]?.name || active));
   toggle.onclick = () => { navOpen = !navOpen; render(); };
   const more = rest.length ? el('button', {type: 'button', class: 'nav-more', 'aria-expanded': String(showAll)},
-    showAll ? 'Fewer models' : `+ ${rest.length} more · learning off`) : null;
+    showAll ? W.rail.fewer : fill(W.rail.more, {count: rest.length})) : null;
   if (more) more.onclick = () => { showAll = !showAll; render(); };
-  return el('nav', {class: 'models-nav', 'aria-label': 'Models', 'data-open': String(navOpen)},
-    el('p', {class: 'label'}, 'Models'),
+  return el('nav', {class: 'models-nav', 'aria-label': W.rail.label, 'data-open': String(navOpen)},
+    el('p', {class: 'label'}, W.rail.label),
     toggle,
     el('div', {class: 'nav-list'}, ids.map(item), showAll ? rest.map(item) : null, more));
 }
 
 let last = null;
+const OFFLINE = ['Songe not answering', 'Run songe serve'];
 function pausedView(models) {
   const out = {};
   for (const [id, ml] of Object.entries(models || {})) {
@@ -857,20 +849,23 @@ function render() {
   // Paused is the service's own state and is known at once; the Dream's
   // record catches up a moment later. Show a running Dream as waiting on it.
   const models = status?.paused ? pausedView(last.models) : last.models;
+  activity = status?.activity || null;
   const all = [...new Set([...Object.keys(inventory), ...Object.keys(models)])];
-  const shown = all.filter(id => learns(models[id], inventory[id]));
+  const learning = all.filter(id => learns(models[id], inventory[id]));
+  // When no model learns, they are all the list: nothing to fold away.
+  const shown = learning.length ? learning : all;
   const rest = all.filter(id => !shown.includes(id))
     .sort((a, b) => (inventory[a]?.support === 'unsupported') - (inventory[b]?.support === 'unsupported'));
   if (!all.includes(selected)) {
     const fromHash = decodeURIComponent(location.hash.slice(1));
     selected = all.includes(fromHash) ? fromHash : null;
   }
-  const active = selected || pickDefault(shown.length ? shown : all, models);
+  const active = selected || pickDefault(shown, models);
   if (active && rest.includes(active)) showAll = true;
-  const [now, next] = statusLines(models, inventory, status?.paused);
-  $('now').textContent = now;
-  $('next').textContent = next;
-  $('paused').textContent = status?.paused ? 'Yes' : 'No';
+  // Now and Next as `songe status` words them (status.lines): one source.
+  $('now').textContent = status?.lines?.now || '';
+  $('next').textContent = status?.lines?.next || '';
+  $('paused').textContent = status?.paused ? W.yes : W.no;
   // One line while a Dream trains or measures: how busy the GPU is.
   const gpu = status?.gpu;
   const machine = status?.machine;
@@ -884,7 +879,7 @@ function render() {
     {busy: gpu.busy, memory: `${(gpu.memory / 2 ** 30).toFixed(1)} GB`});
   renderCloud(status?.settings?.cloud);
   $('nav').replaceChildren(all.length ? railNav(shown, models, inventory, active, rest) : '');
-  $('models').replaceChildren(active ? modelView(active, models[active], inventory[active], Boolean(status?.paused)) : el('p', {class: 'empty'}, 'No models yet'));
+  $('models').replaceChildren(active ? modelView(active, models[active], inventory[active], Boolean(status?.paused)) : el('p', {class: 'empty'}, W.no_models));
 }
 async function refresh() {
   let state;
@@ -892,8 +887,8 @@ async function refresh() {
     if (!W) W = await (await fetch('/assets/wording.json', {cache: 'no-store'})).json();
     state = await (await fetch('/api/state?view=cycle&revisions=%7B%7D', {cache: 'no-store'})).json();
   } catch (e) {
-    $('now').textContent = 'Songe is not answering';
-    $('next').textContent = 'Run songe serve in your terminal';
+    // The one place words may come before wording.json: it did not load.
+    [$('now').textContent, $('next').textContent] = W ? [W.lines.not_answering, W.lines.run_serve] : OFFLINE;
     return;
   }
   try {
@@ -910,7 +905,7 @@ async function refresh() {
   } catch (e) {
     // Songe answered; the page itself failed. Say that, not "not answering".
     console.error(e);
-    $('now').textContent = W?.page_error || 'The page hit an error · reload it';
+    $('now').textContent = W.page_error;
     $('next').textContent = '';
   }
 }
@@ -926,13 +921,13 @@ let cloudBusy = false;
 const money = usd => usd == null ? W.cloud.cost_unknown : usd > 0 && usd < 0.01 ? '<$0.01' : `$${usd.toFixed(2)}`;
 async function cloudDetails() {
   const r = await fetch('/api/cloud', {cache: 'no-store'});
-  if (!r.ok) throw new Error(`request failed (${r.status})`);
+  if (!r.ok) throw new Error(failed(r));
   return r.json();
 }
 async function cloudPatch(changes) {
   const r = await fetch('/api/settings', {method: 'PATCH', headers: {'content-type': 'application/json'}, body: JSON.stringify({cloud: changes})});
   const data = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(data.error || `request failed (${r.status})`);
+  if (!r.ok) throw new Error(data.error || failed(r));
   return data;
 }
 function cloudConfigured(c) { return Boolean(c?.model && c?.key?.set && (c.provider !== 'custom' || c.base_url)); }
@@ -945,7 +940,7 @@ function renderCloud(c) {
   badge.hidden = !c.enabled;
   badge.textContent = C.badge;
   badge.title = fill(C.badge_title, {model: c.model, provider: c.provider_label});
-  $('signature').textContent = c.enabled ? C.signature_on : 'Learning stays on this machine.';
+  $('signature').textContent = c.enabled ? C.signature_on : C.signature_off;
   const toggle = el('button', {type: 'button', class: 'auto', role: 'switch', 'aria-checked': String(c.enabled), disabled: cloudBusy ? '' : null,
     onclick: () => c.enabled ? cloudOff() : cloudOn()},
     el('span', {class: 'track', 'aria-hidden': 'true'}, el('span', {class: 'knob'})), C.row);
@@ -1046,7 +1041,7 @@ async function cloudSetup(enabling, details = null) {
     await cloudPatch(changes());
     const r = await fetch('/api/cloud/test', {method: 'POST', headers: {'content-type': 'application/json'}, body: '{}'});
     const data = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(data.error || `request failed (${r.status})`);
+    if (!r.ok) throw new Error(data.error || failed(r));
     show(data.ok, data.message);
   })}, C.test);
   const primary = el('button', {type: 'button', class: 'done', onclick: () => run(primary, async () => {
@@ -1071,8 +1066,8 @@ async function cloudSetup(enabling, details = null) {
       el('p', {class: 'label'}, night ? fill(C.calls_title, {night: night.night}) : C.calls_none),
       night ? el('p', {class: 'muted'}, fill(C.calls_total, {calls: night.calls, spent: night.cost_known ? money(night.usd) : C.cost_unknown})) : null,
       calls.length ? el('ul', {}, calls.map(call => el('li', {},
-        el('span', {}, `${new Date(call.at * 1000).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'})} · ${call.purpose} · ${call.model}`),
-        el('span', {class: 'muted'}, ` · ${call.sent_chars} chars · ${call.sent ? money(call.cost_usd) : C.not_sent}${call.ok ? '' : ` · ${call.error || 'failed'}`}`),
+        el('span', {}, `${new Date(call.at * 1000).toLocaleTimeString('en-US', {hour: '2-digit', minute: '2-digit', hourCycle: 'h23'})} · ${call.purpose} · ${call.model}`),
+        el('span', {class: 'muted'}, ` · ${plural(call.sent_chars, 'chars')} · ${call.sent ? money(call.cost_usd) : C.not_sent}${call.ok ? '' : ` · ${call.error || C.failed}`}`),
         call.preview ? el('span', {class: 'cloud-preview'}, call.preview) : null))) : null));
 }
 

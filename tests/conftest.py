@@ -90,6 +90,21 @@ def no_real_cloud(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def host_battery_unread(monkeypatch):
+    """The worker reads the battery of the machine it runs on. On an unplugged
+    laptop a test Dream stopped at once ("battery low": the battery lasts less
+    than a slice), so the machine running the tests reports no power telemetry,
+    as a desktop does. A platform a test gives the worker still counts."""
+    from songe.platform import Power, current
+    from songe.sleep import worker
+
+    host, read = type(current()), worker.power_status
+    monkeypatch.setattr(
+        worker, "power_status", lambda p: Power() if isinstance(p, host) else read(p)
+    )
+
+
+@pytest.fixture(autouse=True)
 def isolated_home(tmp_path, monkeypatch):
     # Interface tests must never inspect the developer's model library or
     # contact a model server. Inventory protocol tests install explicit fakes.

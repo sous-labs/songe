@@ -163,3 +163,90 @@ def test_block_attention_matches_eager_outputs_and_gradients():
     assert reference_grads.keys() == block_grads.keys()
     for name in reference_grads:
         torch.testing.assert_close(block_grads[name], reference_grads[name], atol=1e-4, rtol=1e-3)
+
+
+def test_a_frozen_prefix_reads_the_same_conv_states_when_checkpointing_replays_a_layer():
+    """Inkling-2's cache layers keep short-convolution states, written in place.
+    Under gradient checkpointing the backward pass runs every layer again; it
+    must see the prefix as the forward pass did, not the window's own tail
+    (on Inkling-2-Mini a Deep Dream then routed tokens to other experts and
+    failed with CheckpointError)."""
+    from types import SimpleNamespace
+
+    from songe.backends.torch import TorchBackend
+
+    model = tiny_inkling().train()
+    ids = torch.randint(0, 97, (1, 40), generator=torch.Generator().manual_seed(5))
+    prefix, window = ids[:, :30], ids[:, 30:]
+
+    def run(checkpointing):
+        model.zero_grad(set_to_none=True)
+        if checkpointing:
+            model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+        else:
+            model.gradient_checkpointing_disable()
+        with torch.no_grad():
+            past = TorchBackend._cache(model.base_model(input_ids=prefix, use_cache=True))
+        if not checkpointing:  # the layers keep the cache themselves
+            out = model.base_model(input_ids=window, past_key_values=past, use_cache=True).last_hidden_state
+            out.float().square().mean().backward()
+            return out.detach(), {n: p.grad.clone() for n, p in model.named_parameters() if p.grad is not None}
+        conv = [{k: v.clone() for k, v in getattr(layer, "conv_states", {}).items() if v is not None}
+                for layer in past.layers]
+        owner = SimpleNamespace(torch=torch, _causal=lambda: model)
+        with TorchBackend.frozen(owner, past) as kept:
+            assert kept
+            out = model.base_model(input_ids=window, past_key_values=past, use_cache=True).last_hidden_state
+            out.float().square().mean().backward()
+        assert any(conv)
+        for layer, states in zip(past.layers, conv, strict=True):
+            for k, v in states.items():
+                torch.testing.assert_close(layer.conv_states[k], v, atol=0, rtol=0)
+        return out.detach(), {n: p.grad.clone() for n, p in model.named_parameters() if p.grad is not None}
+
+    plain, plain_grads = run(checkpointing=False)
+    replayed, grads = run(checkpointing=True)
+    torch.testing.assert_close(replayed, plain)
+    assert grads.keys() == plain_grads.keys()
+    for name in grads:
+        torch.testing.assert_close(grads[name], plain_grads[name], atol=1e-5, rtol=1e-4)
+
+
+# What vLLM's Inkling2 LoRA loader accepts (vllm/models/inkling2/nvidia/lora.py):
+# these modules, under the checkpoint's names (model.llm.layers.N.attn.*).
+VLLM_INKLING_LORA = {"wq_du", "wk_dv", "wv_dv", "wr_du", "wo_ud", "gate_attn", "attn_sink_proj"}
+
+
+def test_an_inkling_adapter_exports_under_the_names_vllm_loads(tmp_path):
+    import json
+    import re
+
+    from peft import LoraConfig, get_peft_model
+
+    from songe.artifacts import export
+    from tests.crossplatform_helpers import fake_platform
+
+    model = get_peft_model(
+        tiny_inkling(),
+        LoraConfig(r=2, lora_alpha=4, target_modules=packed_experts.LORA_TARGETS),
+    )
+    adapter = tmp_path / "adapter"
+    model.save_pretrained(adapter, safe_serialization=True)
+    base = tmp_path / "base"
+    base.mkdir()
+    (base / "config.json").write_text(json.dumps(
+        {"model_type": "inkling2_loop", "quantization_config": {"quant_method": "modelopt"}}))
+    out = export("peft-adapter", base, adapter, tmp_path / "peft", fake_platform(tmp_path))
+
+    from safetensors.torch import load_file
+
+    keys = load_file(str(out / "adapter_model.safetensors")).keys()
+    pattern = re.compile(r"base_model\.model\.model\.llm\.layers\.\d+\.attn\.(\w+)\.lora_[AB]\.weight")
+    modules = {pattern.fullmatch(k).group(1) if pattern.fullmatch(k) else k for k in keys}
+    # Every module vLLM serves, nothing it would refuse, in every layer.
+    assert modules == VLLM_INKLING_LORA
+    assert len(keys) == 2 * len(VLLM_INKLING_LORA) * model.config.num_hidden_layers
+    config = json.loads((out / "adapter_config.json").read_text())
+    assert set(config["target_modules"]) == VLLM_INKLING_LORA
+    # The training adapter keeps transformers' names (a Dream resumes from it).
+    assert all(".self_attn." in k for k in load_file(str(adapter / "adapter_model.safetensors")))

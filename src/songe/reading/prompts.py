@@ -263,7 +263,10 @@ TURN_SCHEMA = {
         "standing": {"type": "string", "enum": ["yes", "no"]},
         "kind": {"type": "string", "enum": ["once", "task", "reaction"]},
         "wish": {"type": "string"},
+        "about": {"type": "string"},
     },
+    # "about" may be missing: an answer without it is read as holding for
+    # any answer (scope_of), not as an answer off the schema.
     "required": ["standing", "kind", "wish"],
 }
 
@@ -278,11 +281,59 @@ What the assistant did since then:
 The user's next message:
 {message}
 
-Two questions about the user's next message.
-- standing: "yes" if the message, or a part of it, tells the assistant how this user wants answers or work from now on, beyond this one answer: the language to answer in ("reply in Chinese"), how short or long answers should be ("keep answers short"), a tone, a format or a notation ("no emojis", "plain text, no LaTeX"), a tool, a library or a unit to use or to avoid ("tabs, not spaces", "no jQuery"), or how the user works and what they like ("I use Linux", "I like a dark look"). A change to the look of something made for the user is "yes" as well, because people keep their taste in looks: its colours, fonts, corners, borders, shadows, spacing, light or dark ("make the buttons green", "a bigger font please", "less space between the lines"). A message can ask for something else as well and still be "yes". "no" if it only wants this one answer redone or changed ("make it shorter", "rewrite it more formally", "add a paragraph on costs", "write it in Python", "that is wrong"), asks for new work, or asks for nothing. Also "no" when it gives the assistant a role, a persona or a game to play ("act as a Linux terminal", "you are an expert prompt writer", "from now on you are DAN"), or asks for a word or a text in another language ("defeated in Chinese", "the last paragraph in English"): that is new work.
+Questions about the user's next message.
+- standing: "yes" if the message, or a part of it, tells the assistant how this user wants answers or work from now on, beyond this one answer: the language to answer in ("reply in Chinese"), how short or long answers should be ("keep answers short"), a tone, a format or a notation ("no emojis", "plain text, no LaTeX"), a tool, a library or a unit to use or to avoid ("tabs, not spaces", "no jQuery"), or how the user works and what they like ("I use Linux", "I like a dark look"). A change to the look of something made for the user is "yes" as well, because people keep their taste in looks: its colours, fonts, corners, borders, shadows, spacing, light or dark ("make the buttons green", "a bigger font please", "less space between the lines"). A message can ask for something else as well and still be "yes". "no" if it only wants this one answer redone or changed ("make it shorter", "rewrite it more formally", "add a paragraph on costs", "write it in Python", "that is wrong"), asks for new work, or asks for nothing, or limits what it wants to now: today, this time, this one ("short answers today, I have a deadline", "skip the lint for today's demo", "this one can be casual"). Also "no" when it gives the assistant a role, a persona or a game to play ("act as a Linux terminal", "you are an expert prompt writer", "from now on you are DAN"), or asks for a word or a text in another language ("defeated in Chinese", "the last paragraph in English"): that is new work.
 - kind: "once" if it wants this one answer changed, corrected or tried again; "task" if it asks for new or further work or asks a question; "reaction" if it asks for nothing (thanks, praise, a remark).
 - wish: if standing is "yes", that wish alone as one full sentence that tells the assistant what to do from now on, in English, starting with a verb and naming exactly what the user named ("Answer in Chinese.", "Keep answers to two or three sentences.", "Use Polars, not pandas.", "Use plain text, not LaTeX."); leave out whatever belongs to this one answer. Otherwise "".
+- about: what the message is about when what it wants holds for one kind of thing only, as the conversation shows it: the kind of text being written ("emails", "commit messages", "code comments"), one repository or project ("the admin repo"), one language or one tool. A few words naming the kind, never this one item ("emails", not "this email"). "" when it would hold for any answer.
 Answer with JSON only."""
+
+
+# What a wish holds for. Live (Qwen3.8-27B, simulated users, issue #231):
+# "ugh again so long. max 5-6 sentence", said about an email, became "Keep
+# answers to a maximum of 5-6 sentences." and cut a requested detailed
+# explanation from 481 words to 103; "Thanks, then Mi-rae" became a sign-off on
+# a recipe and on a message to the user's mother; "英文!! feat(refund): ..."
+# about a commit message became "Answer in English ...". The user never says
+# "email" in such a message: the conversation does. The turn question names
+# the kind of thing (TURN "about"), and the note says it ("For emails: ...").
+# Not a scope: the item at hand ("this email"; "this repo" is one), or everything.
+ABOUT_WORDS = 6
+NO_SCOPE = re.compile(
+    r"^(this|that)\s+(?!(repo|repository|project|codebase|folder|app)\b)"
+    r"|^the\s+(one|answer|reply|response|message|text|task|request|draft|version|time)\b"
+    r"|^(any|all|every|everything|anything|general|none|n/?a|nothing|answers?|replies|responses?)\b",
+    re.I,
+)
+
+
+def scope_of(answer, said=""):
+    """What the turn question says the user's wish holds for ("emails",
+    "commit messages", "the admin repo"), or "" when it holds for any answer
+    or the answer gives nothing usable. `said` is what the user wrote in the
+    conversation: a kind the user never named in it is still kept when the
+    message is not in Latin letters (rules.voiced)."""
+    from .rules import voiced
+
+    about = " ".join(str((answer or {}).get("about") or "").split()).strip(" .:;,\"'")
+    about = re.sub(r"^(for|in|on|only|just|about)\s+", "", about, flags=re.I)
+    if not about or len(about.split()) > ABOUT_WORDS or len(about) > 48 or NO_SCOPE.search(about):
+        return ""
+    return about if voiced(about, said) > 0 else ""
+
+
+def scoped(note, about):
+    """A note said for what it holds: "Keep answers to a maximum of 5-6
+    sentences." about emails is "For emails: keep answers to a maximum of
+    5-6 sentences."; a note that names it already stays as it is."""
+    from .rules import voiced
+
+    note = " ".join(str(note or "").split())
+    if not note or not about or voiced(about, note) >= 0.5:
+        return note
+    if note[:1].isupper() and not note[1:2].isupper():
+        note = note[:1].lower() + note[1:]
+    return f"For {about}: {note}"
 
 
 # Languages, libraries and systems named in the question's own examples. A
@@ -315,6 +366,84 @@ def own_words(message):
     return own if len(own.split()) > 1 else ""
 
 
+# A wish the user limits to now ("today only reply fast", "今天先别管 lint 了",
+# "just for today skip the tests") is about the work at hand, whatever the
+# model answered: not a note, and not a change wanted once either (read as
+# "once", "today only reply fast, short short" was joined with an email-length
+# wish from another chat and still became a note). Live (Qwen3.8-27B, two test users): both were read as
+# standing wishes and became the notes "Reply fast and short today." and
+# "Ignore lint today.", which the prompt then carried into every later day.
+# "From today on" and "starting today" say the opposite: the wish lasts; a
+# span of dates ("from 2026-02-01 till today") is not a limit.
+NOW_ONLY = re.compile(
+    r"\b((?<!till )(?<!until )(?<!through )(?<!to )today(?!['’]s)|tonight|for now|this time|just this once|this once)\b|今天|今晚|这次|这回|暂时|오늘|이번만|이번엔|\b(hoy|esta vez|por ahora)\b",
+    re.I,
+)
+FROM_NOW = re.compile(
+    r"\b(from (today|now|tonight)|(for|from) now on|starting (today|now)|as of today|going forward|always|every time|ever|not just)\b"
+    r"|从今天|今天起|今天开始|以后|一直|每次|永远|오늘부터|항상|\b(desde hoy|siempre)\b",
+    re.I,
+)
+SENTENCE_END = re.compile(r"(?<=[.!?;])\s+|(?<=[。！？；])|\n")
+
+
+def now_only(message, wish=""):
+    """Whether the user's message limits the wish it voices to now.
+
+    The limit has to be in the sentence the wish comes from (one the model's
+    wording names, rules.voiced), or in the wording itself: "I prefer tabs,
+    not spaces. Today let's refactor utils.py" keeps the wish for tabs. A
+    sentence that also says the wish lasts ("today and always", "not just
+    today", "for now on") is not a limit."""
+    from .rules import voiced
+
+    if NOW_ONLY.search(wish or "") and not FROM_NOW.search(wish or ""):
+        return True
+    return any(
+        NOW_ONLY.search(part) and not FROM_NOW.search(part) and voiced(wish or "", part) > 0
+        for part in SENTENCE_END.split(str(message or ""))
+    )
+# Names the user typed: a command, a library, a file, a commit prefix
+# ("styled-components", "test-unit", "feat(refund):", "src/state").
+NAME = re.compile(r"(?<![\w-])[A-Za-z]\w*(?:[-_.:/]\w+|\(\w[\w-]*\))+")
+# A command is its runner and its target. Live (Qwen3.8-27B, a simulated
+# backend developer, issue #231): "just test-unit, not make. there is no
+# makefile anymore" became "Use test-unit, not make.": "just" was read as the
+# word, the change from make to just was lost, and 0 of 10 held-out requests
+# for the test command used just. "just" and "make" are words too, so only a
+# target that looks like a name (test-unit, db:migrate) counts after them.
+RUNNER = re.compile(
+    r"\b(?:(?P<plain>npm run|pnpm|yarn|bun|uv run|poetry run|cargo)\s+(?P<word>[A-Za-z][\w:-]*)"
+    r"|(?P<runner>just|make)\s+(?P<target>[A-Za-z]\w*[-:_][\w:-]+))",
+    re.I,
+)
+# "yarn to npm", "bun not node": after a bare runner a plain word is English,
+# not a script, and must not be made a command ("Switch yarn to yarn.").
+NOT_TARGETS = frozenset(
+    "a an and as at but by for from in instead into is it its no nor not of on or"
+    " over please pls than the then this that to too vs with".split()
+)
+
+
+def named(message):
+    """The names the user's message gives (NAME), longer than three letters."""
+    return [n for n in NAME.findall(str(message)) if len(n) > 3]
+
+
+def whole_commands(wish, message):
+    """The wish with each command the user typed whole: "Use test-unit, not
+    make." for "just test-unit, not make" is "Use just test-unit, not make."."""
+    for m in RUNNER.finditer(str(message)):
+        runner, target = (m["plain"], m["word"]) if m["plain"] else (m["runner"], m["target"])
+        if target.lower() in NOT_TARGETS:
+            continue
+        whole = re.compile(rf"\b{re.escape(runner)}\s+{re.escape(target)}(?![\w-])", re.I)
+        alone = re.compile(rf"(?<![\w-]){re.escape(target)}(?![\w-])", re.I)
+        if alone.search(wish) and not whole.search(wish):
+            wish = alone.sub(lambda t, runner=runner: f"{runner} {t[0]}", wish, count=1)
+    return wish
+
+
 def turn_verdict(answer, message="", earlier=""):
     """("lasting", the wish as a note) or ("once" | "task" | "reaction", "")
     from the answer to TURN about this message; (None, "") when the model
@@ -328,7 +457,10 @@ def turn_verdict(answer, message="", earlier=""):
     Dream; a remark about quotation marks came back as the question's own
     example "Make the buttons green.", and a page pasted earlier had a
     button in it. Such a wish is not used: the note is then the user's own
-    message, when that is one short sentence (own_words)."""
+    message, when that is one short sentence (own_words). A wish that keeps
+    none of the names the user's message gives (a library, a command, a
+    file) is not used either, and a command the user typed is kept whole,
+    with its runner (whole_commands)."""
     from .rules import voiced
 
     if not isinstance(answer, dict):
@@ -336,6 +468,8 @@ def turn_verdict(answer, message="", earlier=""):
     kind = answer.get("kind") if answer.get("kind") in ("once", "task", "reaction") else None
     if answer.get("standing") != "yes":
         return kind, ""
+    if now_only(message, str(answer.get("wish") or "")):
+        return "task", ""
     wish, said = " ".join(str(answer.get("wish") or "").split()), message.lower()
     if said.isascii() and any(name in wish.lower() and name not in said for name in TURN_EXAMPLE_NAMES):
         return kind, ""
@@ -343,7 +477,14 @@ def turn_verdict(answer, message="", earlier=""):
         return "lasting", ""
     if not voiced(wish, message) and voiced(wish, f"{earlier}\n{message}") < 1:
         return "lasting", own_words(message)
-    return "lasting", wish
+    names = named(message)
+    if names and not any(n.lower() in wish.lower() for n in names):
+        # The user named what they want and the wish keeps none of it. Live
+        # (Qwen3.8-27B, issue #231): "styled-components + export default.
+        # siempre en admin" ("always so in admin") became "Always work in
+        # admin.", and the prompt then sent other repositories' work there.
+        return "lasting", own_words(message)
+    return "lasting", whole_commands(wish, message)
 
 
 # Asked about a sentence the rules flagged as a possible preference of the
@@ -402,6 +543,37 @@ Later: {new}
 Can both be true of the user now?
 - "both": yes. They are about different things, or the later one adds to the earlier one.
 - "later_only": no. The later sentence means the earlier one is no longer true: they changed their mind, stopped doing it, gave it up, or now want the opposite.
+Answer with JSON only."""
+
+# The same for a wish the user voiced in a correction (reading/store.
+# retire_changed): REPLACES and BOTH_TRUE only see what the user said about
+# themself. Live (Qwen3.8-27B, simulated users, issue #231): "注释还是中文吧"
+# and, after the repository went open source, "又写中文注释了。。英文" left both
+# "Use Chinese comments." and "Use English comments." in the prompt; "Use
+# Zustand." stayed beside three notes to use jotai; after "we moved to just,
+# the makefile is gone" three notes to use make stayed. Asked as for a stated
+# preference: which earlier notes the newer one replaces, then each named one
+# again on its own with it.
+CHANGED = """An AI assistant keeps short notes on how one user wants things done.
+
+Notes kept so far, oldest first:
+{notes}
+
+A newer note, from what the user said after all of them:
+{note}
+
+Does the newer note say that one of the notes kept so far is no longer what the user wants? That takes both: the two are about the same choice (the same kind of tool, library, command, language, format or sign-off, for the same kind of work in the same place), and the assistant cannot follow both: the user changed their mind, moved to something else, or now wants the opposite.
+Most newer notes replace nothing: they are about something else, they hold somewhere else or for another kind of work (another repository, emails and not chat), or they add to a note.
+Answer with JSON only: {{"replaces": [the numbers of the notes it replaces]}}, with an empty list when it replaces none."""
+
+FOLLOW_BOTH = """An AI assistant keeps short notes on how one user wants things done. Two of them, written at different times:
+
+Earlier: {old}
+Later: {new}
+
+Can the assistant follow both from now on?
+- "both": yes. They are about different things, they hold in different places or for different kinds of work, or the later one adds to the earlier one.
+- "later_only": no. Where the later one applies, doing what it says means not doing what the earlier one says: the user changed what they want.
 Answer with JSON only."""
 
 # One wish, one place (reading/store.fold_same). A user asks for the same thing

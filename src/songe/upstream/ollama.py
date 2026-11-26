@@ -56,6 +56,32 @@ class Ollama:
     async def _running(self):
         return (await self._request("GET", "/api/ps")).get("models", [])
 
+    async def listing(self):
+        """The models Ollama holds in memory now (/api/ps), each under its own
+        name and under the Songe identifiers routed to it; None when Ollama
+        cannot say. Ollama loads any model it is asked for, so background work
+        (reading, Quick Dream's before and after) asks only a model that is
+        listed here. Reported by Jack in a test on 11-24: with no listing,
+        Quick Dream's examples loaded an 8B into Ollama (6 GB) while the
+        conversion for training needed that memory, and the memory guard
+        stopped the conversion."""
+        try:
+            running = await self._running()
+        except (httpx.HTTPError, ValueError):
+            return None
+        names = {
+            _tag(m.get("name") or m.get("model"))
+            for m in running
+            if m.get("name") or m.get("model")
+        }
+        found = set()
+        for name in names:
+            found |= {name, name.removesuffix(":latest")}
+        for identifier, name in self.routes.items():
+            if isinstance(name, str) and _tag(name) in names:
+                found.add(identifier)
+        return [{"identifier": i, "type": "llm"} for i in sorted(found)]
+
     async def served_contexts(self):
         """Context Ollama runs each loaded model with (its OLLAMA_CONTEXT_LENGTH,
         4096 by default), from /api/ps. A model that is not loaded is not
@@ -271,7 +297,7 @@ class Ollama:
             self.store.set("runtime_imports", imports)
         await self._warm(version["identifier"], version.get("keep_alive"))
 
-    async def _warm(self, identifier, keep_alive=None):
+    async def _warm(self, identifier, keep_alive=None, still=None):
         # Without an explicit keep_alive the user's Ollama setting (default or
         # OLLAMA_KEEP_ALIVE) decides how long the model stays in memory.
         await self._request(
@@ -289,6 +315,8 @@ class Ollama:
                         _tag(m.get("name", m.get("model")))
                         for m in await self._running()
                     }:
+                        if still is not None and not still():
+                            return False  # a request arrived meanwhile
                         await asyncio.sleep(
                             getattr(self.config, "guard_min_interval", 0.1)
                         )
@@ -296,12 +324,28 @@ class Ollama:
                 raise TimeoutError(
                     f"Ollama did not release model {identifier}"
                 ) from exc
+        return True
 
-    async def unload(self, version):
-        if version["identifier"] in getattr(self, "owned", {}):
-            if await self.same_weights(self.owned[version["identifier"]]):
-                await self._warm(version["identifier"], 0)
-            self.owned.pop(version["identifier"], None)
+    async def unload(self, version, still=None):
+        """Release an instance Songe requested. still: checked right before
+        the release and while waiting for it; once it says no, the release
+        stops and returns False with Songe's claim kept (the caller decides
+        whether to try again or leave the instance to the agent)."""
+        identifier = version["identifier"]
+        if identifier in getattr(self, "owned", {}):
+            if still is not None and _tag(identifier) not in {
+                _tag(m.get("name", m.get("model"))) for m in await self._running()
+            }:
+                # Already gone: an empty generate would load it again.
+                self.owned.pop(identifier, None)
+                return True
+            if await self.same_weights(self.owned[identifier]):
+                if still is not None and not still():
+                    return False
+                if not await self._warm(identifier, 0, still=still):
+                    return False
+            self.owned.pop(identifier, None)
+        return True
 
     async def prune_version(self, version):
         # Imported full GGUF blobs are another copy on the library volume.

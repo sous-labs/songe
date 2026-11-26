@@ -188,6 +188,7 @@ mark.after { background: color-mix(in srgb, var(--p) 18%, transparent); }
   .rail { position: static; gap: 1.25rem; margin-bottom: 2rem; padding-bottom: 1.25rem; border-bottom: 1px solid var(--line); }
   .status { gap: .5rem; }
   .status p { display: grid; grid-template-columns: 4.5rem minmax(0, 1fr); align-items: baseline; }
+  .status p[hidden] { display: none; }
   .status .label { margin: 0; }
   .signature { display: none; }
   .models-nav { position: relative; }

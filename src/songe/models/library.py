@@ -554,6 +554,16 @@ def group_models(models):
     return result
 
 
+def named(config, name):
+    """The local model a Songe name (songe/...) stands for, when that name is
+    not registered yet: a model downloaded after Songe started. None when no
+    single library model carries it."""
+    from .names import public_name
+
+    refs = [i["ref"] for i in scan(config) if public_name(i["ref"].serving_id) == name]
+    return refs[0] if len(refs) == 1 else None
+
+
 def materialize(config, store, model):
     if registry.find(store, model):
         return

@@ -162,6 +162,9 @@ def service_manager(args):
 
 
 def service_fact(args):
+    if getattr(args, "launchd_target", None) is not None:
+        # A file written for someone else to load; nothing is started.
+        return f"file only · not started · {NAME} serve starts it"
     return "starts at login" if service_manager(args) else f"none · start it with {NAME} serve"
 
 
@@ -802,7 +805,14 @@ def finish_initialization(config, args, root, changes, repropose=None):
     Store(private_dir(root)).set("paused", False)
     managed = service_manager(args)
     if managed:
-        with step("Starting service", "Service running · starts at login"):
+        done = (
+            "Service running · starts at login"
+            if args.launchd_target is None
+            # --launchd-target writes the service file only (isolated
+            # installs, tests): saying "running" there was untrue.
+            else f"Service file written · {args.launchd_target} · not started"
+        )
+        with step("Starting service", done):
             launchd.install(
                 config, root, args.launchd_target, activate=args.launchd_target is None
             )

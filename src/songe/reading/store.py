@@ -8,6 +8,7 @@ answers make the next attempt quick.
 
 import asyncio
 import json
+import re
 import time
 
 from ..steps import digest
@@ -187,9 +188,33 @@ def signals(store, *, types=None):
     return [s for s in found if types is None or s["type"] in types]
 
 
-def save(store, session, revision, found, items):
+# Where an agent says which folder it works in: Claude Code and opencode
+# ("Working directory: /path"), pi ("Current working directory: /path"), Codex
+# ("<cwd>/path</cwd>").
+WORKDIR = re.compile(r"(?im)(?:^|\b)(?:current )?(?:working directory|working dir|cwd)\s*[:=>]\s*['\"`]?([^\s'\"`<]+)")
+
+
+def project_of(rows):
+    """The folder the session's agent worked in, by its last path part
+    ("billing-api"), from the first system message that names one; None."""
+    for _, request, _, _ in rows:
+        for m in (request or {}).get("messages") or []:
+            if m.get("role") != "system":
+                continue
+            content = m.get("content")
+            if isinstance(content, list):
+                content = " ".join(str(p.get("text", "")) for p in content if isinstance(p, dict))
+            if found := WORKDIR.search(str(content or "")):
+                name = found[1].rstrip("/\\").replace("\\", "/").rsplit("/", 1)[-1]
+                return name or None
+    return None
+
+
+def save(store, session, revision, found, items, project=None):
     """Replace this learner's signals for one session. A signal retired before
-    (a newer preference replaced it) stays retired."""
+    (a newer preference replaced it) stays retired. project: the folder the
+    agent worked in (project_of), kept on each signal so a note can say the
+    project's own names in a way that holds in other projects (quick.general)."""
     exchange_of = {it["step"]: it.get("exchange") for it in items if it["kind"] == "action"}
     with store.connect() as db:
         retired = dict(
@@ -208,6 +233,8 @@ def save(store, session, revision, found, items):
                 str(n): exchange_of.get(n) for n in steps if exchange_of.get(n) is not None
             }
             s["revision"] = revision
+            if project:
+                s["project"] = project
             s["id"] = digest([session, s["type"], s.get("item"), s.get("text")])
             db.execute(
                 "INSERT OR REPLACE INTO signals(id,model_id,session,revision,payload,retired_at) VALUES (?,?,?,?,?,?)",
@@ -288,6 +315,76 @@ async def retire_replaced(store, reader):
                 )
                 if isinstance(sure, dict) and sure.get("kind") == "later_only":
                     for s in signals:
+                        if not s["retired"]:
+                            s["retired"] = True
+                            gone.append(s["id"])
+    except Stopped:
+        pass  # the user is back: the rest is asked next time
+    if gone:
+        await asyncio.to_thread(retire, store, gone)
+    return len(gone)
+
+
+async def retire_changed(store, reader):
+    """People change what they want of the assistant too: "注释还是中文吧"
+    (comments in Chinese) and, weeks later, "又写中文注释了。。英文" (English
+    now). retire_replaced only weighs what the user said about themself, so
+    both notes stayed. Each note for the prompt from the user's own feedback
+    is shown with the different notes before it (which of them does it
+    replace?), each one named again on its own with it (can the assistant
+    follow both?), and the signals of a note it cannot follow alongside are
+    retired: reading, the prompt and practice no longer see them. Returns how
+    many were retired.
+
+    Every note is gone through each time, oldest first, as in
+    retire_replaced: all questions but those for a new note are answered
+    from the reader's cache."""
+    from .. import quick
+    from . import prompts as P
+
+    def load():
+        with store.connect() as db:
+            return db.execute(
+                "SELECT id, retired_at, payload FROM signals WHERE model_id=?", (store.model_id,)
+            ).fetchall()
+
+    rows = [dict(json.loads(payload), id=sid, retired=at is not None) for sid, at, payload in await asyncio.to_thread(load)]
+    notes = sorted((s for s in rows if s.get("source") == "user" and not s.get("preference") and quick.suitable(s)),
+                   key=said_at)
+    for s in notes:
+        s["note"] = quick.wording(s)[0]
+    gone = []
+    try:
+        for place, signal in enumerate(notes):
+            earlier = {}  # note: its signals
+            for s in notes[:place]:
+                if quick.normal(s["note"]) != quick.normal(signal["note"]):
+                    earlier.setdefault(s["note"], []).append(s)
+            earlier = {text: said for text, said in list(earlier.items())[-SHOWN:] if not all(s["retired"] for s in said)}
+            if signal["retired"] or not earlier or signal.get("turn_kind") != "lasting":
+                # Only a standing wish retires a note: a change wanted once
+                # ("this one can be super casual") may be for that answer alone.
+                continue
+            answer = await reader.ask(
+                P.CHANGED.format(notes="\n".join(f"{n}. {text}" for n, text in enumerate(earlier, 1)), note=signal["note"]),
+                P.REPLACES_SCHEMA,
+                "changed",
+            )
+            named = answer.get("replaces") if isinstance(answer, dict) else None
+            for n in dict.fromkeys(named if isinstance(named, list) else []):
+                if not (isinstance(n, int) and not isinstance(n, bool) and 1 <= n <= len(earlier)):
+                    continue
+                old, said = list(earlier.items())[n - 1]
+                sure = await reader.ask(P.FOLLOW_BOTH.format(old=old, new=signal["note"]), P.BOTH_TRUE_SCHEMA, "follow_both")
+                if isinstance(sure, dict) and sure.get("kind") == "later_only" and not (
+                    await one_wish(reader, old, signal["note"]) and await one_wish(reader, signal["note"], old)
+                ):
+                    # The same wish said again in other words is not a
+                    # change: fold_same gives both one place. Live (Qwen3.8-27B,
+                    # an email writer): each restatement of "Thanks, Mi-rae"
+                    # was read as replacing the one before, and in the end a
+                    # note without the sign-off retired the last of them.
+                    for s in said:
                         if not s["retired"]:
                             s["retired"] = True
                             gone.append(s["id"])
@@ -429,11 +526,12 @@ async def read(store, reader, *, limit=None, on_session=None, newest=False, seco
             store_failed = getattr(reader, "failed_sessions", [])
             reader.failed_sessions = [*store_failed, session]
             continue
-        await asyncio.to_thread(save, store, session, max(ids), found, items)
+        await asyncio.to_thread(save, store, session, max(ids), found, items, project_of(rows))
         done += 1
         if on_session:
             on_session(session, found)
     if not stopped:
         await retire_replaced(store, reader)
+        await retire_changed(store, reader)
         await fold_same(store, reader)
     return done
