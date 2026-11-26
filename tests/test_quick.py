@@ -152,10 +152,9 @@ async def test_the_proxy_adds_the_sessions_lessons_to_the_system_prompt(
     assert system[0].startswith("You are an agent.\n\n" + quick.BLOCK) and system[0].endswith(quick.EXCEPTIONS)
     assert "Conventional Commits" in system[0] and "README" not in system[0]
     assert system[1] == system[0]  # the session keeps its lessons
-    if session_header == "x-session-affinity":
-        assert "README" in system[2]  # Pi identifies a genuinely new session.
-    else:
-        assert system[2] == system[0]  # A generic request ID cannot change the pin.
+    # A new chat takes the current lessons, whether Pi names it a new session
+    # or it only opens like the earlier one.
+    assert "README" in system[2]
     assert "README" in system[3]
     # What Songe records is the agent's own request.
     assert store.exchanges()[0]["request"]["messages"][0]["content"] == "You are an agent."

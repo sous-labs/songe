@@ -411,6 +411,8 @@ def state_sections(data):
             ]
         return result
 
+    from .wording import status_lines
+
     return {
         "status": {
             k: v
@@ -424,7 +426,10 @@ def state_sections(data):
                 "calibration",
                 "cycle",
             }
-        },
+        }
+        # The Now and Next lines in the words `songe status` prints, so the
+        # page and the terminal say the same thing for the same state.
+        | {"lines": dict(status_lines(data))},
         "cycle": data.get("cycle", {"models": {}}),
         "models": {"models": [inventory(m) for m in models]},
         "learning": {

@@ -108,3 +108,80 @@ def test_a_strength_rejected_early_costs_no_incumbent_rows():
     assert scale == 0.5 and verdict.accepted and discarded == [1.0] and asked == [1]
     assert evaluations["1.0"]["reason"].startswith("Not clearly better")
     assert evaluations["1.0"]["judged"] == [{"id": "0", "outcome": "loss"}]
+
+
+def test_rows_judged_as_served_must_not_be_clearly_worse_and_must_win_more():
+    """Judged with the notes in the prompt on both sides (what the user has
+    now against what they would get), the candidate is not asked to be
+    clearly better by the resampled bound: it must not be clearly worse and
+    must win more moments than it loses. Clearly worse is more than a judge
+    that is right four times in five gives by chance: live, a version that
+    was as good by the mechanical checks got 3 moments better and 8 worse.
+    A lesson learned never adopts a version on its own."""
+    from songe.sleep.gate import judged_check
+
+    def rows(outcomes, **extra):
+        return [{"id": str(i), "conversation": f"c{i}", "kl": 1.0, "drift": 0.0, "empty": 0, "repetition": 0,
+                 "tool_valid": 1, "outcome": o, **extra} for i, o in enumerate(outcomes)]
+
+    before = [r | {"outcome": None} for r in rows(["tie"] * 6)]
+    ties, mixed = ["tie"] * 6, ["win", "loss", "tie", "tie", "tie", "tie"]
+    worse = ["loss", "loss", "win", "tie", "tie", "tie"]
+    kw = dict(min_heldout=5, drift_limit=0.05)
+    # Without notes: ties and one win against one loss are not clearly better.
+    assert decide(before, rows(ties), **kw).reason.startswith("Not clearly better")
+    assert decide(before, rows(mixed), **kw).reason.startswith("Not clearly better")
+    # As served: one moment won is enough ...
+    assert decide(before, rows(["win"] + ["tie"] * 5, served=True, learned=0), **kw).accepted
+    assert judged_check(rows(["win"] + ["tie"] * 5, served=True, learned=0)) is None
+    # ... a draw or one moment more lost is not, whatever was learned ...
+    for outcomes in (ties, mixed, worse):
+        d = decide(before, rows(outcomes, served=True, learned=3), **kw)
+        assert not d.accepted and d.reason.startswith("Not better than what you have now")
+    # ... and clearly more lost than won is called worse.
+    lost = ["loss"] * 3 + ["tie"] * 3
+    d = decide(before, rows(lost, served=True, learned=3), **kw)
+    assert not d.accepted and d.reason == "Worse than what you have now: better on 0, worse on 3"
+    assert judged_check(rows(lost, served=True, learned=3)).reason == d.reason
+    assert judged_check(rows(["loss"] * 6 + ["win"], served=True, learned=3)).reason.startswith("Worse than")
+    assert judged_check(rows(["loss"] * 8 + ["win"] * 3, served=True, learned=3)).reason.startswith("Not better")
+    # The drift limit stands as before.
+    drifting = [r | {"drift": 0.2} for r in rows(["win"] + ["tie"] * 5, served=True, learned=1)]
+    assert decide(before, drifting, **kw).reason == "General behaviour drift exceeds the limit"
+
+
+def served_rows(better, worse, same, **extra):
+    """24 judged moments as served (the version in use with its notes against
+    the candidate with the notes that would stay)."""
+    outcomes = ["win"] * better + ["loss"] * worse + ["tie"] * same
+    return [{"id": str(i), "conversation": f"c{i}", "kl": 1.0, "drift": 0.0, "empty": 0, "repetition": 0,
+             "tool_valid": 1, "outcome": o, "served": True, **extra} for i, o in enumerate(outcomes)]
+
+
+@pytest.mark.parametrize(
+    "better,worse,same,learned,accepted,reason",
+    [
+        (2, 0, 22, 0, True, None),
+        (0, 2, 22, 2, False, "Not better than what you have now: better on 0, worse on 2"),
+        (1, 1, 22, 2, False, "Not better than what you have now: better on 1, worse on 1"),
+        (0, 0, 24, 3, False, "Not better than what you have now: better on 0, worse on 0"),
+        (1, 6, 17, 3, False, "Worse than what you have now: better on 1, worse on 6"),
+    ],
+)
+def test_as_served_adopts_only_when_not_clearly_worse_and_more_won_than_lost(
+    better, worse, same, learned, accepted, reason
+):
+    """Founder's rule: adopt only when the candidate is not clearly worse
+    (losses - wins > 1.64 * sqrt(losses + wins) is clearly worse) and it won
+    more moments than it lost. A lesson learned alone never adopts it."""
+    from songe.sleep.gate import judged_check
+
+    before = [r | {"outcome": None} for r in served_rows(0, 0, 24)]
+    after = served_rows(better, worse, same, learned=learned)
+    d = decide(before, after, min_heldout=5, drift_limit=0.05)
+    assert d.accepted is accepted
+    if reason:
+        assert d.reason == reason
+        assert judged_check(after).reason == reason
+    else:
+        assert judged_check(after) is None

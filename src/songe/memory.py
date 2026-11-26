@@ -366,7 +366,27 @@ def record_memory_stop(store, sample, *, calibration=False, nights_before=None):
         record = asdict(sample.memory) | {"stop_reason": sample.reason}
     else:
         record = asdict(sample)
+    import logging
     import time
+
+    from . import NAME
+
+    reason = record.get("stop_reason") or {}
+    reason = (reason.get("observed") or {}).get("trigger") or reason
+    vram = "".join(
+        f" {a['name']} {a['memory_free'] / 1e9:.1f} GB free"
+        for a in record.get("vram") or ()
+    )
+    logging.getLogger(NAME).info(
+        "memory_stop %s%s: %.1f of %.1f GB free, pressure %s, psi %s%s",
+        reason.get("rule", "memory_pressure"),
+        " (measuring)" if calibration else "",
+        record.get("available", 0) / 1e9,
+        record.get("total", 0) / 1e9,
+        record.get("pressure"),
+        record.get("psi"),
+        vram,
+    )
 
     store.set("last_memory_stop", record)
     # When (a measuring run that fails right after it ran out of memory too).

@@ -590,3 +590,27 @@ def test_discrete_gpu_keeps_counting_the_process_tree(monkeypatch):
     # A discrete GPU's allocations never lower `available`; unchanged rule.
     events = gb10_gate_slice(monkeypatch, discrete_gpu, 23 * GB)
     assert events and events[0][1].stop_reason["rule"] == "predicted_margin"
+
+
+def test_memory_waits_and_stops_are_lines_in_the_log(config, store, caplog):
+    """Live: a 1 h 42 min wait for memory and four pauses left no line in
+    songe.log; only the panel's text showed them."""
+    import logging
+
+    from songe.schedule import Scheduler
+
+    caplog.set_level(logging.INFO, logger="songe")
+    scheduler = Scheduler(config, store, None)
+    scheduler.reason = "Waiting for memory: smallest calibrated work does not fit"
+    scheduler.reason = "Waiting for memory: smallest calibrated work does not fit · 2"
+    scheduler.reason = "Waiting for an idle gap"
+    lines = [r.getMessage() for r in caplog.records if "memory_wait" in r.getMessage()]
+    assert len(lines) == 2
+    assert lines[0].startswith("memory_wait Waiting for memory")
+    assert lines[1].startswith("memory_wait_over after 0.0 min")
+    sample = memory.stopped_sample(
+        memory.snapshot(platform(Memory(24 * GB, 7 * GB, psi=6.52))),
+        "critical_pressure",
+    )
+    memory.record_memory_stop(store, sample)
+    assert "memory_stop critical_pressure: 7.0 of 24.0 GB free" in caplog.text

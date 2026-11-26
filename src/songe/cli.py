@@ -22,7 +22,16 @@ from .config import Config
 from .log import Store
 from .platform.locking import acquire as acquire_lock
 from .storage import private_dir
-from .terminal import console, error, facts, models_table, result, status, step
+from .terminal import (
+    configure_stdio,
+    console,
+    error,
+    facts,
+    models_table,
+    result,
+    status,
+    step,
+)
 from .upgrade import catch_up
 
 PROVIDER = NAME
@@ -962,6 +971,7 @@ def default_choice(args):
 
 
 def main(argv=None):
+    configure_stdio()
     args = parser().parse_args(argv)
     root = args.data_dir.expanduser().resolve()
     try:

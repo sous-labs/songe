@@ -74,10 +74,6 @@
       "conversation",
       "conversations"
     ],
-    "test_moments": [
-      "test moment",
-      "test moments"
-    ],
     "chars": [
       "char",
       "chars"
@@ -227,7 +223,7 @@
   "control_failed": "Failed · {error} · try again or run songe doctor",
   "adopted_then": "Adopted {version}",
   "auto_dream": "Auto-dream",
-  "auto_dream_title": "Dream on its own when your computer is idle",
+  "auto_dream_title": "Dreams on its own when idle",
   "dream_kinds": {
     "quick": {
       "title": "Quick Dream",
@@ -314,17 +310,12 @@
   },
   "dream_stopped_retry": "Try again",
   "dream_stopped_kept": "{scenes} kept",
-  "collecting_next": "Deep Dream needs {moments} more to check its work · feedback adds up to 3 per conversation",
   "back_to_dreams": "← All Dreams",
   "view_progress": "View progress",
   "measuring_machine": "Measuring this machine for {name} · a few minutes · nothing learned yet",
-  "measuring_short": "measuring this machine",
-  "measuring_next": "Then Dreams can train it",
   "measuring_progress": "{done} of {total} tokens measured",
   "measured_can": "{name} · trains on this machine",
   "measured_cannot": "{name} can't train here · {reason} · still served, no training",
-  "not_supported": "Not supported yet",
-  "choose_another": "Choose another model",
   "control_unreachable": "Songe not answering · reload the page",
   "page_error": "The page hit an error · reload it",
   "quick_failed": {
@@ -361,8 +352,6 @@
   "quick_example_tool": "the tool reported “{said}”",
   "quick_example_same": "No visible change at the moment it came from",
   "catching_up": "Catching up on earlier conversations · later Quick Dreams take minutes",
-  "next_after_quick": "Then the preferences in the prompt update",
-  "next_after_reading": "Then preferences update · Deep Dream after a long idle",
   "machine_line": "{name} · {memory} GB · can train models up to about {size}B (estimate)",
   "machine_gpus": "GPU {index} of {gpus}: ",
   "machine_cannot": "{name} · no GPU for training (serves only)",
@@ -478,14 +467,6 @@
     "fewer": "Fewer"
   },
   "lines": {
-    "after_stage": "{next} · after {stage}",
-    "result_next": "Result · new version only if it passes",
-    "idle_adopted": "Idle · {model} moved to {version} {when}",
-    "idle_kept": "Idle · last Deep Dream not used {when}",
-    "when_idle": "Dreams again when idle",
-    "auto_off": "Auto-dream off · press Dream to run one",
-    "collecting": "Collecting · {conversations} recorded",
-    "press_or_idle": "Press Dream, or it starts when idle",
     "not_answering": "Songe not answering",
     "run_serve": "Run songe serve"
   },
@@ -504,9 +485,11 @@
       "{conversations} collected · {next}"
     ],
     "next_auto": "dreams when idle, or press Dream",
-    "next_manual": "Auto-dream off · press Dream"
+    "next_manual": "Auto-dream off · press Dream",
+    "next_idle": "dreams when idle · {idle}, or press Dream"
   },
   "request_failed": "request failed ({status})",
   "label_in_use": "{version} in use",
-  "dream_stopped_early": "it ended early"
+  "dream_stopped_early": "it ended early",
+  "idle_of": "{elapsed} of {limit}"
 }
