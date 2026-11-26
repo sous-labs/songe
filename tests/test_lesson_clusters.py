@@ -128,3 +128,28 @@ def test_practice_takes_only_lessons_with_the_evidence_a_note_needs(store):
     store.set("absorbed_signals", ["tool"])
     assert "tool" in practised() and "tool" not in in_prompt()
 
+
+def test_measuring_and_its_check_count_the_same_scenes(store):
+    """Live, Qwen3.8-27B on an RTX PRO 6000: after an adopted first night, a
+    pressed Deep Dream measured memory again every 80 s for 87 minutes and
+    never trained. Measuring records the scenes it measured (a one-off's kept
+    scenes left out, as training leaves them out); the check for new scenes
+    counted every kept scene, so after each measurement it asked for another."""
+    from types import SimpleNamespace
+
+    from songe.sleep import calibration_state as cs
+
+    for sid, session, lesson, kind in (("once", "s1", "Use metric.", "once"),
+                                       ("lasting", "s2", "Use pnpm, not npm.", "lasting")):
+        payload = {"id": sid, "session": session, "type": "correction", "source": "user", "lesson": lesson,
+                   "text": lesson, "exchanges": {"1": 1}, "revision": 1, "turn_kind": kind, "generality": "always"}
+        with store.connect() as db:
+            db.execute("INSERT INTO signals VALUES (?,?,?,?,?,NULL)",
+                       (sid, store.model_id, session, 1, json.dumps(payload)))
+            db.execute('INSERT INTO practice(id,model_id,signal_id,payload,kept,"drop",created) VALUES (?,?,?,?,1,NULL,0)',
+                       (f"{sid}#v1", store.model_id, sid, json.dumps(
+                           {"id": f"{sid}#v1", "signal_id": sid, "messages": [{"role": "user", "content": "x"}],
+                            "teacher_note": "n"})))
+    config = SimpleNamespace(learning="dreams")
+    measured = cs.pool_key(cs.sample_pool(store, config))
+    assert cs.revisions_key(cs.sample_revisions(store, config)) == measured

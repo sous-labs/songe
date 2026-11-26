@@ -359,7 +359,7 @@ class Reader:
             else:
                 response.raise_for_status()
                 answer, finish, used, thought = (
-                    read(response),
+                    read(response, schema),
                     finish_reason(response),
                     usage(response),
                     reasoning_of(response),
@@ -396,7 +396,7 @@ class Reader:
         if over_window(response):
             return {"error": "longer than the model's window"}, "window", used, ""
         response.raise_for_status()
-        return read(response), finish_reason(response), used + usage(response), reasoning_of(response)
+        return read(response, schema), finish_reason(response), used + usage(response), reasoning_of(response)
 
 
 def matches_schema(answer, schema):
@@ -440,9 +440,24 @@ def finish_reason(response):
         return None
 
 
-def read(response):
+def only_list(schema):
+    """The name of the list a schema asks for, when that list is all it
+    requires (classify's parts, review's signals), else None."""
+    required = (schema or {}).get("required") or []
+    if len(required) == 1 and ((schema.get("properties") or {}).get(required[0]) or {}).get("type") == "array":
+        return required[0]
+    return None
+
+
+def read(response, schema=None):
     choice = (response.json().get("choices") or [{}])[0]
     message = choice.get("message") or {}
+    # A bare list is read as the object holding it when that list is all the
+    # schema requires. Live (mlx-lm, Qwen3-4B-Instruct-2507): mlx-lm takes
+    # response_format but does not hold the model to it, so the prompt did
+    # not spell the format out, and the model answered classify with the bare
+    # list its examples show; 39 of 39 sessions were unreadable.
+    name = only_list(schema)
     # The answer, else the reasoning channel (live: LM Studio with Granite
     # MLX ignored "reasoning off" and put the structured JSON there, content
     # empty; every reading answer failed).
@@ -453,6 +468,8 @@ def read(response):
             value = json.loads(text)
         except ValueError:
             value = parse(text)
+        if isinstance(value, list) and name:
+            value = {name: value}
         if isinstance(value, dict):
             return value
     return {"error": f"no JSON (finish: {choice.get('finish_reason')})"}

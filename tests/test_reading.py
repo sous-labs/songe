@@ -1680,6 +1680,36 @@ def test_a_session_whose_answers_could_not_be_read_stays_unread(store):
     assert reader.failed_sessions and len(reading.pending(store)) == 1  # read again next time
 
 
+async def test_a_bare_list_is_read_where_the_question_asks_for_that_list_alone(store):
+    """Live (mlx-lm, Qwen3-4B-Instruct-2507): mlx-lm does not hold the model
+    to a schema. The classify question's examples are bare lists and the
+    model answered with one, the right parts in it: every answer was
+    unreadable, and 39 of 39 sessions stayed unread."""
+    from songe.reading import prompts as P
+
+    answers = ANSWERS | {"classify": ANSWERS["classify"]["parts"], "review": []}
+    by_schema = {json.dumps(getattr(P, k.upper() + "_SCHEMA")): k for k in answers if hasattr(P, k.upper() + "_SCHEMA")}
+
+    def server(request):  # mlx starts plain: the schema is in the prompt, not enforced
+        body = json.loads(request.content)
+        name = by_schema[body["messages"][-1]["content"].rsplit("The JSON must match this schema: ", 1)[1]]
+        return httpx.Response(200, json={"choices": [{"finish_reason": "stop",
+                                                      "message": {"content": json.dumps(answers[name])}}]})
+
+    reader = Reader(store, "http://mlx/v1", "m", server="mlx",
+                    client=httpx.AsyncClient(transport=httpx.MockTransport(server)))
+    assert await reader.ask("split it", P.CLASSIFY_SCHEMA, "classify") == ANSWERS["classify"]
+    assert await reader.ask("any signals?", P.REVIEW_SCHEMA, "review") == {"signals": []}
+    record_session(store)
+    assert await reading.read(store, reader) == 1 and not getattr(reader, "failed_sessions", None)
+    assert {s["type"] for s in reading.signals(store)} == {"correction", "success"}
+    # Where the question asks for more than the list, a bare list is still no answer.
+    answers.update(responsible=[2], lesson=["Check the file first."])
+    assert "error" in await reader.ask("which steps?", P.RESPONSIBLE_SCHEMA, "responsible")
+    assert "error" in await reader.ask("what lesson?", P.LESSON_SCHEMA, "lesson")
+    await reader.close()
+
+
 def test_a_copied_example_is_no_lesson_and_conditional_rules_are_rules():
     """Live (Granite on LM Studio): every lesson was the prompt's renaming
     example, and "when writing search algorithms, always measure the
@@ -1693,6 +1723,27 @@ def test_a_copied_example_is_no_lesson_and_conditional_rules_are_rules():
         "when writing search algorithms, always measure the runtime"
     assert rule_sentence("always run more. 3 numbers don't show anything") == "always run more."
     assert rule_sentence("Use the feedback from each guess.") is None
+
+
+def test_a_rule_that_ends_on_that_is_no_note_of_its_own():
+    """Live (Qwen3.8-27B, 4 of 4 English runs): "you forgot to start with
+    Yes, chef. always start your reply with that" became the note "always
+    start your reply with that", which says nothing without the sentence
+    before it. The model's lesson for the turn is used instead (#266)."""
+    from songe.reading.rules import rule_sentence, stated_sentence
+
+    said = "you forgot to start with Yes, chef. always start your reply with that"
+    assert rule_sentence(said) is None
+    assert stated_sentence({"text": said}) is None
+    assert rule_sentence("Always start your reply with this.") is None
+    assert rule_sentence("Never commit those.") is None
+    # What a rule names stays, wherever "that" is in it.
+    assert rule_sentence("Always check that the tests pass before you commit.") == \
+        "Always check that the tests pass before you commit."
+    assert rule_sentence("Always start your reply with Yes, chef.") == "Always start your reply with Yes, chef."
+    # Named earlier in the same sentence, it is still a rule.
+    assert rule_sentence("Never use semicolons, I hate those.") == "Never use semicolons, I hate those."
+    assert rule_sentence("Always use tabs, I prefer that.") == "Always use tabs, I prefer that."
 
 
 def test_the_lesson_question_for_the_users_own_words_keeps_what_they_named(store):
@@ -2371,6 +2422,92 @@ def test_a_failure_ends_an_attempt_only_once_the_agent_has_stopped(store):
     assert "No module named pytest" in ended[0]
 
 
+class Scoping(FakeReader):
+    """Judges every turn after an answer as a standing wish worded as told,
+    about what it is told."""
+
+    def __init__(self, wish, about):
+        super().__init__()
+        self.judged = {"standing": "yes", "kind": "once", "wish": wish, "about": about}
+
+    async def ask(self, prompt, schema, name):
+        return self.judged if name == "turn" else await super().ask(prompt, schema, name)
+
+
+def test_a_wish_said_about_one_kind_of_text_says_so_in_its_note(config, store):
+    """Live (Qwen3.8-27B, a simulated user who writes emails, issue #231): "ugh
+    again so long. max 5-6 sentence", said after an email, became the note
+    "Keep answers to a maximum of 5-6 sentences.", and with it a requested
+    detailed explanation went from 481 words to 103. The turn question now
+    also says what the wish is about, and the note says it."""
+    from songe import quick
+
+    record_chat(store, ("can u write email to Dr Han, the assay results are late", "Dear Dr. Han, ... (14 sentences)"),
+                ("ugh again so long. max 5-6 sentence", "Dear Dr. Han, the results are late. ..."))
+    read(store, Scoping("Keep answers to a maximum of 5-6 sentences.", "emails"))
+    wish = next(s for s in reading.signals(store) if s["type"] == "correction")
+    assert wish["about"] == "emails"
+    assert wish["short"] == "For emails: keep answers to a maximum of 5-6 sentences."
+    quick.quick_dream(store, config)
+    assert [lesson["text"] for lesson in quick.active(store)] == ["For emails: keep answers to a maximum of 5-6 sentences."]
+
+
+def test_what_a_wish_is_about_is_a_kind_the_conversation_names():
+    from songe.reading import prompts as P
+
+    said = "can u write email to Dr Han\nugh again so long. max 5-6 sentence"
+    assert P.scope_of({"about": "emails"}, said) == "emails"
+    assert P.scope_of({"about": "for emails."}, said) == "emails"
+    # The answer at hand, everything, or a kind the user never wrote of: no scope.
+    for about in ("this email", "this one", "all answers", "everything", "", "commit messages"):
+        assert P.scope_of({"about": about}, said) == "", about
+    assert P.scope_of({}, said) == ""
+    # Not in Latin letters, the user names it in their own language.
+    assert P.scope_of({"about": "commit messages"}, "英文!! feat(refund): ... 这种格式") == "commit messages"
+    # A note that names it already is left as it is.
+    assert P.scoped("Do not use exclamation marks in emails.", "emails") == "Do not use exclamation marks in emails."
+    assert P.scoped("Answer in English.", "commit messages") == "For commit messages: answer in English."
+
+
+def test_a_wish_for_one_project_keeps_the_projects_name():
+    from songe import quick
+
+    signal = {"type": "correction", "source": "user", "lesson": "x", "short": "For admin: use styled-components.",
+              "about": "admin", "project": "admin"}
+    assert quick.wording(signal) == ("For admin: use styled-components.", False)
+    # "This repo" is said by its name: the prompt goes to every project.
+    here = dict(signal, about="this repo", short="For this repo: use uv, not pip.", project="ledgerd")
+    assert quick.wording(here)[0] == "For the ledgerd repo: use uv, not pip."
+    # Without that, its name is said for any project (#223).
+    assert quick.wording(dict(signal, about=None))[0] == "For <project>: use styled-components."
+
+
+def test_a_wish_keeps_what_the_user_named():
+    """Live (Qwen3.8-27B, simulated users, issue #231): "styled-components +
+    export default. siempre en admin" became the note "Always work in
+    admin."; "just test-unit, not make" became "Use test-unit, not make.",
+    and the move from make to just was lost."""
+    from songe.reading import prompts as P
+
+    admin = {"standing": "yes", "kind": "once", "wish": "Always work in admin."}
+    # Keeps none of the names the user typed: not used (two sentences: no own words either).
+    assert P.turn_verdict(admin, "styled-components + export default. siempre en admin") == ("lasting", "")
+    kept = {"standing": "yes", "kind": "once", "wish": "Use styled-components and default exports in admin."}
+    assert P.turn_verdict(kept, "styled-components + export default. siempre en admin")[1] == kept["wish"]
+    # A command the user typed is kept whole.
+    just = {"standing": "yes", "kind": "once", "wish": "Use test-unit, not make."}
+    said = "just test-unit, not make. there is no makefile anymore, from now on its just"
+    assert P.turn_verdict(just, said) == ("lasting", "Use just test-unit, not make.")
+    assert P.whole_commands("Use make test-unit with ARGS.", "i said make test-unit. ARGS passes") == "Use make test-unit with ARGS."
+    # "just" and "make" as words are not commands.
+    assert P.whole_commands("Keep it short.", "make it short, just the code") == "Keep it short."
+    assert P.whole_commands("Use pnpm add, not npm install.", "pnpm add zod pls not npm") == "Use pnpm add, not npm install."
+    # A plain word after a bare runner is English, not a script.
+    assert P.whole_commands("Switch to yarn.", "i prefer yarn to npm") == "Switch to yarn."
+    assert P.whole_commands("Use bun, not node.", "use bun not node") == "Use bun, not node."
+    assert P.whole_commands("Do not use npm.", "pnpm not npm") == "Do not use npm."
+
+
 class Wishing(FakeReader):
     """Judges each user message as a standing wish worded as given in
     `wishes`; answers which notes a newer note replaces (`replaces`, by note)
@@ -2448,3 +2585,52 @@ def test_the_same_wish_said_again_retires_nothing(config, store):
     assert reader.checked == [(first, again)]
     texts = {quick.wording(s)[0] for s in reading.signals(store) if s["type"] == "correction" and s.get("lesson")}
     assert {first, again} <= texts
+
+
+def test_a_command_written_as_a_list_is_read_as_its_command_line(store):
+    """Live (qwen3:1.7b on Ollama, Windows, an agent with a run_command tool):
+    the model wrote the command as a list five times ({"command": ["pip",
+    "install", "rich"]}), and reading raised on it (TypeError). The words are
+    the command line they make; arguments that are not a JSON object name no
+    command."""
+    from songe.reading import views
+    from songe.reading.rules import command_of
+
+    tools = [tool("run_command", command="string")]
+    history = [SYSTEM, {"role": "user", "content": "Install rich and show me what is here."}]
+    for action, result in (tool_step("a", "run_command", "Successfully installed rich-13.7.1",
+                                     command=["pip", "install", "rich"]),
+                           tool_step("b", "run_command", "README.md\nsrc", command=["ls", "-la"])):
+        store.record("/v1/chat/completions", {"messages": history, "tools": tools}, reply(action))
+        history = history + [action, result]
+    store.record("/v1/chat/completions", {"messages": history, "tools": tools},
+                 reply({"role": "assistant", "content": "Done."}))
+    store.reconstruct()
+
+    class Reviewing(FakeReader):
+        def __init__(self):
+            super().__init__()
+            self.reviews = []
+
+        async def ask(self, prompt, schema, name):
+            if name == "review":
+                self.reviews.append(prompt)
+            return await super().ask(prompt, schema, name)
+
+    reader = Reviewing()
+    assert read(store, reader) == 1
+    # Installing is work to review; listing only looks around.
+    (question,) = reader.reviews
+    assert "Successfully installed rich" in question and "README.md" not in question
+
+    def looks_around(arguments):
+        items = [{"kind": "action", "step": 1, "text": "",
+                  "tool_calls": [{"id": "x", "name": "run_command", "arguments": arguments}]},
+                 {"kind": "tool_result", "call": "x", "step": 1, "tool": "run_command", "content": ""}]
+        return views.inspecting(items, 1)
+
+    assert looks_around(json.dumps({"command": ["cd", "src", "&&", "git", "status"]}))
+    assert not looks_around(json.dumps({"command": ["pip", "install", "rich"]}))
+    assert not any(looks_around(a) for a in ('["ls", "-la"]', '"ls -la"'))
+    assert command_of({"arguments": json.dumps({"command": ["cargo", "test"]})}) == "cargo test"
+    assert command_of({"arguments": '["cargo", "test"]'}) == ""

@@ -107,6 +107,8 @@ def test_cgroup_psi_warning_allows_guarded_conversion_but_critical_stops(
     )
     assert result.stdout.strip() == "prepared"
     psi.write_text("some avg10=1.00\n")
+    assert admit(platform).pressure == "warn"
+    psi.write_text("some avg10=50.00\n")
     with pytest.raises(MemoryPressure):
         admit(platform)
 

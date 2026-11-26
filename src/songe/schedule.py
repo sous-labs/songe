@@ -376,6 +376,24 @@ def reason(
     return "Will sleep when idle"
 
 
+def memory_waiting(reason):
+    text = (reason or "").lower()
+    return "memory" in text and any(w in text for w in ("wait", "held", "paus"))
+
+
+def note_memory_wait(scheduler, reason):
+    """songe.log gets one line when a wait for memory starts and one when it
+    ends, with its length; the status text alone left no trace of them."""
+    since = scheduler.__dict__.get("_memory_wait_since")
+    if memory_waiting(reason) and since is None:
+        scheduler.__dict__["_memory_wait_since"] = time.monotonic()
+        logger.info("memory_wait %s", reason)
+    elif not memory_waiting(reason) and since is not None:
+        scheduler.__dict__["_memory_wait_since"] = None
+        minutes = (time.monotonic() - since) / 60
+        logger.info("memory_wait_over after %.1f min: %s", minutes, reason)
+
+
 class Scheduler:
     @property
     def reason(self):
@@ -389,6 +407,8 @@ class Scheduler:
         self._reason = value
         logged = self.__dict__.setdefault("_reason_logged", {})
         store = self.__dict__.get("store")
+        if value != previous:
+            note_memory_wait(self, value)
         if value != previous and store is not None:
             now = time.monotonic()
             if now - logged.get(value, -1e9) > 600:
@@ -429,11 +449,15 @@ class Scheduler:
         self.exporting = False
         self.last_probe = None
         self.idle_threshold_seconds = self.idle_wait()
+
+    @property
+    def pressure_history(self):
+        """The current store's: calibration and the worker learn boundaries
+        there too. A copy kept from start missed them, wrote over them, and
+        stayed with the first store after select() scoped it to a model."""
         from .sleep.sizing import PressureHistory
 
-        self.pressure_history = PressureHistory(
-            store.get("memory_pressure_history", {})
-        )
+        return PressureHistory(self.store.get("memory_pressure_history", {}))
 
     def unloads(self):
         return bool(self.store.get("unloads_model"))
@@ -448,8 +472,9 @@ class Scheduler:
         return park_wait(gaps, self.config)
 
     def observe_memory(self, sample):
-        self.pressure_history.observe(sample)
-        self.store.set("memory_pressure_history", self.pressure_history.data)
+        history = self.pressure_history
+        history.observe(sample)
+        self.store.set("memory_pressure_history", history.data)
 
     def acquire(self, binding):
         self.in_flight[binding] = self.in_flight.get(binding, 0) + 1
@@ -1456,7 +1481,10 @@ class Scheduler:
                 | set(record.get("trained_signals") or [])
             )
             self.store.set("trained_signals", trained)
-            quick.absorb(self.store, trained)
+            # A Dream that measured which lessons its version follows without
+            # the note (the worker's "absorbed_signals") takes only those
+            # notes out; a record without the measure, every trained one.
+            quick.absorb(self.store, record.get("absorbed_signals", trained))
             self.store.set(
                 "trained_base",
                 record.get("base_fingerprint", base_fingerprint(self.config)),

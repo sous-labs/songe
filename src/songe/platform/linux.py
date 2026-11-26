@@ -11,17 +11,33 @@ from .. import NAME
 from . import Accel, Memory, Power
 from .common import ChildHandle, discrete_accelerators, read
 
+# PSI "some avg10": the percent of the last 10 s in which a task here waited
+# for memory. Below this line a stall is not harm on its own: a model download
+# stalled 2.7% with 30 of 46 GB free (a 0.4 median made that "critical"), and
+# filling memory to 6 GB free stalled 0.2%. Running out shows in `available`.
+PSI_CRITICAL = 10.0
 
-def pressure(available, total, psi, baseline, *, warn_ratio=2.0, critical_ratio=4.0):
+
+def pressure(
+    available,
+    total,
+    psi,
+    baseline,
+    *,
+    warn_ratio=2.0,
+    critical_ratio=4.0,
+    critical_psi=PSI_CRITICAL,
+):
     """PSI is relative to this instance's recent median (not machine-size rules).
 
-    Relative doubling/quadrupling marks warning/critical. Available RAM at zero
-    is always critical. A zero PSI history is bootstrapped by its first sample.
-    Ratios are named, overridable sensitivity controls, not model exclusions.
+    Relative doubling marks warning. Critical needs four times the median and
+    at least critical_psi: a small median makes any small stall a quadrupling.
+    Available RAM at zero is always critical. A zero PSI history is
+    bootstrapped by its first sample.
     """
     if total <= 0 or available <= 0:
         return "critical"
-    if baseline > 0 and psi >= baseline * critical_ratio:
+    if psi >= critical_psi and (baseline <= 0 or psi >= baseline * critical_ratio):
         return "critical"
     if baseline > 0 and psi >= baseline * warn_ratio:
         return "warn"

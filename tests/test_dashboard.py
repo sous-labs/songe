@@ -83,6 +83,29 @@ def test_a_dream_waiting_for_disk_space_says_how_much(config, store, monkeypatch
     assert activity(config, store, worker, None, models, live=True)["next"] == pending["next"]
 
 
+def test_the_test_moment_wait_says_how_many_a_deep_dream_needs(config, store, monkeypatch):
+    """Live (import of past logs): "collecting test moments · 0 of 5" for
+    5.5 h, while a Deep Dream starts on one test moment (pool.test_minimum)."""
+    from songe.practice import pool
+    from songe.status import experience_wait
+
+    config.learning = "dreams"
+    registry.migrate(config, store)
+    registry.observe(config, store, "m")
+    registry.set_learning(store, "m", "all")
+    registry.support(store, "m", "trainable")
+    for other in registry.summaries(config, store):
+        if other["id"] != "m":
+            registry.set_learning(store, other["id"], "off")
+    monkeypatch.setattr(pool, "practice_steps", lambda scoped, split="train": [object()] * 6)
+    monkeypatch.setattr(pool, "heldout_units", lambda scoped: 0)
+    monkeypatch.setattr(pool, "untrained", lambda scoped, steps=None: list(steps or []))
+    monkeypatch.setattr(store, "traffic_times", lambda n: [1.0])
+    assert experience_wait(config, store, registry.summaries(config, store)).startswith(
+        "collecting test moments · 0 of 1 needed"
+    )
+
+
 def test_with_two_models_the_wait_is_the_pressed_models(config, store, monkeypatch):
     """Reported by Jack in a test on 11-24: with a 4B and a 1.7B, the status
     said "ready to learn · 14 practice scenes waiting" (the 4B's) while the
@@ -800,9 +823,59 @@ def test_the_page_takes_its_words_from_wording_json():
 def test_every_word_the_page_asks_for_exists():
     script = (PAGE / "next.js").read_text(encoding="utf-8")
     words = json.loads((PAGE / "wording.json").read_text(encoding="utf-8"))
-    groups = {"C": "cloud", "L": "lines", "R": "rail", "T": "train_state", "E": "empty"}
+    groups = {"C": "cloud", "R": "rail", "T": "train_state", "E": "empty"}
     missing = [key for key in re.findall(r"\bW\.(\w+)", script) if key not in words]
     for alias, group in groups.items():
         missing += [f"{group}.{key}" for key in re.findall(rf"\b{alias}\.(\w+)", script)
                     if key not in words[group]]
     assert missing == []
+
+
+STATUSES = json.loads(
+    (Path(__file__).parent / "fixtures/wording.json").read_text(encoding="utf-8")
+)["statuses"]
+
+
+@pytest.mark.parametrize("case", STATUSES, ids=lambda c: c["name"])
+def test_the_page_and_songe_status_say_the_same_now_and_next(config, store, case, capsys):
+    """The page worded Now and Next itself: "Dreams again when your computer
+    is idle" where `songe status` said "Ready to train · Starts when idle ·
+    8m of 10m". Both now take the lines the service words once."""
+    from songe import cli
+    from songe.api import state_sections
+
+    learner(config, store)
+    data = snapshot(config, store, scheduler(config, last_traffic=0, process=None), live=True)
+    data |= case["data"]
+    page = state_sections(data)["status"]["lines"]
+    cli.print_status(data)
+    printed = dict(line.split(None, 1) for line in capsys.readouterr().out.splitlines()[:2])
+    assert page == {"now": printed["now"].removeprefix("● "), "next": printed["next"]}
+
+
+def test_the_page_shows_the_services_now_and_next_lines():
+    script = (PAGE / "next.js").read_text(encoding="utf-8")
+    assert "function statusLines" not in script
+    assert "status?.lines?.now" in script and "status?.lines?.next" in script
+
+
+def test_the_page_counts_idle_time_toward_a_dream():
+    """A model waiting for idle time said only "dreams when idle"; the status
+    sends how long it has been idle and how long it needs."""
+    script = (PAGE / "next.js").read_text(encoding="utf-8")
+    words = json.loads((PAGE / "wording.json").read_text(encoding="utf-8"))
+    assert "a.idle_elapsed_seconds" in script and "a.idle_threshold_seconds" in script
+    assert words["empty"]["next_idle"] == "dreams when idle · {idle}, or press Dream"
+    assert words["idle_of"] == "{elapsed} of {limit}"
+
+
+def test_the_dreams_practice_wait_says_how_many_test_moments_a_deep_dream_needs(config, store, monkeypatch):
+    """practice_wait carried the same "0 of 5" (min_heldout) under Dreams,
+    where a Deep Dream starts on one test moment (pool.test_minimum)."""
+    from songe.practice import pool
+    from songe.status import practice_wait
+
+    config.learning = "dreams"
+    monkeypatch.setattr(pool, "practice_steps", lambda scoped, split="train": [object()] * 6)
+    monkeypatch.setattr(pool, "heldout_units", lambda scoped: 0)
+    assert practice_wait(config, store, [{"id": "m"}]) == "collecting test moments · 0 of 1 needed to check updates"

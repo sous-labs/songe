@@ -18,7 +18,7 @@ Successes come from the rules alone and are not events for the model.
 import json
 import re
 
-from .rules import FAILURE
+from .rules import FAILURE, arguments_of, command_line
 from .rules import extract as rule_signals
 from .timeline import clip
 
@@ -115,11 +115,7 @@ def inspecting(items, result_item):
         if it["kind"] == "action":
             for c in it.get("tool_calls", []):
                 if c["id"] == call_id:
-                    try:
-                        cmd = json.loads(c.get("arguments") or "{}").get("command") or ""
-                    except ValueError:
-                        cmd = ""
-                    return bool(INSPECT.search(cmd))
+                    return bool(INSPECT.search(command_line(arguments_of(c).get("command"))))
     return False
 
 
