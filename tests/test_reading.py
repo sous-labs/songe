@@ -2429,3 +2429,82 @@ def test_a_wish_for_one_project_keeps_the_projects_name():
     assert quick.wording(here)[0] == "For the ledgerd repo: use uv, not pip."
     # Without that, its name is said for any project (#223).
     assert quick.wording(dict(signal, about=None))[0] == "For <project>: use styled-components."
+
+
+class Wishing(FakeReader):
+    """Judges each user message as a standing wish worded as given in
+    `wishes`; answers which notes a newer note replaces (`replaces`, by note)
+    and whether both can be followed (only the pairs in `not_both` cannot)."""
+
+    def __init__(self, wishes, replaces=None, not_both=(), same=()):
+        super().__init__()
+        self.wishes, self.replaces, self.not_both, self.listed, self.checked = wishes, replaces or {}, set(not_both), [], []
+        self.same = [set(pair) for pair in same]
+
+    async def ask(self, prompt, schema, name):
+        if name == "turn":
+            said = prompt.rsplit("The user's next message:\n", 1)[1].split("\n")[0].strip('"')
+            wish = self.wishes.get(said, "")
+            return {"standing": "yes" if wish else "no", "kind": "once" if wish else "task", "wish": wish, "about": ""}
+        if name == "same_wish":
+            pair = (prompt.split("Note 1: ", 1)[1].split("\n")[0], prompt.split("Note 2: ", 1)[1].split("\n")[0])
+            return {"note_1_asks": "", "note_2_asks": "", "kind": "same" if set(pair) in self.same else "different"}
+        if name == "changed":
+            note = prompt.split("A newer note, from what the user said after all of them:\n", 1)[1].split("\n")[0]
+            self.listed.append((prompt.split("oldest first:\n", 1)[1].split("\n\n")[0], note))
+            return {"replaces": self.replaces.get(note, [])}
+        if name == "follow_both":
+            pair = (prompt.split("Earlier: ", 1)[1].split("\n")[0], prompt.split("Later: ", 1)[1].split("\n")[0])
+            self.checked.append(pair)
+            return {"kind": "later_only" if pair in self.not_both else "both"}
+        return await super().ask(prompt, schema, name)
+
+
+def test_a_newer_wish_retires_the_note_it_changes(config, store):
+    """Live (Qwen3.8-27B, a simulated Go developer, issue #231): "注释还是中文吧"
+    early and "又写中文注释了。。英文" after the repository went open source left
+    both "Use Chinese comments." and "Use English comments." in the prompt:
+    only a preference the user stated about themself could retire an older
+    one. A note from a correction now does the same, asked the same two
+    questions."""
+    from songe import quick
+
+    old, new, other = "Use Chinese comments.", "Use English comments.", "Run make gen first."
+    wishes = {"注释还是中文吧": old, "make gen 先跑": other, "又写中文注释了。。英文": new}
+    record_chat(store, ("给 refund 加个注释", "// refund 退款"), ("注释还是中文吧", "// 退款处理"))
+    record_chat(store, ("生成 mock", "mockgen ..."), ("make gen 先跑", "make gen"))
+    read(store, Wishing(wishes))
+    quick.quick_dream(store, config)
+    assert {lesson["text"] for lesson in quick.active(store)} >= {old, other}
+
+    record_chat(store, ("给 settle 加注释", "// 结算"), ("又写中文注释了。。英文", "// settle the batch"))
+    # The model names both earlier notes; asked again about each pair alone,
+    # only the comments cannot both be followed.
+    reader = Wishing(wishes, replaces={new: [1, 2, 7, "1", True]}, not_both={(old, new)})
+    read(store, reader)
+    assert reader.listed[-1] == (f"1. {old}\n2. {other}", new)
+    assert reader.checked == [(old, new), (other, new)]
+    texts = {quick.wording(s)[0] for s in reading.signals(store) if s["type"] == "correction" and s.get("lesson")}
+    assert old not in texts and {new, other} <= texts
+    quick.quick_dream(store, config)
+    active = {lesson["text"] for lesson in quick.active(store)}
+    assert new in active and other in active and old not in active
+
+
+def test_the_same_wish_said_again_retires_nothing(config, store):
+    """Live (Qwen3.8-27B, a simulated email writer): "Always include 'Thanks,
+    Mi-rae' at the end of emails." was read as replaced by its restatement
+    "Use 'Thanks, / Mi-rae' as the sign-off.", that one by a third, and the
+    sign-off left the prompt. A wish said again is one wish (fold_same),
+    not a change; and a change wanted once replaces nothing."""
+    from songe import quick
+
+    first, again = "Always include Thanks, Mi-rae at the end of emails.", "Use Thanks, Mi-rae as the sign-off."
+    wishes = {"and Thanks, Mi-rae at end": first, "ugh i changed sign-off already. Thanks, Mi-rae": again}
+    record_chat(store, ("email to Dr Han", "Dear Dr Han, ... Best regards"), ("and Thanks, Mi-rae at end", "... Thanks, Mi-rae"))
+    record_chat(store, ("email to IT", "Hello, ... Best regards"), ("ugh i changed sign-off already. Thanks, Mi-rae", "... Thanks, Mi-rae"))
+    reader = Wishing(wishes, replaces={again: [1]}, not_both={(first, again)}, same=[(first, again)])
+    read(store, reader)
+    assert reader.checked == [(first, again)]
+    texts = {quick.wording(s)[0] for s in reading.signals(store) if s["type"] == "correction" and s.get("lesson")}
+    assert {first, again} <= texts

@@ -325,6 +325,76 @@ async def retire_replaced(store, reader):
     return len(gone)
 
 
+async def retire_changed(store, reader):
+    """People change what they want of the assistant too: "注释还是中文吧"
+    (comments in Chinese) and, weeks later, "又写中文注释了。。英文" (English
+    now). retire_replaced only weighs what the user said about themself, so
+    both notes stayed. Each note for the prompt from the user's own feedback
+    is shown with the different notes before it (which of them does it
+    replace?), each one named again on its own with it (can the assistant
+    follow both?), and the signals of a note it cannot follow alongside are
+    retired: reading, the prompt and practice no longer see them. Returns how
+    many were retired.
+
+    Every note is gone through each time, oldest first, as in
+    retire_replaced: all questions but those for a new note are answered
+    from the reader's cache."""
+    from .. import quick
+    from . import prompts as P
+
+    def load():
+        with store.connect() as db:
+            return db.execute(
+                "SELECT id, retired_at, payload FROM signals WHERE model_id=?", (store.model_id,)
+            ).fetchall()
+
+    rows = [dict(json.loads(payload), id=sid, retired=at is not None) for sid, at, payload in await asyncio.to_thread(load)]
+    notes = sorted((s for s in rows if s.get("source") == "user" and not s.get("preference") and quick.suitable(s)),
+                   key=said_at)
+    for s in notes:
+        s["note"] = quick.wording(s)[0]
+    gone = []
+    try:
+        for place, signal in enumerate(notes):
+            earlier = {}  # note: its signals
+            for s in notes[:place]:
+                if quick.normal(s["note"]) != quick.normal(signal["note"]):
+                    earlier.setdefault(s["note"], []).append(s)
+            earlier = {text: said for text, said in list(earlier.items())[-SHOWN:] if not all(s["retired"] for s in said)}
+            if signal["retired"] or not earlier or signal.get("turn_kind") != "lasting":
+                # Only a standing wish retires a note: a change wanted once
+                # ("this one can be super casual") may be for that answer alone.
+                continue
+            answer = await reader.ask(
+                P.CHANGED.format(notes="\n".join(f"{n}. {text}" for n, text in enumerate(earlier, 1)), note=signal["note"]),
+                P.REPLACES_SCHEMA,
+                "changed",
+            )
+            named = answer.get("replaces") if isinstance(answer, dict) else None
+            for n in dict.fromkeys(named if isinstance(named, list) else []):
+                if not (isinstance(n, int) and not isinstance(n, bool) and 1 <= n <= len(earlier)):
+                    continue
+                old, said = list(earlier.items())[n - 1]
+                sure = await reader.ask(P.FOLLOW_BOTH.format(old=old, new=signal["note"]), P.BOTH_TRUE_SCHEMA, "follow_both")
+                if isinstance(sure, dict) and sure.get("kind") == "later_only" and not (
+                    await one_wish(reader, old, signal["note"]) and await one_wish(reader, signal["note"], old)
+                ):
+                    # The same wish said again in other words is not a
+                    # change: fold_same gives both one place. Live (Qwen3.8-27B,
+                    # an email writer): each restatement of "Thanks, Mi-rae"
+                    # was read as replacing the one before, and in the end a
+                    # note without the sign-off retired the last of them.
+                    for s in said:
+                        if not s["retired"]:
+                            s["retired"] = True
+                            gone.append(s["id"])
+    except Stopped:
+        pass  # the user is back: the rest is asked next time
+    if gone:
+        await asyncio.to_thread(retire, store, gone)
+    return len(gone)
+
+
 # {signal id: the first signal that noted the same wish}, in the learner's state.
 SAME = "same_notes"
 
@@ -462,5 +532,6 @@ async def read(store, reader, *, limit=None, on_session=None, newest=False, seco
             on_session(session, found)
     if not stopped:
         await retire_replaced(store, reader)
+        await retire_changed(store, reader)
         await fold_same(store, reader)
     return done

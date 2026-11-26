@@ -2629,6 +2629,17 @@ class ModelScheduler(Scheduler):
                     "unsupported",
                     "Local weights are not discoverable; forwarding only",
                 )
+            elif not ref.path.is_absolute():
+                # A served model whose weights are not on this machine (a
+                # vLLM elsewhere, or a cache Songe cannot see): its name, not
+                # a path. Saved as the model it failed validation on every
+                # tick, and the page said "Sleep failed" on a fresh install.
+                registry.support(
+                    self.installation_store,
+                    row["id"],
+                    "unsupported",
+                    "Local weights are not accessible; serving only",
+                )
             else:
                 from .models.library import is_embedding
 

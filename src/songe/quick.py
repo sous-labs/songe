@@ -963,6 +963,18 @@ def differs(before, after):
     return difflib.SequenceMatcher(None, x, y).ratio() < SAME_TEXT
 
 
+def identical(before, after):
+    """Whether two answers are the same action as written: the same tool calls
+    with the same arguments (JSON key order and whitespace aside) and the same
+    visible text (whitespace aside). User decision: only these settle the
+    judged gate's tie without the judge; a near match (a read from line 20 vs
+    21, a command with one flag added) is the judge's to call."""
+    def norm(a):
+        calls = [(c["name"], " ".join(_json_text(c["arguments"]).split())) for c in a["tool_calls"]]
+        return calls, " ".join(visible(a["text"]).split())
+    return norm(before) == norm(after)
+
+
 def visible(text):
     """What the user would see of an answer: no private reasoning (a
     <think> block, or everything before a closing </think>) and no tool-call
