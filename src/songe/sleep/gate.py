@@ -127,10 +127,11 @@ def judged_reason(judged, change, margin):
 
     Rows marked "served" compared what the user would be served (the
     candidate with the notes that stay in the prompt) with what they are
-    served now (the version in use with all its notes). The candidate must
-    not be worse there, and adopting must give something: a lesson learned
-    (its note leaves the prompt) or a moment won. Other rows compared the two
-    versions with no notes: the candidate must be clearly better."""
+    served now (the version in use with all its notes). The candidate is
+    adopted only when it is not clearly worse there and it won more moments
+    than it lost. A lesson learned (its note would leave the prompt) never
+    adopts it on its own. Other rows compared the two versions with no
+    notes: the candidate must be clearly better."""
     wins = sum(a["outcome"] == "win" for a in judged)
     losses = sum(a["outcome"] == "loss" for a in judged)
     if any(a.get("served") for a in judged):
@@ -139,8 +140,8 @@ def judged_reason(judged, change, margin):
         # (WORSE_Z, a one-sided 5% on the moments that got a verdict).
         if losses - wins > WORSE_Z * math.sqrt(losses + wins):
             return f"Worse than what you have now: better on {wins}, worse on {losses}"
-        if wins <= losses and not any(a.get("learned") for a in judged):
-            return f"Nothing to adopt yet: no lesson learned, better on {wins}, worse on {losses}"
+        if wins <= losses:
+            return f"Not better than what you have now: better on {wins}, worse on {losses}"
         return None
     if wins <= losses or change <= margin:
         return f"Not clearly better: better on {wins}, worse on {losses}"

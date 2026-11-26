@@ -183,7 +183,9 @@ or by auto-dream:
   without this one, and each answer must do what the note asks as well as the
   teacher's stored answer (`sleep.judged.learned`, recorded as `learned` and
   `absorbed_signals`). A lesson not learned yet, or with no held-out scene,
-  keeps its note beside the adapter. So that a note can be tested, a note
+  keeps its note beside the adapter, and so does a lesson whose own
+  conversation was judged worse with the candidate served without its note
+  (`sleep.judged.kept_back`). So that a note can be tested, a note
   whose lesson has practice from two or more conversations keeps one of them
   out of training (`practice.pool.ensure_note_heldout`: the one with the
   fewest scenes, never one already trained); with practice from a single
@@ -801,18 +803,27 @@ most a one-line label on an example.
   real conversations (with the user's feedback) first; held-out practice
   lessons (never trained on, one scene each, fixed order) fill the places up
   to `min_heldout` (5). Each unit's last 3 moments, 24 at most. At each moment
-  the version in use and the candidate answer deterministically (384 tokens);
+  the version in use and the candidate answer deterministically (384 tokens)
+  as the user is served: the version in use with the notes it has now, the
+  candidate with the notes that would stay after adopting it (rows marked
+  `served`);
   the same action is a tie; of two different ones each goes on its own to
   the original base model (request, the user's feedback or the lesson, one
   answer: does it do what the feedback asks, yes or no; never which of two
   it prefers). A win when only the candidate's does, a loss when only the
   answer in use does; both, neither or a reply that cannot be read is a tie;
-  the teacher's preference, which training fits, never breaks it.
-  Each moment is one unit (win +1, loss −1, tie 0), resampled per moment
-  (user decision: per conversation, 5 units left the lower bound at 0); at
-  least `min_heldout` conversations must be present. Adopt only if wins >
-  losses and the resampled lower bound is above zero, and drift and health
-  pass. Moments of one conversation are related, so this adopts more easily. The
+  the teacher's preference, which training fits, never breaks it. These
+  judge rules (an undecided judge is a tie, #119; each answer judged on its
+  own against the feedback, #178) still hold.
+  At least `min_heldout` conversations must be present. Adopt only if the
+  candidate is not clearly worse (clearly worse: losses − wins > 1.64 ×
+  √(losses + wins), beyond what a judge right four times in five gives by
+  chance) and it won more moments than it lost (wins > losses), and drift
+  and health pass. A lesson learned (its note would leave the prompt) never
+  adopts a version on its own (`sleep.gate.judged_reason`). Rows judged
+  without notes (not `served`) keep the older rule: each moment one unit
+  (win +1, loss −1, tie 0), resampled per moment; adopt only if wins >
+  losses and the resampled lower bound is above zero. The
   record carries `judged` rows, `improved` {count, worse, same, checked} and
   the report's examples are the moments won. If the backend cannot answer,
   the KL decides and `judged_error` says so.
