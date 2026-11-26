@@ -5,6 +5,8 @@ import asyncio
 import copy
 import json
 
+import pytest
+
 from songe.practice import store as practice
 from songe.practice.checks import STOCK_LESSONS, placebo_for
 from songe.reading import store as reading
@@ -519,3 +521,29 @@ def test_the_scenes_of_a_plain_chat_are_answered_several_at_a_time(store, monkey
     rows = chat_written(store, monkeypatch, Slow(messages=many), variants=tuple(range(1, 21)))
     assert sorted(r["variant"] for r in rows) == list(range(1, 21))
     assert 1 < Slow.most <= 2 * practice.AT_ONCE
+
+
+@pytest.mark.parametrize("shell,read", [("run_shell", "read_file"), ("Bash", "Read"), ("execute_bash", "view")])
+def test_a_scene_uses_the_agents_own_names_for_shell_and_read(shell, read):
+    """Agents name their tools differently; a scene's generic shell, grep and
+    read steps become the agent's own calls instead of being dropped."""
+    from songe.practice.frame import build, frame_from_request
+
+    def tool(name, arg):
+        return {"type": "function", "function": {"name": name, "parameters": {
+            "type": "object", "properties": {arg: {"type": "string"}}, "required": [arg]}}}
+
+    request = {"messages": [{"role": "user", "content": "x"}], "tools": [tool(shell, "command"), tool(read, "path")]}
+    frame = frame_from_request(request, "shop")
+    scene = {
+        "request": "Tidy the cache.", "files": [{"path": "app.py", "content": "def main():\n    pass\n"}],
+        "steps": [
+            {"say": "", "tool": "grep", "args": {"pattern": "def main", "path": ""}, "output": ""},
+            {"say": "", "tool": "read", "args": {"path": "app.py"}, "output": ""},
+        ],
+        "moment": {"kind": "tool_result", "step": {"say": "", "tool": "shell", "args": {"command": "ls"}, "output": "app.py"}},
+    }
+    messages, problems, _ = build(scene, frame)
+    assert problems == []
+    called = [c["function"]["name"] for m in messages for c in m.get("tool_calls") or []]
+    assert called == [shell, read, shell]

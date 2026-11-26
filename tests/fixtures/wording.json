@@ -1067,7 +1067,7 @@
         }
       },
       "summary": [
-        "Evaluating",
+        "Evaluation",
         ""
       ]
     },
@@ -1276,11 +1276,11 @@
     },
     {
       "raw": "resume → train Qwen3.5-4B",
-      "text": "turn learning on, then train Qwen3.5-4B"
+      "text": "run songe resume, then train Qwen3.5-4B"
     },
     {
       "raw": "resume → calibrate Qwen3.5-4B",
-      "text": "turn learning on, then measure training needs for Qwen3.5-4B"
+      "text": "run songe resume, then measure training needs for Qwen3.5-4B"
     }
   ]
 }
