@@ -2657,3 +2657,40 @@ async def test_an_idle_deep_dream_writes_no_practice_a_quantized_base_cannot_tra
     scheduler.missing_packages = lambda model: None
     assert await scheduler.read_sessions(practice=True) == 3
     assert practice.counts(learner)["written"] == 3
+
+
+def test_a_conversation_whose_earlier_turns_were_never_recorded_is_read_but_not_trained(store, monkeypatch):
+    """#263 (live, Qwen3.8-27B on vLLM): an agent that trims its history, or a
+    chat open before Songe started, sends turns Songe never recorded. They
+    waited for that parent forever, so nothing after them was read and the
+    user's correction became no note."""
+    from songe import log
+    from songe.reading import timeline
+    from songe.steps import UNLINKED
+
+    ask = {"role": "user", "content": "write a snake game"}
+    unseen = {"role": "assistant", "content": "Here is snake.py."}  # never recorded
+    fix = {"role": "user", "content": "you forgot to start with Yes, chef. always start your reply with that"}
+    answer = {"role": "assistant", "content": "Yes, chef. Fixed."}
+    store.record("/v1/chat/completions", {"messages": [SYSTEM, ask, unseen, fix]}, reply(answer))
+    thanks = {"role": "user", "content": "thanks"}
+    store.record("/v1/chat/completions", {"messages": [SYSTEM, ask, unseen, fix, answer, thanks]},
+                 reply({"role": "assistant", "content": "Yes, chef. Anytime."}))
+
+    def reconstructed():
+        store.reconstruct()
+        with store.connect() as db:
+            unresolved = db.execute("SELECT COUNT(*) FROM reconstructed WHERE resolved=0").fetchone()[0]
+            return unresolved, timeline.sessions(db)
+
+    # Just recorded: it still waits, as a parent recorded late links it.
+    assert reconstructed() == (2, {})
+    monkeypatch.setattr(log, "UNLINKED_AFTER", 0)
+    unresolved, found = reconstructed()
+    assert unresolved == 0
+    assert list(found.values()) == [[1, 2]]  # one conversation, read in full
+    # Neither turn is a training context or a test moment.
+    assert store.active_steps() == [] and store.test_moment_conversations() == []
+    with store.connect() as db:
+        retired = db.execute("SELECT retired_reason FROM steps").fetchall()
+    assert [r[0] for r in retired] == [UNLINKED, UNLINKED]

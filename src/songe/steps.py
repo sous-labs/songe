@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import time
 from dataclasses import asdict, dataclass, fields
 
 
@@ -111,12 +112,22 @@ def unsummarised(messages):
     return kept if len(kept) != len(messages) else None
 
 
-def extract(exchanges, public_model=None, *, prefixes=None, steps=None):
+# A conversation whose earlier turns were never recorded (the agent trimmed
+# its history, or the chat was open before Songe started): read for notes and
+# practice, never a training context or a test moment (#263).
+UNLINKED = "history not recorded"
+
+
+def extract(exchanges, public_model=None, *, prefixes=None, steps=None, unlinked=False):
     """Reconstruct roots chronologically; all branches inherit the original split.
 
     On prefix compaction/mutation there is no evidence of continuity; such turns
     are excluded if their history contains assistant turns we cannot link. This
     avoids accidentally training the held-out continuation of a known thread.
+
+    `unlinked`: such a turn has waited long enough for its parent. It starts a
+    conversation of its own, so it is read; its steps, and every step after
+    them, are retired (UNLINKED), so they are never trained or tested.
     """
     prefixes = {} if prefixes is None else prefixes
     steps = {} if steps is None else steps
@@ -139,12 +150,13 @@ def extract(exchanges, public_model=None, *, prefixes=None, steps=None):
         action = choices[0]["message"]
         if action.get("role") != "assistant":
             continue
-        root, ancestors = None, []
+        root, ancestors, linked = None, [], []
         for length in range(len(messages), 0, -1):
             key = next((k for k in prefix_keys(messages[:length]) if k in prefixes), None)
             if key:
                 parent_id, root = prefixes[key]
                 ancestors.append((parent_id, length))
+                linked.append(parent_id)
         bare = unsummarised(messages) if root is None else None
         if bare:
             # A continuation after a compaction: the kept turns, without the
@@ -153,10 +165,17 @@ def extract(exchanges, public_model=None, *, prefixes=None, steps=None):
                 key = next((k for k in prefix_keys(bare[:length]) if k in prefixes), None)
                 if key:
                     root = prefixes[key][1]
+                    linked.append(prefixes[key][0])
                     break
+        retire = any(
+            getattr(steps.get(parent_id), "retired_reason", None) == UNLINKED
+            for parent_id in linked
+        )
         if root is None:
             if bare is None and any(m.get("role") == "assistant" for m in messages):
-                continue
+                if not unlinked:
+                    continue
+                retire = True
             # A new session, or a continuation whose kept turns are unknown
             # (the reading timeline joins it through its summary).
             root = digest(messages)
@@ -187,6 +206,9 @@ def extract(exchanges, public_model=None, *, prefixes=None, steps=None):
                 [],
                 row["id"],
             )
+            if retire:
+                steps[sid].retired_at = time.time()
+                steps[sid].retired_reason = UNLINKED
         prefixes[digest(messages + [action])] = (sid, root)
     for step in steps.values():
         for index, message in enumerate(step.context):

@@ -21,6 +21,10 @@ SCHEMA_VERSION = 3
 # waiting the connection timeout (5 s): a minute covers giving back the space
 # of a store at its size limit.
 RECORD_ATTEMPTS = 12
+# How long a request whose history holds turns Songe never recorded waits for
+# them (a parent recorded late links it to its session) before it is read as
+# a conversation of its own (#263).
+UNLINKED_AFTER = 600
 
 _CONNECTIONS = threading.local()
 _CACHED_PER_THREAD = 4
@@ -1107,7 +1111,8 @@ class Store:
     def reconstruct(self, public_model=None, batch=32):
         """Persist prefix progress one bounded request at a time, in a guarded child.
 
-        Unresolved continuations remain retryable after a late parent commits.
+        Unresolved continuations remain retryable after a late parent commits,
+        for UNLINKED_AFTER seconds; then they start a conversation of their own.
         A restart repeats only unresolved/new rows, never the complete log.
         A recording that cannot be read (a request the model server refused,
         with messages that are not a list of messages; text that cannot be
@@ -1166,7 +1171,11 @@ class Store:
                             if saved:
                                 prefixes[key] = (link[0], link[1])
                                 parents[link[0]] = Step.load(parts.payload(db, saved, cache))
-                    items = extract([row], public_model, prefixes=prefixes, steps=parents)
+                    # Waited long enough for a parent that was never
+                    # recorded: read as a conversation of its own (#263).
+                    waited = time.time() - (raw["recorded_at"] or raw["created"])
+                    items = extract([row], public_model, prefixes=prefixes, steps=parents,
+                                    unlinked=waited > UNLINKED_AFTER)
                     resolved = bool(items) or not any(
                         m.get("role") == "assistant" for m in messages
                     )
