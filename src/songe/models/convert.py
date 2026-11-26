@@ -107,8 +107,6 @@ def trainable_base(
             if info.parameters <= 0:
                 raise ValueError("GGUF has no tensors to convert")
             if not _transformers_reads(source):
-                from ..wording import gguf_untrainable
-
                 # Final: the scheduler marks the model unsupported with this
                 # line instead of retrying "conversion failed" for hours.
                 raise ValueError(_untrainable(ref, source, info, download))
