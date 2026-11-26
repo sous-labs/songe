@@ -25,6 +25,18 @@ from .wording import (
 ACCENT = "cyan"
 
 
+def configure_stdio():
+    for stream in (sys.stdout, sys.stderr):
+        if stream is None or not hasattr(stream, "reconfigure"):
+            continue
+        encoding = (getattr(stream, "encoding", None) or "").lower().replace("_", "-")
+        if encoding != "utf-8":
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except (OSError, ValueError):
+                pass
+
+
 def console(*, error=False):
     stream = sys.stderr if error else sys.stdout
     styled = stream.isatty() and "NO_COLOR" not in os.environ

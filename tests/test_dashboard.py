@@ -834,3 +834,13 @@ def test_the_page_shows_the_services_now_and_next_lines():
     script = (PAGE / "next.js").read_text(encoding="utf-8")
     assert "function statusLines" not in script
     assert "status?.lines?.now" in script and "status?.lines?.next" in script
+
+
+def test_the_page_counts_idle_time_toward_a_dream():
+    """A model waiting for idle time said only "dreams when idle"; the status
+    sends how long it has been idle and how long it needs."""
+    script = (PAGE / "next.js").read_text(encoding="utf-8")
+    words = json.loads((PAGE / "wording.json").read_text(encoding="utf-8"))
+    assert "a.idle_elapsed_seconds" in script and "a.idle_threshold_seconds" in script
+    assert words["empty"]["next_idle"] == "dreams when idle · {idle}, or press Dream"
+    assert words["idle_of"] == "{elapsed} of {limit}"
