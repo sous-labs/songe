@@ -429,11 +429,15 @@ class Scheduler:
         self.exporting = False
         self.last_probe = None
         self.idle_threshold_seconds = self.idle_wait()
+
+    @property
+    def pressure_history(self):
+        """The current store's: calibration and the worker learn boundaries
+        there too. A copy kept from start missed them, wrote over them, and
+        stayed with the first store after select() scoped it to a model."""
         from .sleep.sizing import PressureHistory
 
-        self.pressure_history = PressureHistory(
-            store.get("memory_pressure_history", {})
-        )
+        return PressureHistory(self.store.get("memory_pressure_history", {}))
 
     def unloads(self):
         return bool(self.store.get("unloads_model"))
@@ -448,8 +452,9 @@ class Scheduler:
         return park_wait(gaps, self.config)
 
     def observe_memory(self, sample):
-        self.pressure_history.observe(sample)
-        self.store.set("memory_pressure_history", self.pressure_history.data)
+        history = self.pressure_history
+        history.observe(sample)
+        self.store.set("memory_pressure_history", history.data)
 
     def acquire(self, binding):
         self.in_flight[binding] = self.in_flight.get(binding, 0) + 1

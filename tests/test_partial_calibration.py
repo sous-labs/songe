@@ -928,6 +928,64 @@ def test_a_held_size_is_retried_at_most_twice(store, monkeypatch):
     assert not calibration_state.memory_freed(store)
 
 
+def test_a_one_off_critical_boundary_expires_while_a_held_size_waits(
+    store, monkeypatch
+):
+    """Live (RTX PRO 6000, 188 GB): one PSI spike made a sample critical at
+    139.3 GB free. The boundary asked 139.4 GB free beside a held 6.2 GB
+    size; with 145.5 GB free the Dream waited 1 h 42 min, nothing sampled
+    memory again, and it was cleared by hand."""
+    from songe.platform import Memory
+    from songe.sleep import calibration_state
+    from songe.sleep.sizing import PressureHistory
+
+    GB = 10**9
+    total = 188 * GB
+    history = PressureHistory()
+    history.observe(Memory(total, int(139.35 * GB), "normal"))
+    history.observe(Memory(total, int(139.29 * GB), "critical"))
+    store.set("memory_pressure_history", history.data)
+    probe = {"sequence": 164, "kind": "sequence"}
+    store.set(
+        "calibration",
+        {
+            "progress": {"completion_reason": "held"},
+            "held": [probe | {"needed_bytes": int(6.19 * GB)}],
+        },
+    )
+    free = Memory(total, int(145.5 * GB), "normal")
+    monkeypatch.setattr(
+        "songe.platform.current", lambda: SimpleNamespace(memory=lambda: free)
+    )
+    checks = [calibration_state.memory_freed(store) for _ in range(3)]
+    assert checks[0] is False and checks[-1] is True
+    # A boundary seen in more critical samples needs more normal re-checks.
+    history = PressureHistory()
+    history.observe(Memory(total, int(139.35 * GB), "normal"))
+    for available in (139.29, 139.2, 139.1):
+        history.observe(Memory(total, int(available * GB), "critical"))
+    store.set("memory_pressure_history", history.data)
+    assert not any(calibration_state.memory_freed(store) for _ in range(2))
+
+
+def test_the_scheduler_reads_boundaries_the_worker_learned(config, store):
+    """The scheduler kept a copy from start: it never saw a boundary the
+    calibration child stored, and its next sample wrote over it."""
+    from songe import schedule
+    from songe.platform import Memory
+    from songe.sleep.sizing import PressureHistory
+
+    scheduler = schedule.ModelScheduler(config, store, SimpleNamespace())
+    learned = PressureHistory()
+    learned.observe(Memory(100, 60, "normal"))
+    learned.observe(Memory(100, 40, "critical"))
+    store.set("memory_pressure_history", learned.data)
+    assert scheduler.pressure_history.margin_for(Memory(100, 90)) == 60
+    scheduler.observe_memory(Memory(100, 30, "critical"))
+    boundary = store.get("memory_pressure_history")["critical_boundary"]
+    assert boundary["warning_samples"] == 2
+
+
 def test_measuring_text_follows_the_teacher_once_the_window_is_covered():
     """Live: 'Measuring · 8192 of 6833 tokens · first time only' while only the
     teacher envelope was still growing after new longer conversations."""

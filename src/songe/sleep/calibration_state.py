@@ -191,10 +191,15 @@ def memory_freed(store):
         from .sizing import PressureHistory
 
         sample = current().memory()
-        margin = PressureHistory(store.get("memory_pressure_history", {})).margin_for(
-            sample
-        )
-        return needed + margin <= sample.available
+        history = PressureHistory(store.get("memory_pressure_history", {}))
+        if (history.data.get("critical_boundary") or {}).get("warning_available"):
+            # Re-check a learned boundary while waiting on it: nothing else
+            # samples memory then, so one PSI spike at 139 of 188 GB free
+            # held a 6 GB size for 1 h 42 min. It expires once normal
+            # samples outnumber the critical ones it came from.
+            history.observe(sample)
+            store.set("memory_pressure_history", history.data)
+        return needed + history.margin_for(sample) <= sample.available
     except Exception:
         return False
 
