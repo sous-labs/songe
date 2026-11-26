@@ -1695,6 +1695,24 @@ def test_a_copied_example_is_no_lesson_and_conditional_rules_are_rules():
     assert rule_sentence("Use the feedback from each guess.") is None
 
 
+def test_a_rule_that_ends_on_that_is_no_note_of_its_own():
+    """Live (Qwen3.8-27B, 4 of 4 English runs): "you forgot to start with
+    Yes, chef. always start your reply with that" became the note "always
+    start your reply with that", which says nothing without the sentence
+    before it. The model's lesson for the turn is used instead (#266)."""
+    from songe.reading.rules import rule_sentence, stated_sentence
+
+    said = "you forgot to start with Yes, chef. always start your reply with that"
+    assert rule_sentence(said) is None
+    assert stated_sentence({"text": said}) is None
+    assert rule_sentence("Always start your reply with this.") is None
+    assert rule_sentence("Never commit those.") is None
+    # What a rule names stays, wherever "that" is in it.
+    assert rule_sentence("Always check that the tests pass before you commit.") == \
+        "Always check that the tests pass before you commit."
+    assert rule_sentence("Always start your reply with Yes, chef.") == "Always start your reply with Yes, chef."
+
+
 def test_the_lesson_question_for_the_users_own_words_keeps_what_they_named(store):
     """Live (Qwen3.5-4B on vLLM, 24 chats corrected in everyday words): "I use
     uv, not pip." was stored as "Verify the user's preferred package manager
