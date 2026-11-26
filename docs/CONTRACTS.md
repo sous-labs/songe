@@ -63,6 +63,9 @@ agent's chosen model; only that model's learned serving identity is substituted.
 `--model` can pre-enable a local base. A server whose local weight paths are not
 available can still forward and record. Newly requested ids are registered on
 first use; local discovery and guarded conversion/calibration happen while idle.
+A `songe/` name not registered yet is looked up among the models found on this
+machine, so a model pulled while Songe runs answers to the name Songe gives it;
+a name no model has is forwarded as asked and never registered.
 No architecture or size-name exclusion is allowed. Selecting `new` or `all` on an unsupported model requests a fresh measured check. Support is `pending` until
 measured, then `trainable` or `unsupported` with the observed reason. CPU-only
 serving policy and missing local weight paths are reported explicitly.
@@ -88,7 +91,27 @@ or by auto-dream:
   them in one call (merges same-meaning lessons, drops ones that fit only one
   kind of task, rewrites each as one short instruction; the candidates as they
   are if its answer is unusable), at most `prompt_lessons` and about 150
-  tokens. Quick Dream waits when the learner's model is not loaded. The proxy
+  tokens. Background work never loads a model: an automatic Quick Dream
+  waits when the learner's model is not loaded. A pressed Quick Dream on
+  Ollama or LM Studio loads it with the server's own load (Ollama: an
+  empty-prompt `/api/generate`; LM Studio: its load) when the memory
+  admission Songe uses for its own versions allows (sized by the weights;
+  weights Songe cannot measure are not loaded: `load_unknown`; without the
+  memory: `load_memory`; on other servers it waits as before: `no_model`).
+  The load does not hold the lock the agent's requests wait on, and a second
+  press meanwhile continues the first. While loaded for the press the model
+  is listed only to that press's own work, so no other reading starts on it
+  and learning waits. It is released once the Quick Dream is done (Ollama
+  `keep_alive: 0`, confirmed by `/api/ps`; LM Studio unload), also when it
+  fails, in its own task that waits until no request is in flight and no
+  reader is on it (retried, never dropped), and checks again right before the
+  unload and while waiting for it: a request admitted then stops the release
+  with Songe's claim kept, and it waits again. Once the agent asks for that
+  model, it is the user's and is left to the server's own idle timeout; a
+  request for it while the press still loads it waits for that load instead
+  of starting a second one. A model that was
+  already loaded is the user's and is never released; Songe's own requests
+  send no `keep_alive`, so the user's setting applies. The proxy
   adds them to the end of the system message of each new session; a session
   keeps the lessons it started with (`LessonPins`), and the recorded request
   stays the agent's own. Removed lessons (`remove_lesson`) never return. The
@@ -176,8 +199,22 @@ or by auto-dream:
   for a lesson that does not meet the bar are kept and not trained
   (`practice.pool.not_admitted`).
 - Deep Dream (2–3 hours, skills): reads what is left, writes practice, trains,
-  checks. When one is adopted, the lessons whose signals it trained leave the
-  prompt (`quick.absorb`); an undo lets them come back.
+  checks. When one is adopted, a lesson's note leaves the prompt
+  (`quick.absorb`) only if the new version follows the lesson without it: on
+  up to three of the lesson's held-out practice scenes it answers as it would
+  be served afterwards, with the other lessons' notes in the prompt and
+  without this one, and each answer must do what the note asks as well as the
+  teacher's stored answer (`sleep.judged.learned`, recorded as `learned` and
+  `absorbed_signals`). A lesson not learned yet, or with no held-out scene,
+  keeps its note beside the adapter, and so does a lesson whose own
+  conversation was judged worse with the candidate served without its note
+  (`sleep.judged.kept_back`). So that a note can be tested, a note
+  whose lesson has practice from two or more conversations keeps one of them
+  out of training (`practice.pool.ensure_note_heldout`: the one with the
+  fewest scenes, never one already trained); with practice from a single
+  conversation three of its scenes are kept out, and at least half of them
+  train. An undo lets
+  absorbed notes come back.
 - Reading happens only inside a Dream. In idle moments (auto-dream on): after
   `quick_quiet_seconds`, an automatic Quick Dream (the newest unread
   conversations for at most `quick_read_seconds`, then the prompt lessons; a
@@ -789,18 +826,27 @@ most a one-line label on an example.
   real conversations (with the user's feedback) first; held-out practice
   lessons (never trained on, one scene each, fixed order) fill the places up
   to `min_heldout` (5). Each unit's last 3 moments, 24 at most. At each moment
-  the version in use and the candidate answer deterministically (384 tokens);
+  the version in use and the candidate answer deterministically (384 tokens)
+  as the user is served: the version in use with the notes it has now, the
+  candidate with the notes that would stay after adopting it (rows marked
+  `served`);
   the same action is a tie; of two different ones each goes on its own to
   the original base model (request, the user's feedback or the lesson, one
   answer: does it do what the feedback asks, yes or no; never which of two
   it prefers). A win when only the candidate's does, a loss when only the
   answer in use does; both, neither or a reply that cannot be read is a tie;
-  the teacher's preference, which training fits, never breaks it.
-  Each moment is one unit (win +1, loss −1, tie 0), resampled per moment
-  (user decision: per conversation, 5 units left the lower bound at 0); at
-  least `min_heldout` conversations must be present. Adopt only if wins >
-  losses and the resampled lower bound is above zero, and drift and health
-  pass. Moments of one conversation are related, so this adopts more easily. The
+  the teacher's preference, which training fits, never breaks it. These
+  judge rules (an undecided judge is a tie, #119; each answer judged on its
+  own against the feedback, #178) still hold.
+  At least `min_heldout` conversations must be present. Adopt only if the
+  candidate is not clearly worse (clearly worse: losses − wins > 1.64 ×
+  √(losses + wins), beyond what a judge right four times in five gives by
+  chance) and it won more moments than it lost (wins > losses), and drift
+  and health pass. A lesson learned (its note would leave the prompt) never
+  adopts a version on its own (`sleep.gate.judged_reason`). Rows judged
+  without notes (not `served`) keep the older rule: each moment one unit
+  (win +1, loss −1, tie 0), resampled per moment; adopt only if wins >
+  losses and the resampled lower bound is above zero. The
   record carries `judged` rows, `improved` {count, worse, same, checked} and
   the report's examples are the moments won. If the backend cannot answer,
   the KL decides and `judged_error` says so.
@@ -833,7 +879,7 @@ missing when nothing could start or the cycle stops before training.
 
 ## Release candidate integration
 
-- Config persists `backend`, `torch_options` and the original `model_ref` (upstream, serving id, format, path, architecture). `torch_options` and `model_ref` are TOML tables. Accelerator installation uses a private runtime and the measured CUDA/ROCm driver runtime, or the official XPU index. Native MLX needs no training installation; GGUF conversion on Mac uses a private CPU converter stack when it is absent.
+- Config persists `backend`, `torch_options` and the original `model_ref` (upstream, serving id, format, path, architecture). `torch_options` and `model_ref` are TOML tables. Accelerator installation uses a private runtime and the measured CUDA/ROCm driver runtime, or the official XPU index. Native MLX needs no training installation; GGUF conversion on Mac uses a private CPU converter stack when it is absent: `<data-dir>/converter`, installed on first use with a Flow line while it downloads, kept apart from the service's `runtime` (an init-made `runtime` that already has the converter modules is used as is).
 - Version rows retain `kind`, `base`, and `training_adapter` alongside `artifact` and `adapter`. `training_adapter` is the framework checkpoint for incremental training; `artifact`/`adapter` bind the upstream's exported weights. Existing v2 stores acquire these nullable columns without rewriting versions.
 - Full GGUF from an original GGUF keeps its file type. A dense safetensors source uses bf16 because it has no GGUF quantization to preserve. Full GGUF gate evaluation reloads that exact exported artifact.
 - llama.cpp's owned server registers completed candidate and retained adapter paths before switching their scales. vLLM supervision enables LoRA updates on loopback. Init records the discovered invocation and provisions a separate Songe endpoint. An existing user process is never adopted or stopped.

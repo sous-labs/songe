@@ -371,7 +371,7 @@ def answer_header(tokenizer, step):
     return []
 
 
-def lesson_tokens(backend, step, prompt, seed=None):
+def lesson_tokens(backend, step, prompt, seed=None, rollout=None):
     """(tokens, forced): what one training example's loss runs over.
 
     forced: the teacher's own answer. The teacher (shown the note) and the
@@ -379,11 +379,12 @@ def lesson_tokens(backend, step, prompt, seed=None):
     note leads to, so the place where they part, often the first token, is
     in the loss. Otherwise the student's fresh rollout (DESIGN 3.4): once
     the student has started its own answer, a teacher scoring those tokens
-    mostly agrees with the rest, and the start is one token among many."""
+    mostly agrees with the rest, and the start is one token among many.
+    rollout: that rollout, made in advance by the backend's rollouts()."""
     y = answer_tokens(backend.tokenizer, step, backend.config)
     if y:
         return y, True
-    return backend.sample(prompt, seed=seed)[0], False
+    return rollout or backend.sample(prompt, seed=seed)[0], False
 
 
 def response_positions(prompt, response):

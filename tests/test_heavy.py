@@ -149,3 +149,70 @@ def test_child_passes_a_metal_buffer_limit_to_its_parent(tmp_path, capsys):
     from songe.sleep.calibrate import BUFFER_CEILING
 
     assert BUFFER_CEILING.search(err)
+
+
+def test_a_stopped_conversion_child_logs_a_stop_not_a_failure(tmp_path):
+    """A conversion stopped by the memory guard left "heavy_child_failed
+    OSError [Errno 22]" in the log, from a progress bar cut off by the stop:
+    it read as the cause, not the result (reported by Jack in a test on
+    11-24). The child now ends at the stop request and logs that."""
+    import subprocess
+    import sys
+    import time
+
+    from songe.memory import interrupt, process_options
+
+    script = (
+        "import time\n"
+        "from songe.telemetry import diagnostic_main\n"
+        "def main():\n"
+        "    print('ready', flush=True)\n"
+        "    while True:\n"
+        "        time.sleep(0.01)\n"
+        f"diagnostic_main(main, {str(tmp_path)!r}, stoppable=True)\n"
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-c", script],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        **process_options(),
+    )
+    assert process.stdout.readline().strip() == b"ready"
+    interrupt(process)
+    deadline = time.monotonic() + 30
+    while process.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert process.poll() is not None, "the child ignored the stop"
+    process.communicate()
+    log = (tmp_path / "songe.log").read_text(encoding="utf-8")
+    assert "heavy_child_stopped" in log
+    assert "heavy_child_failed" not in log
+
+
+def test_an_error_raised_by_the_stop_is_not_logged_as_a_failure(tmp_path):
+    import json
+    import signal
+
+    import pytest
+
+    from songe import telemetry
+
+    stop = getattr(signal, "SIGBREAK", None) or signal.SIGUSR1
+    before = signal.getsignal(stop)
+
+    def operation():
+        # The stop's handler ran, and a write the stop cut off failed after.
+        with pytest.raises(telemetry.Stopped):
+            signal.getsignal(stop)()
+        raise OSError(22, "Invalid argument")
+
+    try:
+        with pytest.raises(SystemExit):
+            telemetry.diagnostic_main(operation, root=tmp_path, stoppable=True)
+    finally:
+        signal.signal(stop, before)
+    events = [
+        json.loads(line)["event"]
+        for line in (tmp_path / "songe.log").read_text(encoding="utf-8").splitlines()
+    ]
+    assert "heavy_child_stopped" in events and "heavy_child_failed" not in events

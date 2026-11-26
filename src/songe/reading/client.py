@@ -15,6 +15,7 @@ import re
 import time
 
 import httpx
+from jsonschema import Draft202012Validator, SchemaError, ValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -122,7 +123,10 @@ class Reader:
         self.calls = self.cached = 0
         self.forced = self.cut_off = self.tokens_out = 0
         self.seconds = 0.0
-        self.structured = True
+        # Live (mlx_lm.server 0.32.2): accepts response_format with HTTP 200
+        # while ignoring the schema, so start mlx in plain mode directly.
+        self.structured = server != "mlx"
+        self._off_schema = 0
         # vLLM takes thinking_token_budget only when it was started with a
         # reasoning parser (see send); a server that refused it is remembered.
         self.budget = (self.url, self.model) not in NO_BUDGET
@@ -331,6 +335,7 @@ class Reader:
         server takes it, else asked plainly with the schema in the prompt.
         A prompt longer than the model's window comes back as an error with
         the finish reason "window"."""
+        used = 0
         if self.structured:
             response = await self.send(
                 body
@@ -346,9 +351,37 @@ class Reader:
             if 400 <= response.status_code < 500:
                 # This server does not take structured output; ask plainly.
                 self.structured = False
+                logger.info(
+                    "reader_no_structured server=%s refused structured output (%s); asking with the schema in the prompt",
+                    self.server or "unknown",
+                    response.status_code,
+                )
             else:
                 response.raise_for_status()
-                return read(response), finish_reason(response), usage(response), reasoning_of(response)
+                answer, finish, used, thought = (
+                    read(response),
+                    finish_reason(response),
+                    usage(response),
+                    reasoning_of(response),
+                )
+                if finish == "length":
+                    return answer, finish, used, thought
+                if matches_schema(answer, schema):
+                    self._off_schema = 0
+                    return answer, finish, used, thought
+                # Retry this single question with the schema in the prompt. Only
+                # switch off structured mode for the rest of the run once two
+                # consecutive 200 answers violate the schema (so one transient
+                # miss on an enforcing server like vLLM/llama.cpp does not turn
+                # structured output off).
+                self._off_schema += 1
+                if self._off_schema >= 2:
+                    self.structured = False
+                    logger.info(
+                        "reader_no_structured server=%s answered 200 off-schema %s times in a row; asking with the schema in the prompt",
+                        self.server or "unknown",
+                        self._off_schema,
+                    )
         response = await self.send(
             body
             | {
@@ -361,9 +394,20 @@ class Reader:
             }
         )
         if over_window(response):
-            return {"error": "longer than the model's window"}, "window", 0, ""
+            return {"error": "longer than the model's window"}, "window", used, ""
         response.raise_for_status()
-        return read(response), finish_reason(response), usage(response), reasoning_of(response)
+        return read(response), finish_reason(response), used + usage(response), reasoning_of(response)
+
+
+def matches_schema(answer, schema):
+    """Whether a structured-output response parsed cleanly and conforms to schema."""
+    if not isinstance(answer, dict) or "error" in answer:
+        return False
+    try:
+        Draft202012Validator(schema).validate(answer)
+    except (ValidationError, SchemaError):
+        return False
+    return True
 
 
 def reasoning_of(response):

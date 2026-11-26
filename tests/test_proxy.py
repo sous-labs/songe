@@ -491,3 +491,59 @@ async def test_recordings_use_their_own_thread(config, store, monkeypatch):
         assert response.status_code == 200
     await upstream.aclose()
     assert threads and all(name.startswith("songe-record") for name in threads)
+
+
+@pytest.mark.parametrize(
+    "error, said",
+    [
+        (httpx.RemoteProtocolError("Server disconnected without sending a response."),
+         "closed the connection without an answer"),
+        (httpx.ConnectError("All connection attempts failed"), "nothing answers at"),
+        (httpx.ReadTimeout("timed out"), "no answer in time"),
+    ],
+)
+async def test_a_failed_upstream_says_what_failed(config, store, error, said):
+    """Reported by Jack in a test on 11-24: mlx-lm 0.32 raised KeyError
+    'arguments' on some tool calls and dropped the connection; 41 of 80
+    conversations got only 502 "Local upstream unavailable"."""
+
+    async def handler(request):
+        raise error
+
+    app, upstream = await pair(config, store, handler)
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1"
+        ) as client,
+    ):
+        response = await client.post(
+            "/v1/chat/completions",
+            json={"model": "unrelated", "messages": [{"role": "user", "content": "hi"}]},
+        )
+        assert response.status_code == 502
+        message = response.json()["error"]["message"]
+        assert message.startswith("Local upstream unavailable · ")
+        assert said in message and type(error).__name__ in message
+    await upstream.aclose()
+
+
+def test_a_new_chat_with_an_earlier_opening_gets_the_current_lessons(monkeypatch):
+    from types import SimpleNamespace
+
+    from songe import quick
+    from songe.proxy import LessonPins
+
+    lessons = ["Use uv."]
+    monkeypatch.setattr(quick, "active", lambda learner: list(lessons))
+    monkeypatch.setattr(quick, "block", lambda found: "\n".join(found))
+    learner, pins = SimpleNamespace(model_key="m"), LessonPins()
+    opening = [{"role": "user", "content": "Write an email to my landlord."}]
+    assert pins.block_for(learner, opening) == "Use uv."
+    going_on = [*opening, {"role": "assistant", "content": "Dear..."}, {"role": "user", "content": "Shorter."}]
+    lessons.append("Sign with Sam.")
+    assert pins.block_for(learner, going_on) == "Use uv."
+    assert pins.block_for(learner, opening) == "Use uv.\nSign with Sam."
+    assert pins.block_for(learner, opening, "session-1") == "Use uv.\nSign with Sam."
+    lessons.append("Use metric.")
+    assert pins.block_for(learner, opening, "session-1") == "Use uv.\nSign with Sam."

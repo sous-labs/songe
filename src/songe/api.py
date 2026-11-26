@@ -411,6 +411,8 @@ def state_sections(data):
             ]
         return result
 
+    from .wording import status_lines
+
     return {
         "status": {
             k: v
@@ -424,7 +426,10 @@ def state_sections(data):
                 "calibration",
                 "cycle",
             }
-        },
+        }
+        # The Now and Next lines in the words `songe status` prints, so the
+        # page and the terminal say the same thing for the same state.
+        | {"lines": dict(status_lines(data))},
         "cycle": data.get("cycle", {"models": {}}),
         "models": {"models": [inventory(m) for m in models]},
         "learning": {
@@ -767,14 +772,22 @@ def api_routes(config, store, scheduler=None, *, release=None):
 
                     model = resolve(store, payload.get("model"))
                     discarded = await scheduler.cancel(model)
-                    if discarded:
+                    if discarded or getattr(scheduler, "cancel_requested", False):
                         # Cancelling ends it all: a pause that held this Dream
-                        # goes too, so the button is back to Dream.
+                        # (also one still getting ready) goes too, so the
+                        # button is back to Dream. A stopped reading alone
+                        # leaves a pause as it was.
                         await asyncio.to_thread(store.set, "paused", False)
+                    # Work under way with no Dream yet (a measurement, a
+                    # reading) is stopped too: say so, not "No Dream".
+                    stopped = getattr(scheduler, "cancel_stopped", False)
                     return JSONResponse({
                         "ok": True,
                         "message": "Dream cancelled · what it practised waits for the next Deep Dream"
-                        if discarded else "No Dream to cancel",
+                        if discarded
+                        else "Stopped · no Dream had started yet"
+                        if stopped
+                        else "No Dream to cancel",
                     })
                 elif action == "remove_lesson":
                     # Out of the prompt for new sessions, and never back.

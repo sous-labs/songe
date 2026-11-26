@@ -38,6 +38,40 @@ def pressure(load, available, *, warn_load=80, critical_load=95):
     return "warn" if load >= warn_load else "normal"
 
 
+# Room kept on the system drive for the page file. Windows grows a
+# system-managed page file there as commit charge passes the commit limit;
+# nothing bounds it but free space. Below these lines the system drive is
+# about to fill (it reached 0.0 GB on a 31 GB laptop measuring a 1.7B model).
+COMMIT_STOP_BYTES = 4e9
+COMMIT_WARN_BYTES = 2e9
+
+
+def commit_pressure(commit_available, system_free):
+    """Pressure from commit charge: what can still be committed, counting the
+    system drive's free space above COMMIT_STOP_BYTES as room the page file
+    may grow into. Free physical memory alone misses this: CUDA and model
+    servers commit far more than they touch.
+
+    "warn" holds back starts that wait on warn (reading, review); it does
+    not stop running work. "critical" makes the guard stop running work at
+    once. The scheduler's own disk check (artifacts.storage.SWAP_STOP_BYTES,
+    the same 4 GB line) is what stops work gracefully before that."""
+    if system_free is None:
+        return "normal"
+    room = commit_available + max(0, system_free - COMMIT_STOP_BYTES)
+    if room >= COMMIT_WARN_BYTES:
+        return "normal"
+    # Past the stop line already: no time for a graceful stop.
+    return "critical" if system_free < COMMIT_STOP_BYTES else "warn"
+
+
+LEVELS = ("normal", "warn", "critical")
+
+
+def worse(a, b):
+    return max(a, b, key=LEVELS.index)
+
+
 class AwakeHandle:
     def __init__(self, kernel):
         self.kernel = kernel
@@ -100,7 +134,19 @@ class Windows:
         info.length = ctypes.sizeof(info)
         if not self.kernel.GlobalMemoryStatusEx(ctypes.byref(info)):
             raise OSError("GlobalMemoryStatusEx failed")
-        return Memory(info.total, info.available, pressure(info.load, info.available))
+        state = pressure(info.load, info.available)
+        if info.page_total:
+            state = worse(state, commit_pressure(info.page_available, self.system_free()))
+        return Memory(info.total, info.available, state)
+
+    def system_free(self):
+        """Free bytes on the drive the page file grows on, or None."""
+        import shutil
+
+        try:
+            return shutil.disk_usage(self.swap_volume()[0]).free
+        except OSError:
+            return None
 
     def process_bytes(self, pid):
         class Counters(ctypes.Structure):

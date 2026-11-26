@@ -357,6 +357,32 @@ def test_the_users_own_rules_make_a_capped_dream_first(config):
     assert {s["id"] for s in chosen} >= {"practice:8", "practice:9"}
 
 
+def test_a_capped_dream_takes_rows_from_every_lesson(config):
+    """Live (Qwen3.5-4B on a rented card, 11 lessons, 670 rows, the limit of
+    512): cut by id, the three lessons whose ids sort last lost all of their
+    142 scenes, and after the Dream the model said "Yes, chef." on 0 to 1 of
+    16 test requests, as before it. Over the limit, rows are taken in turn
+    from each lesson."""
+    rows = {"a": 6, "b": 2, "c": 4}
+    pool = [
+        experience() | {"id": f"practice:{lesson}#v{i}", "source_id": i, "conversation": f"signal:{lesson}"}
+        for lesson, count in rows.items()
+        for i in range(count)
+    ]
+
+    def kept(limit, pool=pool):
+        chosen, left = bounded_batch(pool, replace(config, slice_limit=limit), None, 0, whole=True)
+        assert len(chosen) + len(left) == len(pool)
+        return {lesson: sum(s["conversation"] == f"signal:{lesson}" for s in chosen) for lesson in rows}
+
+    assert kept(6) == {"a": 2, "b": 2, "c": 2}  # by id alone: all six of a
+    assert kept(9) == {"a": 4, "b": 2, "c": 3}  # a lesson with fewer rows keeps all it has
+    assert kept(12) == rows
+    # The user's own rules still come first, whatever their lesson.
+    stated = [s | {"stated": s["conversation"] == "signal:a"} for s in pool]
+    assert kept(7, stated) == {"a": 6, "b": 1, "c": 0}
+
+
 def test_prompts_are_rendered_the_way_the_users_server_sends_them(store):
     """Live (vLLM serving Qwen3.5-4B with thinking off): the template's
     default starts every answer inside <think>, so a Deep Dream trained on

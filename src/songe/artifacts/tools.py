@@ -123,12 +123,42 @@ def _target(root, name):
     return target
 
 
+# Of llama.cpp's source tree the converters use only these (next to the
+# convert_*.py scripts themselves). The rest is never run, and parts of it (the
+# web UI) have paths of 220 characters: with Songe's data folder in front they
+# pass Windows' default 260-character limit, and every extraction failed.
+CONVERTER_PARTS = ("conversion/", "gguf-py/", "models/templates/")
+
+
+def _converter_root(names):
+    """The folder holding llama.cpp's converters in an archive, or None."""
+    roots = {
+        name[: -len("convert_hf_to_gguf.py")]
+        for name in names
+        if PurePosixPath(name).name == "convert_hf_to_gguf.py"
+    }
+    return roots.pop() if len(roots) == 1 else None
+
+
+def _needed(name, root):
+    """Everything outside a llama.cpp source tree; inside it, only the
+    converter scripts and what they read."""
+    if root is None or not name.startswith(root):
+        return True
+    rest = name[len(root) :]
+    return "/" not in rest.rstrip("/") or rest.startswith(CONVERTER_PARTS)
+
+
 def extract(archive, root):
     """Extract only regular files/dirs and internal links, never device nodes."""
     root.mkdir(parents=True, exist_ok=True)
     if zipfile.is_zipfile(archive):
         with zipfile.ZipFile(archive) as source:
-            for item in source.infolist():
+            items = source.infolist()
+            converters = _converter_root([item.filename for item in items])
+            for item in items:
+                if not _needed(item.filename, converters):
+                    continue
                 target = _target(root, item.filename)
                 if stat.S_ISLNK(item.external_attr >> 16):
                     raise ValueError("ZIP symlinks are not allowed")
@@ -141,7 +171,11 @@ def extract(archive, root):
         return
     with tarfile.open(archive) as source:
         links = []
-        for item in source.getmembers():
+        items = source.getmembers()
+        converters = _converter_root([item.name for item in items])
+        for item in items:
+            if not _needed(item.name, converters):
+                continue
             target = _target(root, item.name)
             if item.isdir():
                 target.mkdir(parents=True, exist_ok=True)

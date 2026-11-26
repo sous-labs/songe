@@ -133,12 +133,14 @@ class LlamaCPP:
     async def _load(self, version):
         from .reuse import served_base
 
-        self.routes.pop(version["identifier"], None)
+        # The route stays while the server is asked again: a request that
+        # arrives meanwhile must not fall back to the owned port (502).
         if getattr(self.config, "server_source_url", "") or not self.owns_server():
             binding = await served_base(self.config, version, transport=self.transport)
             if binding:
                 self.routes[version["identifier"]] = binding
                 return
+        self.routes.pop(version["identifier"], None)
         adapter = version.get("adapter")
         artifact = Path(version["artifact"])
         kind = version.get("kind", "gguf-lora" if adapter else "gguf-full")

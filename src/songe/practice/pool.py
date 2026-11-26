@@ -22,6 +22,10 @@ HELD_OUT_SHARE = 5
 # Lessons held out on demand, beyond one in five, when a small store has too
 # few test places (user decision); kept out of training for good.
 EXTRA_HELD_OUT = "extra_heldout"
+# Single scenes kept out of training for a note's test, when its lesson came
+# up in one conversation only (ensure_note_heldout); kept out for good.
+EXTRA_HELD_OUT_SCENES = "extra_heldout_scenes"
+NOTE_SCENES = 3
 
 
 def held_out(signal_id, extra=()):
@@ -51,11 +55,14 @@ def practice_steps(store, split="train"):
             (store.model_id,),
         ).fetchall()
     extra = set(store.get(EXTRA_HELD_OUT) or [])
+    out_scenes = set(store.get(EXTRA_HELD_OUT_SCENES) or [])
     waiting = not_admitted(store) if rows else set()
     steps = []
     for rowid, payload, tools in rows:
         row = json.loads(payload)
-        if not row.get("messages") or held_out(row["signal_id"], extra) != (split == "held_out"):
+        if not row.get("messages"):
+            continue
+        if (held_out(row["signal_id"], extra) or row["id"] in out_scenes) != (split == "held_out"):
             continue
         if row["signal_id"] in waiting:
             continue
@@ -68,6 +75,10 @@ def practice_steps(store, split="train"):
                 "practice": True,
                 "stated": (row.get("signal") or {}).get("from") == "rules",
                 "signal_id": row["signal_id"],
+                # The teacher's answer with the lesson's note, when the scene
+                # was kept by it (a plain chat's scene): what a note's test
+                # compares the new version's answer with (sleep.judged.learned).
+                "teacher_answer": row.get("teacher_answer"),
                 "context": row["messages"],
                 "tools": row.get("tools") or [],
                 "hindsight": [{"role": "user", "content": row["teacher_note"]}],
@@ -97,14 +108,19 @@ def not_admitted(store):
 
 def practice_revisions(store):
     """{step id: revision} of every kept scene practice_steps returns (both
-    splits), read by SQLite: no scene is decoded."""
+    splits), read by SQLite: no scene is decoded. Like there, the scenes of
+    a lesson that may not be learned now are left out: measuring records the
+    scenes it measured, and counting more here asked for a new measurement
+    after every one (live: 87 minutes of measuring, no training)."""
     with store.connect() as db:
         rows = db.execute(
-            "SELECT id, rowid FROM practice WHERE model_id=? AND kept=1"
+            "SELECT id, rowid, json_extract(payload,'$.signal_id') FROM practice"
+            " WHERE model_id=? AND kept=1"
             " AND COALESCE(json_array_length(payload,'$.messages'), 0) > 0",
             (store.model_id,),
         ).fetchall()
-    return {"practice:" + scene: rowid for scene, rowid in rows}
+    waiting = not_admitted(store) if rows else set()
+    return {"practice:" + scene: rowid for scene, rowid, signal in rows if signal not in waiting}
 
 
 MOMENTS_PER_CONVERSATION = 3  # judged.PER_UNIT: a conversation's test moments
@@ -219,6 +235,60 @@ def ensure_heldout(store, need):
         have += 1
     if added:
         store.set(EXTRA_HELD_OUT, extra)
+    return added
+
+
+def ensure_note_heldout(store):
+    """Every note keeps practice out of training, so the note can be tested.
+
+    A note leaves the prompt only when the new version follows its lesson on
+    practice it was not trained on (sleep.judged.learned). A lesson with
+    practice from two or more conversations keeps the one with the fewest
+    scenes out: its scenes are another conversation's kind of request. A
+    lesson that came up in one conversation keeps NOTE_SCENES of its scenes
+    out, and at least half to train on (without that such a note has
+    nothing to be asked on and can never leave: live, three of seven notes,
+    two of them lessons the new version held 15 and 16 times of 16).
+    Only lessons never trained, remembered. Returns how many were added."""
+    from .. import quick
+    from .store import cluster_of
+
+    with store.connect() as db:
+        rows = db.execute(
+            "SELECT json_extract(payload,'$.signal_id'), json_extract(payload,'$.id') FROM practice"
+            " WHERE model_id=? AND kept=1"
+            " AND COALESCE(json_array_length(payload,'$.messages'), 0) > 0 ORDER BY rowid",
+            (store.model_id,),
+        ).fetchall()
+    by = {}
+    for sig, scene in rows:
+        by.setdefault(sig, []).append(scene)
+    extra = list(store.get(EXTRA_HELD_OUT) or [])
+    scenes = list(store.get(EXTRA_HELD_OUT_SCENES) or [])
+    trained = set(store.get("trained_signals") or []) | set(store.get("absorbed_signals") or [])
+    same, added = cluster_of(store), 0
+    for lesson in quick.active(store):
+        practised = sorted({
+            mate for sig in lesson.get("signals") or [] for mate in same.get(sig, [sig]) if mate in by
+        })
+        if any(held_out(sig, extra) for sig in practised):
+            continue
+        fresh = [sig for sig in practised if sig not in trained]
+        if not fresh:
+            continue
+        if len(practised) >= 2:
+            extra.append(min(fresh, key=lambda sig: (len(by[sig]), sig)))
+            added += 1
+            continue
+        sig = fresh[0]
+        free = [scene for scene in by[sig] if scene not in scenes]
+        take = min(NOTE_SCENES - (len(by[sig]) - len(free)), len(free) - (len(by[sig]) + 1) // 2)
+        if take > 0:
+            scenes += free[-take:]
+            added += take
+    if added:
+        store.set(EXTRA_HELD_OUT, extra)
+        store.set(EXTRA_HELD_OUT_SCENES, scenes)
     return added
 
 

@@ -210,6 +210,8 @@ REASONS = (
     ("Held-out improvement passed", "passed"),
     ("does not exceed bootstrap noise", "no_gain"),
     ("Not clearly better", "no_gain"),
+    ("Worse than what you have now", "no_gain"),
+    ("Not better than what you have now", "no_gain"),
     ("drift exceeds the limit", "drift_limit"),
     ("validity dropped", "capability_drop"),
     ("Repetition rate increased", "repetition_rate"),  # the older, stricter rule
@@ -298,6 +300,7 @@ def shown_examples(examples):
 
 
 WAITS = (
+    ("GB free on", "disk"),
     ("battery", "power"),
     ("memory", "memory"),
     ("thermal", "thermal"),
@@ -316,11 +319,24 @@ WAITS = (
 NOT_WAITING = ("slice deadline", "stopped by the service", "proxy restart", "cancelled")
 
 
+# The numbers a wait's reason carries (sleep.sizing.waiting_reason,
+# artifacts.storage), so the page can say "9.6 GB free · needs 13.2 GB".
+WAIT_AMOUNTS = (
+    (re.compile(r"([\d.]+) GB free, needs ([\d.]+) GB"), ("have", "need")),
+    (re.compile(r"Needs ([\d.]+) GB free on .+?; ([\d.]+) GB available"), ("need", "have")),
+)
+
+
 def wait_of(reason):
     if not reason or any(phrase in reason for phrase in NOT_WAITING):
         return None
     code = next((c for phrase, c in WAITS if phrase in reason), "error")
-    return {"code": code, "have": None, "need": None, "unit": None}
+    wait = {"code": code, "have": None, "need": None, "unit": None}
+    for pattern, keys in WAIT_AMOUNTS:
+        if found := pattern.search(reason):
+            wait.update(zip(keys, map(float, found.groups()), strict=True), unit="GB")
+            break
+    return wait
 
 
 def stages(current, state, *, read=None, practice=None, train=None, check=None):

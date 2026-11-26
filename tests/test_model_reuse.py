@@ -625,3 +625,49 @@ def test_init_follows_the_servers_key_between_two_downloads_of_one_model(
     )
     cli.initialize(args, root)
     assert Path(Config.load(root).model).resolve() == gguf.resolve()
+
+
+async def test_a_model_added_after_start_answers_to_its_songe_name(
+    config, store, tmp_path, monkeypatch
+):
+    """A model downloaded after Songe started: the first request by its Songe
+    name registered "songe/qwen3-1.7b" itself as a model, the server answered
+    404, that name was marked unsupported, and the real model was then
+    renamed songe/qwen3-1.7b-<hash> (reported by Jack in a test on 11-24)."""
+    from songe.models import ModelRef, library
+
+    registry.migrate(config, store)
+    weights = tmp_path / "blobs/qwen3-1.7b.gguf"
+    weights.parent.mkdir(parents=True)
+    weights.write_bytes(b"GGUF")
+    ref = ModelRef("ollama", "qwen3:1.7b", "gguf", weights, "qwen3")
+    monkeypatch.setattr(library, "scan", lambda config: [{"ref": ref}])
+    seen = []
+
+    async def handler(request):
+        asked = json.loads(request.content)["model"]
+        seen.append(asked)
+        if asked.startswith("songe/"):
+            return httpx.Response(404, stream=Chunks([b'{"error":"model not found"}']))
+        return httpx.Response(200, stream=Chunks([b'{"choices":[]}']))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        app = create_app(config, store, client=client)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1"
+        ) as proxy:
+            response = await proxy.post(
+                "/v1/chat/completions",
+                json={"model": "songe/qwen3-1.7b", "messages": []},
+            )
+            assert response.status_code == 200
+            missing = await proxy.post(
+                "/v1/chat/completions",
+                json={"model": "songe/not-downloaded", "messages": []},
+            )
+            assert missing.status_code == 404
+    assert seen == ["qwen3:1.7b", "songe/not-downloaded"]
+    ids = {row["id"] for row in registry.entries(store)}
+    assert "songe/qwen3-1.7b" not in ids and "songe/not-downloaded" not in ids
+    row = registry.find(store, "qwen3:1.7b")
+    assert row["config"]["public_model"] == "songe/qwen3-1.7b"
