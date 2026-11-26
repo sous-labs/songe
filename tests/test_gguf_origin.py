@@ -175,7 +175,7 @@ def test_by_default_nothing_contacts_the_hub_and_the_panel_offers_the_download(
     with pytest.raises(ValueError) as offered:
         trainable_base(ref, "torch", platform, runner=lambda *a, **k: 1 / 0)
     assert str(offered.value).startswith("train from Qwen/Qwen3.8-27B · about 0 GB download")
-    assert str(offered.value).endswith("songe models Qwen3.8-27B-UD-Q4_K_M download")
+    assert str(offered.value).endswith("songe models Qwen3.8-27B-UD download")
     problem = wording.model_problem({"support": "unsupported", "reason": str(offered.value)})
     assert problem.startswith("Train from Qwen/Qwen3.8-27B")
 
