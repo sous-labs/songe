@@ -2371,6 +2371,66 @@ def test_a_failure_ends_an_attempt_only_once_the_agent_has_stopped(store):
     assert "No module named pytest" in ended[0]
 
 
+class Scoping(FakeReader):
+    """Judges every turn after an answer as a standing wish worded as told,
+    about what it is told."""
+
+    def __init__(self, wish, about):
+        super().__init__()
+        self.judged = {"standing": "yes", "kind": "once", "wish": wish, "about": about}
+
+    async def ask(self, prompt, schema, name):
+        return self.judged if name == "turn" else await super().ask(prompt, schema, name)
+
+
+def test_a_wish_said_about_one_kind_of_text_says_so_in_its_note(config, store):
+    """Live (Qwen3.8-27B, a simulated user who writes emails, issue #231): "ugh
+    again so long. max 5-6 sentence", said after an email, became the note
+    "Keep answers to a maximum of 5-6 sentences.", and with it a requested
+    detailed explanation went from 481 words to 103. The turn question now
+    also says what the wish is about, and the note says it."""
+    from songe import quick
+
+    record_chat(store, ("can u write email to Dr Han, the assay results are late", "Dear Dr. Han, ... (14 sentences)"),
+                ("ugh again so long. max 5-6 sentence", "Dear Dr. Han, the results are late. ..."))
+    read(store, Scoping("Keep answers to a maximum of 5-6 sentences.", "emails"))
+    wish = next(s for s in reading.signals(store) if s["type"] == "correction")
+    assert wish["about"] == "emails"
+    assert wish["short"] == "For emails: keep answers to a maximum of 5-6 sentences."
+    quick.quick_dream(store, config)
+    assert [lesson["text"] for lesson in quick.active(store)] == ["For emails: keep answers to a maximum of 5-6 sentences."]
+
+
+def test_what_a_wish_is_about_is_a_kind_the_conversation_names():
+    from songe.reading import prompts as P
+
+    said = "can u write email to Dr Han\nugh again so long. max 5-6 sentence"
+    assert P.scope_of({"about": "emails"}, said) == "emails"
+    assert P.scope_of({"about": "for emails."}, said) == "emails"
+    # The answer at hand, everything, or a kind the user never wrote of: no scope.
+    for about in ("this email", "this one", "all answers", "everything", "", "commit messages"):
+        assert P.scope_of({"about": about}, said) == "", about
+    assert P.scope_of({}, said) == ""
+    # Not in Latin letters, the user names it in their own language.
+    assert P.scope_of({"about": "commit messages"}, "英文!! feat(refund): ... 这种格式") == "commit messages"
+    # A note that names it already is left as it is.
+    assert P.scoped("Do not use exclamation marks in emails.", "emails") == "Do not use exclamation marks in emails."
+    assert P.scoped("Answer in English.", "commit messages") == "For commit messages: answer in English."
+
+
+def test_a_wish_for_one_project_keeps_the_projects_name():
+    from songe import quick
+
+    signal = {"type": "correction", "source": "user", "lesson": "x", "short": "For admin: use styled-components.",
+              "about": "admin", "project": "admin"}
+    assert quick.wording(signal) == ("For admin: use styled-components.", False)
+    # "This repo" is said by its name: the prompt goes to every project.
+    here = dict(signal, about="this repo", short="For this repo: use uv, not pip.", project="ledgerd")
+    assert quick.wording(here)[0] == "For the ledgerd repo: use uv, not pip."
+    # Without that, its name is said for any project (#223).
+    assert quick.wording(dict(signal, about=None))[0] == "For <project>: use styled-components."
+
+
 def test_a_wish_keeps_what_the_user_named():
     """Live (Qwen3.8-27B, simulated users, issue #231): "styled-components +
     export default. siempre en admin" became the note "Always work in
