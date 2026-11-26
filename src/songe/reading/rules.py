@@ -174,8 +174,9 @@ LASTING = re.compile(
 DEICTIC = re.compile(
     r"\b(whatever|that was|like that|it again|that again|do that|do this|this one|that one|those ones)\b"
     # Ending on what it points at: "always start your reply with that" names
-    # the thing in the sentence before it (#266).
-    r"|\b(that|this|those|these)\W*$",
+    # the thing in the sentence before it (#266). After a comma the thing is
+    # in the same sentence ("Never use semicolons, I hate those."): a rule.
+    r"|^[^,;]*\b(that|this|those|these)\W*$",
     re.I,
 )
 SENTENCES = re.compile(r"(?<=[.!?])\s+")

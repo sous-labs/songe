@@ -1711,6 +1711,9 @@ def test_a_rule_that_ends_on_that_is_no_note_of_its_own():
     assert rule_sentence("Always check that the tests pass before you commit.") == \
         "Always check that the tests pass before you commit."
     assert rule_sentence("Always start your reply with Yes, chef.") == "Always start your reply with Yes, chef."
+    # Named earlier in the same sentence, it is still a rule.
+    assert rule_sentence("Never use semicolons, I hate those.") == "Never use semicolons, I hate those."
+    assert rule_sentence("Always use tabs, I prefer that.") == "Always use tabs, I prefer that."
 
 
 def test_the_lesson_question_for_the_users_own_words_keeps_what_they_named(store):
