@@ -787,3 +787,40 @@ def test_answers_made_together_are_the_answers_made_alone(tmp_path):
     # A prompt longer than one read chunk is left to the one-at-a-time path.
     backend.read_chunk = 4
     assert backend.rollouts(steps, seeds) == [None, None, None]
+
+
+def test_answers_that_cannot_be_made_together_are_made_alone(tmp_path):
+    """An accelerator that runs out of memory without torch's own error (MPS
+    raises a RuntimeError), or a model that refuses a padded batch, ended the
+    Dream: the batch is only a shortcut, so its rows are answered one by one."""
+    pytest.importorskip("torch")
+    from songe.backends.torch import TorchBackend
+    from tests.crossplatform_helpers import tiny_model, torch_config
+
+    config = replace(torch_config(tiny_model(tmp_path / "base")), response_tokens=4)
+    backend = TorchBackend(config)
+    steps = [
+        {"context": [{"role": "user", "content": text}], "hindsight": [], "tools": []}
+        for text in ("hi", "why?")
+    ]
+    model = backend.model
+
+    def refuse(*args, **kwargs):
+        raise RuntimeError("MPS backend out of memory")
+
+    backend.model = _Calling(model, refuse)
+    assert backend.rollouts(steps, [1, 2]) == [None, None]
+    assert backend.model.training == model.training
+
+
+class _Calling:
+    """A model whose forward raises; everything else is the real model's."""
+
+    def __init__(self, model, forward):
+        self._model, self._forward = model, forward
+
+    def __call__(self, *args, **kwargs):
+        return self._forward(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._model, name)

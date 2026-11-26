@@ -805,7 +805,7 @@ class TorchBackend:
         with its own seed's generator, as sample(prompt, seed) does. A prompt
         longer than one read chunk, or one that cannot be rendered, gets None
         and is answered by sample() as before; so does every row when the
-        batch does not fit in memory."""
+        batched forward fails (no memory for it, or a model that refuses it)."""
         torch = self.torch
         prompts = []
         for step in steps:
@@ -849,12 +849,27 @@ class TorchBackend:
             with torch.no_grad():
                 for _ in range(self.config.response_tokens):
                     self.check()
-                    result = self.model(
-                        input_ids=inputs,
-                        attention_mask=mask,
-                        past_key_values=past,
-                        use_cache=True,
-                    )
+                    try:
+                        result = self.model(
+                            input_ids=inputs,
+                            attention_mask=mask,
+                            past_key_values=past,
+                            use_cache=True,
+                        )
+                    except Exception as error:
+                        # The batch is only a shortcut: memory it did not find
+                        # (MPS says so with a RuntimeError) or a model that
+                        # refuses a padded batch leaves every row to sample().
+                        # Stops from check() above are not caught here.
+                        past = None
+                        if self.device.type == "cuda":
+                            torch.cuda.empty_cache()
+                        import logging
+
+                        logging.getLogger("songe").info(
+                            "rollouts_alone %s", type(error).__name__
+                        )
+                        return out
                     logits = result.logits[:, -1].float()
                     past, chosen = self._cache(result), []
                     for row, generator in enumerate(generators):
@@ -883,11 +898,6 @@ class TorchBackend:
                         break
                     inputs = torch.tensor([[t] for t in chosen], device=self.device)
                     mask = torch.cat([mask, mask.new_ones((len(rows), 1))], dim=1)
-        except torch.OutOfMemoryError:
-            past = None
-            if self.device.type == "cuda":
-                torch.cuda.empty_cache()
-            return out
         finally:
             self.model.train(was_training)
         for row, i in enumerate(rows):
