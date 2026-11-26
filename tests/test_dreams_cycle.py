@@ -980,7 +980,9 @@ def test_a_pressed_deep_dream_held_back_by_memory_waits_visibly_then_says_so(sto
         assert store.get("requested_sleep") is True and store.get("requested_model") == "m"
         wait = learner.get("memory_wait")
         assert wait["try"] == n and wait["retry_after"] - _time.time() > 50 * n  # time to close apps
-    assert "waiting for memory · 8.4 GB free of 24 GB" in deep_step(learner)  # free before the try
+    # Free before the try; terse, in the words of ui/wording.json.
+    assert deep_step(learner) == (
+        f"Deep Dream · waiting for memory · 8.4 GB free of 24 GB · close some apps · try {MEMORY_TRIES - 1} of {MEMORY_TRIES}")
     # The third stop: it gives up with the note.
     store.set("requested_sleep", False)
     ModelScheduler.carry_on(fake, "m", launch, **end)
@@ -1150,7 +1152,8 @@ def test_a_pressed_deep_dream_waiting_for_memory_to_train_shows_then_ends(store)
     store.set("requested_model", "m")
     sample = SimpleNamespace(available=int(9.5 * 2**30), total=24 * 2**30)
     schedule.Scheduler.note_fit_wait(fake, sample, 13 * 2**30)
-    assert "waiting for memory to train · 9.5 GB free, training needs about 13 GB" in deep_waiting(learner, "m", None)
+    assert deep_waiting(learner, "m", None) == (
+        "Deep Dream · waiting for memory to train · 9.5 GB free · needs 13 GB · close some apps")
     # After FIT_WAIT_SECONDS it ends with the note.
     learner.set("fit_wait", learner.get("fit_wait") | {"since": 0})
     schedule.Scheduler.note_fit_wait(fake, sample, 13 * 2**30)
@@ -1239,3 +1242,16 @@ def test_the_judge_s_yes_or_no_is_read_after_a_preamble_and_not_from_a_longer_wo
     assert verdict('{"follows": "not sure"}') is None
     assert verdict('{"follows": "nope"}') is None
     assert verdict("Let me think about the answer") is None
+
+
+def test_a_pressed_deep_dream_between_runs_is_worded_from_the_page_words(store):
+    """status.deep_step wrote its own sentences ("… · close some apps · it
+    tries again on its own (try 1 of 3)"); its lines are ui/wording.json's."""
+    from songe.status import deep_step
+    from songe.wording import page_words
+
+    words = page_words()["deep_step"]
+    learner = store.scoped("m")
+    assert deep_step(learner) == words["ready"]
+    learner.set("dream_capacity_edges", [1])
+    assert deep_step(learner) == words["measured"]

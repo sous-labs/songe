@@ -178,23 +178,25 @@ def experience_wait(config, store, models, first=None):
 
 
 def deep_step(store):
-    """A pressed Deep Dream between its runs, in plain words."""
+    """A pressed Deep Dream between its runs, in the page's words
+    (ui/wording.json `deep_step`)."""
+    from .wording import fill, page_words
+
+    words = page_words()["deep_step"]
+    # In the units a Mac is sold in ("24 GB", not 25.8 decimal GB).
+    gb = lambda n: f"{n / 2**30:.1f} GB".replace(".0 GB", " GB") if isinstance(n, (int, float)) else "?"  # noqa: E731
     wait = store.get("memory_wait")
     if wait:
-        # In the units a Mac is sold in ("24 GB", not 25.8 decimal GB).
-        gb = lambda n: f"{n / 2**30:.1f} GB".replace(".0 GB", " GB") if isinstance(n, (int, float)) else "?"  # noqa: E731
-        return (f"Deep Dream · waiting for memory · {gb(wait.get('available'))} free of {gb(wait.get('total'))}"
-                f" · close some apps · it tries again on its own (try {wait.get('try')} of {wait.get('tries')})")
+        return fill(words["memory"], free=gb(wait.get("available")), total=gb(wait.get("total")),
+                    attempt=wait.get("try"), tries=wait.get("tries"))
     fit = store.get("fit_wait")
     if fit:
-        gb = lambda n: f"{n / 2**30:.1f} GB".replace(".0 GB", " GB") if isinstance(n, (int, float)) else "?"  # noqa: E731
-        return (f"Deep Dream · waiting for memory to train · {gb(fit.get('available'))} free,"
-                f" training needs about {gb(fit.get('needed'))} · close some apps · it starts on its own")
+        return fill(words["fit"], free=gb(fit.get("available")), needed=gb(fit.get("needed")))
     if store.get("growth_requested"):
-        return "Deep Dream · measuring this machine for longer practice scenes, then training starts"
+        return words["growth"]
     if store.get("dream_capacity_edges"):
-        return "Deep Dream · measured the most this machine can train · training starts next"
-    return "Deep Dream · getting ready to train"
+        return words["measured"]
+    return words["ready"]
 
 
 # What stopped an automatic run, by the memory guard's rule (memory.guard).
@@ -562,7 +564,7 @@ def activity(config, store, scheduler, training, models, *, live, ready=None):
         # A pressed Deep Dream waiting for memory: that, not an error, and
         # never "press Dream" while it is pending.
         now = deep_step(store.scoped(target["id"]))
-        next_text = "Close some apps to free memory · it starts on its own"
+        next_text = "Starts on its own once memory frees"  # Now already says how
     elif (
         target
         and live
