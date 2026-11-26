@@ -332,11 +332,43 @@ def answer_tokens(tokenizer, step, config):
     text = answer.get("content")
     if not isinstance(text, str) or not text.strip():
         return None
-    ids = list(tokenizer.encode(text, add_special_tokens=False))
+    ids = answer_header(tokenizer, step) + list(
+        tokenizer.encode(text, add_special_tokens=False)
+    )
     if len(ids) >= config.response_tokens or not answer.get("finished"):
         return ids[: config.response_tokens] or None
     end = turn_end(tokenizer, step)
     return ids + ([end] if end is not None else [])
+
+
+def answer_header(tokenizer, step):
+    """The tokens a chat template writes between the generation prompt and
+    an answer's text, which the model itself samples: Inkling-2 opens its
+    turn with <|message_model|> and then <|content_thinking|> or
+    <|content_text|>. Without them the teacher's answer would follow the
+    prompt where the model never writes text. Empty when the template opens
+    the turn in the generation prompt (most templates) or cannot be read."""
+    try:
+        base = list(render(tokenizer, step["context"], step.get("tools", [])))
+        full = list(
+            render(
+                tokenizer,
+                [*step["context"], {"role": "assistant", "content": MARK}],
+                step.get("tools", []),
+            )
+        )
+        mark = list(tokenizer.encode(MARK, add_special_tokens=False))[-2:]
+    except Exception:  # noqa: BLE001 - no header rather than no training
+        return []
+    if not mark or full[: len(base)] != base:
+        return []
+    rest = full[len(base) :]
+    for start in range(len(rest) - len(mark) + 1):
+        if rest[start : start + len(mark)] == mark:
+            # The mark's first token can merge with what precedes it.
+            first = list(tokenizer.encode(MARK, add_special_tokens=False))
+            return rest[: max(0, start - (len(first) - len(mark)))]
+    return []
 
 
 def lesson_tokens(backend, step, prompt, seed=None):

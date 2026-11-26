@@ -180,6 +180,32 @@ def test_a_scene_with_the_teachers_answer_is_trained_along_it(config):
     assert answer_tokens(tokenizer, long, config) == list(b"Yes, che")
 
 
+def test_the_teachers_answer_opens_the_turn_as_the_model_does(config):
+    """Inkling-2's template leaves the model's turn to the model: it samples
+    <|message_model|> then <|content_thinking|> or <|content_text|>. The
+    teacher's answer is trained after that opening, not straight after the
+    user's message, where the model never writes text."""
+    from dataclasses import replace
+
+    from songe.sleep.prompts import answer_tokens
+
+    class Opening:
+        def apply_chat_template(self, messages, tools=None, tokenize=True, return_dict=False,
+                                add_generation_prompt=True, **template):
+            text = "".join(
+                f"<model><text>{m['content']}</>" if m["role"] == "assistant" else f"<{m['role']}>{m['content']}</>"
+                for m in messages
+            )
+            return list(text.encode())
+
+        def encode(self, text, add_special_tokens=False):
+            return list(text.encode())
+
+    scene = make("practice:s#v1") | {"teacher_answer": {"content": "Yes.", "finished": True}}
+    tokens = answer_tokens(Opening(), scene, replace(config, response_tokens=64))
+    assert bytes(tokens) == b"<model><text>Yes.<"
+
+
 def test_an_agents_practice_scene_asks_its_teacher_for_an_action_not_a_reply(config):
     """With tools in the request a scene often ends on a tool result and the
     right next step is a tool call: its aside closes with the line a real
