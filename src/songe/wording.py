@@ -225,7 +225,8 @@ def status_copy(data):
     if "the model server" in reason:
         # LM Studio (or another server) is closed: nothing is wrong with Songe.
         return "Model server not running", "Start it · retries automatically"
-    if "serving retained" in reason:
+    # "serving retained": the same failure as older services word it.
+    if re.search(r"learning failed · current version kept|serving retained", reason):
         return "Retrying after an error", "Current version kept · run songe doctor"
     if re.search(r"failed|doctor|unavailable", reason, re.I) and raw.startswith(
         "waiting"
@@ -613,7 +614,7 @@ def flow_state(value):
         ),
         (
             r"(?i)^Sleep could not complete; current version preserved$",
-            "a check failed · current version kept · retries automatically",
+            "learning failed · current version kept · retries automatically",
         ),
         (
             r"^[Nn]eeds ([\d.]+) GB free on (.+?); ([\d.]+) GB available$",
