@@ -177,13 +177,25 @@ def generic_args(step):
     return {k: v for k, v in given.items() if v not in (None, "")}
 
 
+def own_tool(names, aliases, like=None):
+    """The agent's own name for a generic tool: an alias as it is, then in
+    any case (Bash, Read), then for a shell any name like one (run_shell)."""
+    found = next((n for n in aliases if n in names), None)
+    if found is None:
+        lower = {n.lower(): n for n in sorted(names)}
+        found = next((lower[n] for n in aliases if n in lower), None)
+    if found is None and like:
+        found = next((n for n in sorted(names) if re.search(like, n, re.I)), None)
+    return found
+
+
 def translate(step, names, ws):
     """A scene step whose tool this agent lacks, as the agent's own call:
     pi has bash but no grep, glob or shell, so `grep def main src/` becomes
     bash `grep -rn 'def main' src`, its output computed from the files as
     grep would print it. None when the agent has nothing equivalent."""
     name, args = step.get("tool"), generic_args(step)
-    shell = next((n for n in SHELLS if n in names), None)
+    shell = own_tool(names, SHELLS, r"bash|shell|terminal")
     path = args.get("path") or ""
 
     def via_shell(command, output):
@@ -204,14 +216,14 @@ def translate(step, names, ws):
         target = f"./{pattern.lstrip('./')}" if flag == "-path" else pattern
         return via_shell(f"find . {flag} {shlex.quote(target)}", ws.find_lines(pattern))
     if name == "read":
-        real = next((n for n in READS if n in names), None)
+        real = own_tool(names, READS)
         if real:
             return {**step, "tool": real}
         if shell:
             rel = ws.rel(path)
             return via_shell(f"cat {shlex.quote(path)}", ws.files.get(rel, f"cat: {path}: No such file or directory"))
     if name == "write":
-        real = next((n for n in WRITES if n in names), None)
+        real = own_tool(names, WRITES)
         if real:
             return {**step, "tool": real}
         if shell:

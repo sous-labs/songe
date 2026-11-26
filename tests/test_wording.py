@@ -1,9 +1,15 @@
 """One recorded copy contract for Python and the browser, without runtimes."""
 
+import json
 from pathlib import Path
 
-from songe.panels import panel_rows
+import pytest
+
+from songe.panels import panel_rows, pipeline
 from songe.wording import (
+    model_summary,
+    next_copy,
+    readable,
     status_copy,
     status_lines,
 )
@@ -67,3 +73,41 @@ def test_paused_says_the_command_that_resumes():
         ("now", "Paused · Run songe resume to continue"),
         ("next", "Run songe resume, then train Qwen3.5-4B"),
     ]
+
+
+FIXTURE = json.loads((ROOT / "tests/fixtures/wording.json").read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("case", FIXTURE["statuses"], ids=lambda c: c["name"])
+def test_recorded_status_copy(case):
+    """tests/fixtures/wording.json was kept up to date by hand, but no test
+    read it: its expectations were never checked."""
+    assert list(status_copy(case["data"])) == case["copy"]
+    if "next" in case:
+        assert next_copy(case["data"]) == case["next"]
+
+
+@pytest.mark.parametrize("case", FIXTURE["models"], ids=lambda c: c["name"])
+def test_recorded_model_copy(case):
+    # As `songe status` builds it: older services' fields, then the pipeline.
+    model = case["model"] | {"pipeline": case["pipeline"]}
+    data = pipeline(model, snapshot=case["snapshot"])
+    summary = model_summary(case["model"], data, case["snapshot"])
+    assert list(summary) == case["summary"]
+
+
+@pytest.mark.parametrize("case", FIXTURE["readable"], ids=lambda c: c["raw"])
+def test_recorded_readable_copy(case):
+    assert readable(case["raw"]) == case["text"]
+
+
+def test_a_failed_dream_names_no_log_path_and_no_old_words():
+    """`songe status` said "Work failed · serving retained · log: <path>" and
+    "Sleep failed" (the old name of a Dream); `songe doctor` shows the log."""
+    from songe.interface_copy import terse
+
+    work = "Work failed; served version preserved. Diagnostics: /home/u/.local/share/songe/songe.log"
+    tick = "Sleep could not complete; current version preserved"
+    assert terse(work) == terse(tick) == "learning failed · current version kept"
+    assert status_copy({"activity": {"now": "waiting · " + terse(tick)}}) == (
+        "Retrying after an error", "Current version kept · run songe doctor")

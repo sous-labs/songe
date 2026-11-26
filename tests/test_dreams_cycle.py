@@ -762,6 +762,22 @@ def test_near_identical_calls_tie_and_a_judge_that_says_yes_to_everything_counts
     before = {"text": "", "tool_calls": [{"name": "bash", "arguments": {"command": "python game.py"}}], "tokens": [1]}
     after = {"text": "", "tool_calls": [{"name": "edit", "arguments": {"path": "game.py"}}], "tokens": [2]}
     assert judged.outcome(AlwaysYes(), step, before, after) == ("tie", "both")
+    # User decision: only identical answers tie unasked; a near match goes to
+    # the judge (here: both follow, still a tie, but the judge said so).
+    assert judged.outcome(AlwaysYes(), step, read(20), read(21)) == ("tie", "both")
+
+
+def test_only_identical_answers_tie_without_the_judge():
+    from songe.quick import identical
+
+    bash = lambda command, **extra: {"text": "", "tool_calls": [{"name": "bash", "arguments": {"command": command, **extra}}]}  # noqa: E731
+    # Key order and whitespace are not the action.
+    assert identical({"text": "Running it.", "tool_calls": [{"name": "bash", "arguments": {"command": "ls", "cwd": "."}}]},
+                     {"text": "Running  it.", "tool_calls": [{"name": "bash", "arguments": {"cwd": ".", "command": "ls"}}]})
+    # One flag added is: far above any similarity threshold, still the judge's call.
+    assert not identical(bash('git commit -m "fix parser"'), bash('git commit --no-verify -m "fix parser"'))
+    # So is a reworded preamble before the same call.
+    assert not identical({"text": "Let me check.", "tool_calls": []}, {"text": "I'll look.", "tool_calls": []})
 
 
 def test_a_targeted_lesson_living_in_one_conversation_can_pass_per_moment():
