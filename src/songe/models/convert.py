@@ -87,6 +87,12 @@ def trainable_base(
             info = read_gguf(source)
             if info.parameters <= 0:
                 raise ValueError("GGUF has no tensors to convert")
+            if not _transformers_reads(source):
+                from ..wording import gguf_untrainable
+
+                # Final: the scheduler marks the model unsupported with this
+                # line instead of retrying "conversion failed" for hours.
+                raise ValueError(gguf_untrainable(ref.architecture))
             require_disk(cache, info.parameters * 2 + source.stat().st_size)
             _convert(
                 source,
@@ -112,6 +118,22 @@ def trainable_base(
             )
         source = destination
     return source
+
+
+def _transformers_reads(source):
+    """Whether transformers can read this GGUF's architecture (metadata only,
+    no tensors), as the converter would."""
+    try:
+        from transformers.modeling_gguf_pytorch_utils import load_gguf_checkpoint
+    except ImportError:
+        return True  # Cannot tell here; the converter itself says.
+    try:
+        load_gguf_checkpoint(str(source), return_tensors=False)
+    except Exception as exc:
+        # Only its "architecture ... is not supported" answers the question;
+        # anything else (a damaged file) is the converter's to report.
+        return "not supported" not in str(exc)
+    return True
 
 
 def _convert(source, destination, kind, platform, runner, identity):

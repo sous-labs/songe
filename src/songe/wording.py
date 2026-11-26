@@ -341,10 +341,23 @@ def model_level(model):
     return model.get("learning_level") or ("new" if model.get("enabled") else "off")
 
 
+GGUF_MARK = "from a GGUF file"
+
+
+def gguf_untrainable(architecture):
+    """A GGUF whose architecture nothing here can turn into trainable weights."""
+    return (
+        f"Songe cannot train {architecture} {GGUF_MARK} · "
+        "it keeps teaching it with notes"
+    )
+
+
 def model_problem(model):
     for item in [model, *(model.get("files") or [])]:
         reason = item.get("reason") or ""
         if item.get("support") == "unsupported" or item.get("status") == "unsupported":
+            if GGUF_MARK in reason:
+                return capitalize(reason) + "."  # says itself what is left
             if re.search("embedding", reason, re.I):
                 return (
                     "This model is for embeddings · Choose a chat model for learning."

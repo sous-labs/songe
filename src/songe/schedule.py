@@ -2595,7 +2595,14 @@ class ModelScheduler(Scheduler):
                 # The card was full: say so and what to do (live #135: "did
                 # not finish" did not point at the user's own server).
                 full = learner.get("child_error") == DEVICE_FULL
-                stop(DEVICE_FULL if full else "measuring what this machine can train did not finish")
+                from .models.registry import find
+
+                # Measuring found the model cannot train at all (a GGUF of an
+                # architecture nothing reads): its note says why, not "did
+                # not finish".
+                row = find(self.installation_store, model) or {}
+                final = row.get("support") == "unsupported" and row.get("reason")
+                stop(DEVICE_FULL if full else final or "measuring what this machine can train did not finish")
             else:
                 again()
         else:
