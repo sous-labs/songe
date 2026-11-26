@@ -63,6 +63,9 @@ agent's chosen model; only that model's learned serving identity is substituted.
 `--model` can pre-enable a local base. A server whose local weight paths are not
 available can still forward and record. Newly requested ids are registered on
 first use; local discovery and guarded conversion/calibration happen while idle.
+A `songe/` name not registered yet is looked up among the models found on this
+machine, so a model pulled while Songe runs answers to the name Songe gives it;
+a name no model has is forwarded as asked and never registered.
 No architecture or size-name exclusion is allowed. Selecting `new` or `all` on an unsupported model requests a fresh measured check. Support is `pending` until
 measured, then `trainable` or `unsupported` with the observed reason. CPU-only
 serving policy and missing local weight paths are reported explicitly.
@@ -88,7 +91,27 @@ or by auto-dream:
   them in one call (merges same-meaning lessons, drops ones that fit only one
   kind of task, rewrites each as one short instruction; the candidates as they
   are if its answer is unusable), at most `prompt_lessons` and about 150
-  tokens. Quick Dream waits when the learner's model is not loaded. The proxy
+  tokens. Background work never loads a model: an automatic Quick Dream
+  waits when the learner's model is not loaded. A pressed Quick Dream on
+  Ollama or LM Studio loads it with the server's own load (Ollama: an
+  empty-prompt `/api/generate`; LM Studio: its load) when the memory
+  admission Songe uses for its own versions allows (sized by the weights;
+  weights Songe cannot measure are not loaded: `load_unknown`; without the
+  memory: `load_memory`; on other servers it waits as before: `no_model`).
+  The load does not hold the lock the agent's requests wait on, and a second
+  press meanwhile continues the first. While loaded for the press the model
+  is listed only to that press's own work, so no other reading starts on it
+  and learning waits. It is released once the Quick Dream is done (Ollama
+  `keep_alive: 0`, confirmed by `/api/ps`; LM Studio unload), also when it
+  fails, in its own task that waits until no request is in flight and no
+  reader is on it (retried, never dropped), and checks again right before the
+  unload and while waiting for it: a request admitted then stops the release
+  with Songe's claim kept, and it waits again. Once the agent asks for that
+  model, it is the user's and is left to the server's own idle timeout; a
+  request for it while the press still loads it waits for that load instead
+  of starting a second one. A model that was
+  already loaded is the user's and is never released; Songe's own requests
+  send no `keep_alive`, so the user's setting applies. The proxy
   adds them to the end of the system message of each new session; a session
   keeps the lessons it started with (`LessonPins`), and the recorded request
   stays the agent's own. Removed lessons (`remove_lesson`) never return. The
@@ -856,7 +879,7 @@ missing when nothing could start or the cycle stops before training.
 
 ## Release candidate integration
 
-- Config persists `backend`, `torch_options` and the original `model_ref` (upstream, serving id, format, path, architecture). `torch_options` and `model_ref` are TOML tables. Accelerator installation uses a private runtime and the measured CUDA/ROCm driver runtime, or the official XPU index. Native MLX needs no training installation; GGUF conversion on Mac uses a private CPU converter stack when it is absent.
+- Config persists `backend`, `torch_options` and the original `model_ref` (upstream, serving id, format, path, architecture). `torch_options` and `model_ref` are TOML tables. Accelerator installation uses a private runtime and the measured CUDA/ROCm driver runtime, or the official XPU index. Native MLX needs no training installation; GGUF conversion on Mac uses a private CPU converter stack when it is absent: `<data-dir>/converter`, installed on first use with a Flow line while it downloads, kept apart from the service's `runtime` (an init-made `runtime` that already has the converter modules is used as is).
 - Version rows retain `kind`, `base`, and `training_adapter` alongside `artifact` and `adapter`. `training_adapter` is the framework checkpoint for incremental training; `artifact`/`adapter` bind the upstream's exported weights. Existing v2 stores acquire these nullable columns without rewriting versions.
 - Full GGUF from an original GGUF keeps its file type. A dense safetensors source uses bf16 because it has no GGUF quantization to preserve. Full GGUF gate evaluation reloads that exact exported artifact.
 - llama.cpp's owned server registers completed candidate and retained adapter paths before switching their scales. vLLM supervision enables LoRA updates on loopback. Init records the discovered invocation and provisions a separate Songe endpoint. An existing user process is never adopted or stopped.

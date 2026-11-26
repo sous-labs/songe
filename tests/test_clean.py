@@ -505,6 +505,24 @@ def test_a_state_with_new_numbers_updates_its_line(store):
     ]
 
 
+def test_a_state_updated_within_one_clock_tick_is_still_newest(store, monkeypatch):
+    """Windows' clock (Python 3.12 and older) ticks every ~15.6 ms, so the
+    refreshed line and the one written just before it had the same time and
+    the refreshed one sorted second (seen on a Windows laptop; reported by
+    Jack in a test on 11-24)."""
+    monkeypatch.setattr("songe.log.time.time", lambda: 1000.0)
+    test_a_state_with_new_numbers_updates_its_line(store)
+
+
+def test_a_line_written_after_a_refreshed_state_in_the_same_tick_is_newest(store, monkeypatch):
+    monkeypatch.setattr("songe.log.time.time", lambda: 1000.0)
+    store.event("state", "measuring 1 of 4")
+    store.event("state", "starts when idle")
+    store.event("state", "measuring 2 of 4")
+    store.event("dream", "Dream started")
+    assert [e["text"] for e in store.events()][:2] == ["Dream started", "measuring 2 of 4"]
+
+
 def test_older_flow_lines_read_in_todays_wording():
     from songe.wording import flow_state
 
@@ -514,7 +532,7 @@ def test_older_flow_lines_read_in_todays_wording():
     )
     assert flow_state(old) == "waiting for memory · 7.9 GB free"
     assert flow_state("sleep could not complete; current version preserved") == (
-        "a check failed · current version kept · retries automatically"
+        "learning failed · current version kept · retries automatically"
     )
     assert flow_state("waiting for memory: intact training samples deferred") == (
         "waiting for memory · long conversations wait for more free memory"

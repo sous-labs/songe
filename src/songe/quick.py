@@ -169,13 +169,61 @@ def evidenced(signal):
     return True
 
 
+# Folder names too common to stand for one project.
+COMMON_FOLDERS = {"home", "root", "user", "users", "src", "app", "code", "work", "dev", "tmp", "temp", "project",
+                  "projects", "repo", "repos", "desktop", "documents", "downloads", "workspace", "main", "test"}
+
+
+def general(text, project):
+    """A note with its project's own name said so it holds in every project:
+    "Put code under src/billing_api/." from a session in billing-api becomes
+    "Put code under src/<package>/." (reported by Jack in a test on 11-24:
+    "Use src/notes_app/ in all file paths." sent a question about another
+    repository into notes_app, and 4 of 8 answers there got worse)."""
+    name = str(project or "")
+    if len(name) < 4 or name.lower() in COMMON_FOLDERS:
+        return text
+    forms = {name: "<project>", name.replace("-", "_"): "<package>", name.replace("_", "-"): "<project>"}
+    for form in sorted(forms, key=len, reverse=True):
+        text = re.sub(rf"(?<![\w-]){re.escape(form)}(?![\w-])", forms[form], text, flags=re.I)
+    return text
+
+
+# A value the user gave on the command line of their tool ("make test MODULE=auth").
+SETTING = re.compile(r"\b([A-Z][A-Z0-9_]+)=([^\s,;'\"`)]+)")
+
+
+def unset(text):
+    """The sentence with each NAME=value said as NAME=<name>."""
+    return SETTING.sub(lambda m: f"{m[1]}=<{m[1].lower()}>", text)
+
+
+HERE = re.compile(r"\bthis (repo|repository|project|codebase|folder|app)\b", re.I)
+
+
 def wording(signal):
     """A signal's note for the prompt, and whether it is the user's own
     sentence: a sentence they stated, else the short form reading wrote for
     the prompt (signals read before it existed fall back to the lesson,
-    trimmed by tidy)."""
+    trimmed by tidy). Its project's own name is said for any project
+    (general). A wish read as holding for one kind of thing only (its
+    "about", reading.prompts.scoped) says so, and when that is its project
+    the project's name stays."""
+    from .reading.prompts import scoped
+
     rule = stated_sentence(signal) if signal.get("type") in USER else None
-    return rule or short_of(signal) or signal["lesson"].strip(), bool(rule)
+    text, about, project = rule or short_of(signal) or signal["lesson"].strip(), signal.get("about"), signal.get("project")
+    if rule and about:
+        text = scoped(text, about)
+    if about and project and HERE.search(about):
+        # The prompt goes to every project: "this repo" is said by its name.
+        named = HERE.sub(lambda m: f"the {project} {m[1]}", about)
+        text, about = text.replace(f"For {about}:", f"For {named}:", 1), named
+    if about and general(about, project) != about:
+        # A wish for this project only ("in admin", "the storefront repo"):
+        # its name says where the note holds, so it stays.
+        return text, bool(rule)
+    return general(text, project), bool(rule)
 
 
 def joined(signals):
@@ -235,8 +283,12 @@ def admitted(store, min_sessions=None, without=(), fits=suitable):
             pass
         elif rule:
             # A rule the user stated groups only with the same sentence of
-            # theirs, never with lessons that merely look alike.
-            home = next((c for c in clusters if c.get("rule") and normal(c["text"]) == normal(text)), None)
+            # theirs, never with lessons that merely look alike. The same
+            # sentence with another value in it ("make test MODULE=auth",
+            # "make test MODULE=parser") is the same rule: one place, not one
+            # per value (Jack's test, 11-24; Qwen3.8-27B on main put the test
+            # command in 3 to 5 of 10 places, one per module).
+            home = next((c for c in clusters if c.get("rule") and normal(unset(c["text"])) == normal(unset(text))), None)
         else:
             home = next((c for c in clusters if not c.get("rule") and similar(text, c["text"])), None)
         if home:
@@ -245,6 +297,9 @@ def admitted(store, min_sessions=None, without=(), fits=suitable):
             clusters.append({"text": text, "signals": [s["id"]], "newest": s.get("revision") or 0,
                              "rule": rule, "first": first})
     for c in clusters:
+        if c.get("rule") and len({normal(wording(by_id[i])[0]) for i in c["signals"]}) > 1:
+            # Said with several values: the value is not part of the rule.
+            c["text"] = unset(c["text"])
         text, own, wordings = joined([by_id[i] for i in c["signals"]])
         if wordings > 1 and any(i in same for i in c["signals"]):
             c.update(text=text, rule=own, joined=True)
@@ -614,7 +669,7 @@ def record(store, result, at, examples=None, **run):
     """Every finished Quick Dream joins the Dream history, also one that
     added nothing or could not read (live: a run read 5 conversations, found
     9 moments, added nothing, and left no trace). run: read, found, error
-    (unreadable, no_model). Returns the entry."""
+    (unreadable, no_model, memory, load_memory, load_unknown). Returns the entry."""
     history = store.get(HISTORY) or []
     entry = {
         "id": f"q-{(history[-1]['n'] if history else 0) + 1:04d}",
@@ -842,6 +897,21 @@ def answer_of(message):
     return {"text": text if isinstance(text, str) else "", "tool_calls": calls}
 
 
+def without_thinking(body, server):
+    """Ask without the model's reasoning, by the switches the reader sends
+    (probed per server, #111): the chat template's enable_thinking where the
+    server passes it on, and reasoning_effort "none", which empties
+    Ollama's reasoning. Reported by Jack in a test on 11-24: qwen3 on Ollama
+    spent the whole answer cap reasoning, so both sides of every before and
+    after example were empty."""
+    from .reading.client import TEMPLATE_SWITCH
+
+    if server in TEMPLATE_SWITCH:
+        body["chat_template_kwargs"] = {"enable_thinking": False}
+    body["reasoning_effort"] = "none"
+    return body
+
+
 async def compare(client, url, model, request, before_block, after_block, *, server=""):
     """The same request answered with the lessons from before this Quick Dream
     and with the new ones, by the served model (temperature 0, capped).
@@ -856,8 +926,7 @@ async def compare(client, url, model, request, before_block, after_block, *, ser
         body = {k: v for k, v in request.items() if k not in dropped}
         body["messages"] = with_lessons(request["messages"], block) if block else request["messages"]
         body.update(model=model, temperature=0, max_tokens=ANSWER_TOKENS, stream=False)
-        if server == "vllm":
-            body["chat_template_kwargs"] = {"enable_thinking": False}
+        without_thinking(body, server)
         r = await client.post(url.rstrip("/") + "/chat/completions", json=body)
         r.raise_for_status()
         return answer_of(((r.json().get("choices") or [{}])[0]).get("message"))
@@ -892,6 +961,18 @@ def differs(before, after):
                    for (_, a), (_, b) in zip(x, y, strict=True))
     x, y = " ".join(visible(before["text"]).split()), " ".join(visible(after["text"]).split())
     return difflib.SequenceMatcher(None, x, y).ratio() < SAME_TEXT
+
+
+def identical(before, after):
+    """Whether two answers are the same action as written: the same tool calls
+    with the same arguments (JSON key order and whitespace aside) and the same
+    visible text (whitespace aside). User decision: only these settle the
+    judged gate's tie without the judge; a near match (a read from line 20 vs
+    21, a command with one flag added) is the judge's to call."""
+    def norm(a):
+        calls = [(c["name"], " ".join(_json_text(c["arguments"]).split())) for c in a["tool_calls"]]
+        return calls, " ".join(visible(a["text"]).split())
+    return norm(before) == norm(after)
 
 
 def visible(text):
@@ -975,8 +1056,7 @@ async def judge(client, url, model, lesson, before, after, *, server=""):
             "type": "object", "properties": {"follows": {"type": "string", "enum": ["A", "B", "both", "neither"]}},
             "required": ["follows"]}}},
     }
-    if server == "vllm":
-        body["chat_template_kwargs"] = {"enable_thinking": False}
+    without_thinking(body, server)
     try:
         r = await client.post(url.rstrip("/") + "/chat/completions", json=body)
         r.raise_for_status()

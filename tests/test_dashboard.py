@@ -1,6 +1,8 @@
 """Dashboard contracts use recorded fixtures and ASGI only."""
 
 import json
+import re
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
@@ -51,6 +53,65 @@ def test_three_lines_idle_and_calibration_progress(config, store, monkeypatch):
         "Pick a Songe model in your agent · base-test learns from conversations"
     )
     assert [key for key, value in lines(state)] == ["now", "next", "paused"]
+
+
+def test_a_dream_waiting_for_disk_space_says_how_much(config, store, monkeypatch):
+    """Reported by Jack in a test on 11-24: a pressed Deep Dream waited 3.5
+    hours for 42.8 GB of disk while Next only said "Your Deep Dream is
+    pending · it starts on its own"."""
+    config.learning = "dreams"
+    registry.migrate(config, store)
+    registry.set_learning(store, config.base_identifier, "all")
+    registry.support(store, config.base_identifier, "trainable")
+    models = registry.summaries(config, store)
+    store.set("requested_model", config.base_identifier)
+    store.set("requested_sleep", True)
+    monkeypatch.setattr("songe.status.time.monotonic", lambda: 1000)
+    worker = scheduler(config, last_traffic=520, process=None)
+    worker.reason = "Needs 42.8 GB free on D:\\; 8.0 GB available"
+    pending = activity(config, store, worker, None, models, live=True)
+    store.scoped(config.base_identifier).set("disk_wait", "Needs 42.8 GB free on D:\\; 8.0 GB available")
+    result = activity(config, store, worker, None, models, live=True)
+    assert pending["next"] == "Your Deep Dream is pending · it starts on its own"
+    assert result["now"] == "waiting · Needs 42.8 GB free on D:\\; 8.0 GB available"
+    assert result["next"] == "Free up disk space · it starts on its own once there is room"
+    # A Quick Dream reading meanwhile keeps its own Now line.
+    worker.reading_activity = {config.base_identifier: {"kind": "quick", "done": 3, "total": 5}}
+    assert activity(config, store, worker, None, models, live=True)["now"] == "in a Quick Dream · 3 of 5"
+    worker.reading_activity = {}
+    store.scoped(config.base_identifier).set("disk_wait", None)
+    assert activity(config, store, worker, None, models, live=True)["next"] == pending["next"]
+
+
+def test_with_two_models_the_wait_is_the_pressed_models(config, store, monkeypatch):
+    """Reported by Jack in a test on 11-24: with a 4B and a 1.7B, the status
+    said "ready to learn · 14 practice scenes waiting" (the 4B's) while the
+    1.7B, the one pressed, had none."""
+    from songe.practice import pool
+    from songe.status import experience_wait
+
+    config.learning = "dreams"
+    registry.migrate(config, store)
+    for name in ("first-4b", "pressed-1.7b"):
+        registry.observe(config, store, name)
+        registry.set_learning(store, name, "all")
+        registry.support(store, name, "trainable")
+    models = [m for m in registry.summaries(config, store) if m["id"] in {"first-4b", "pressed-1.7b"}]
+    assert models[0]["id"] == "first-4b"
+    kept = {"first-4b": [object()] * 14, "pressed-1.7b": []}
+    monkeypatch.setattr(pool, "practice_steps", lambda scoped, split="train": kept.get(scoped.model_key, []))
+    monkeypatch.setattr(pool, "heldout_units", lambda scoped: 5)
+    monkeypatch.setattr(pool, "untrained", lambda scoped, steps=None: list(steps or []))
+    monkeypatch.setattr(store, "traffic_times", lambda n: [1.0])
+    others = [m for m in registry.summaries(config, store) if m["id"] not in {"first-4b", "pressed-1.7b"}]
+    for m in others:
+        registry.set_learning(store, m["id"], "off")
+    models = registry.summaries(config, store)
+    assert experience_wait(config, store, models).startswith("ready to learn · 14")
+    store.set("requested_model", "pressed-1.7b")
+    assert experience_wait(config, store, models).startswith("a Deep Dream needs 1 practice scene · 0 kept")
+    store.set("requested_model", None)
+    assert experience_wait(config, store, models, "pressed-1.7b").startswith("a Deep Dream needs 1 practice scene")
 
 
 @pytest.mark.parametrize("reason,detail", [
@@ -358,6 +419,20 @@ async def test_hashed_assets_are_immutable(config, store):
         ] == "no-cache"
 
 
+def test_hidden_status_lines_stay_hidden_at_phone_width():
+    """At phone width an empty GPU label showed with no GPU line, since
+    the narrow layout's `display: grid` beat the `hidden` attribute."""
+    import re
+    from pathlib import Path
+
+    css = (Path(__file__).resolve().parents[1] / "src/songe/ui/next.css").read_text(
+        encoding="utf-8"
+    )
+    phone = css.split("@media (width < 46rem)", 1)[1]
+    assert re.search(r"\.status p \{[^}]*display: grid", phone)
+    assert re.search(r"\.status p\[hidden\] \{ display: none; \}", phone)
+
+
 async def test_real_model_scheduler_reports_idle_then_experience_then_off(
     config, store
 ):
@@ -617,3 +692,155 @@ def test_empty_store_pipeline_keeps_counts_and_unknown_measurements(config, stor
     }
     assert metrics["wake"] == {"last": None}
     assert metrics["versions"] == []
+
+
+def test_page_times_use_a_24_hour_clock():
+    """Times the page writes sit beside 24-hour times Songe words itself
+    ("since your last Quick Dream at 16:00"): one clock, whatever the
+    browser's language."""
+    import re
+    from pathlib import Path
+
+    import songe
+
+    script = (Path(songe.__file__).parent / "ui" / "next.js").read_text(encoding="utf-8")
+    calls = re.findall(r"toLocaleTimeString\(([^)]*)\)", script)
+    assert calls and all("hourCycle: 'h23'" in call for call in calls)
+
+
+def test_waiting_for_the_agents_tools_says_so(config, store, monkeypatch):
+    """Reported by Jack in a test on 11-24: after an answer that asked for
+    tools, Songe waits up to five minutes for the agent to call back, and the
+    status said only "proxy requests in flight", which looked stuck."""
+    from songe.wording import readable, status_copy
+
+    models = learner(config, store)
+    monkeypatch.setattr("songe.status.time.monotonic", lambda: 1000)
+    worker = scheduler(config, last_traffic=1000 + 250, in_flight={}, process=None)
+    result = activity(config, store, worker, None, models, live=True)
+    assert result["now"] == (
+        "waiting · proxy requests in flight · waiting up to 5 min for the agent's tool results")
+    assert status_copy({"activity": result}) == (
+        "In use", "The agent is running tools · learning waits up to 5 min")
+    assert "conversations in progress · waiting up to 5 min" in readable(result["now"])
+    # A request still streaming: said as before.
+    worker.in_flight = {"admission": 1}
+    result = activity(config, store, worker, None, models, live=True)
+    assert result["now"] == "waiting · proxy requests in flight"
+    assert status_copy({"activity": result}) == ("In use", "Continues after this conversation")
+
+
+PAGE = Path(__file__).resolve().parents[1] / "src/songe/ui"
+
+
+def js_strings(js):
+    """String pieces of a JS source: quoted strings and template text."""
+    out, modes, braces, i, n = [], ["code"], [], 0, len(js)
+    while i < n:
+        c, mode = js[i], modes[-1]
+        if mode == "template":
+            j = i
+            while j < n and js[j] != "`" and not js.startswith("${", j):
+                j += 2 if js[j] == "\\" else 1
+            out.append(js[i:j])
+            if js.startswith("${", j):
+                modes.append("code")
+                braces.append(0)
+                i = j + 2
+            else:
+                modes.pop()
+                i = j + 1
+            continue
+        if js.startswith("//", i) and (i == 0 or js[i - 1] in " \t\n"):
+            i = js.find("\n", i) % (n + 1)
+            continue
+        if js.startswith("/*", i):
+            i = js.index("*/", i) + 2
+            continue
+        if c in "'\"":
+            j = i + 1
+            while js[j] != c:
+                j += 2 if js[j] == "\\" else 1
+            out.append(js[i + 1 : j])
+            i = j + 1
+            continue
+        if c == "`":
+            modes.append("template")
+        elif c == "{" and braces:
+            braces[-1] += 1
+        elif c == "}" and braces:
+            if braces[-1] == 0:
+                braces.pop()
+                modes.pop()
+            else:
+                braces[-1] -= 1
+        i += 1
+    return out
+
+STOP = {"of", "the", "to", "is", "it", "by", "for", "after", "left", "yet", "not", "and",
+        "or", "with", "at", "its", "your", "more", "than", "from", "about", "this", "no", "in"}
+
+def reads_as_english(piece):
+    """Words a person reads: a capitalised word, or a phrase with a small word."""
+    tokens = re.findall(r"[\w:'-]+", piece)
+    phrase = any(c.isspace() for c in piece) and any(t in STOP for t in tokens)
+    return phrase or bool(re.search(r"(?<![\w-])[A-Z][a-z]+", piece))
+
+
+def test_the_page_takes_its_words_from_wording_json():
+    """Words written into next.js missed every wording pass ("Show all 12",
+    "+ 3 more · learning off" on models that were unsupported, not off)."""
+    script = (PAGE / "next.js").read_text(encoding="utf-8")
+    # Before wording.json loads, and the key names a browser gives.
+    allowed = {"Songe not answering", "Run songe serve", "Escape"}
+    english = [s for s in js_strings(script) if reads_as_english(s) and s not in allowed]
+    assert english == []
+
+
+def test_every_word_the_page_asks_for_exists():
+    script = (PAGE / "next.js").read_text(encoding="utf-8")
+    words = json.loads((PAGE / "wording.json").read_text(encoding="utf-8"))
+    groups = {"C": "cloud", "R": "rail", "T": "train_state", "E": "empty"}
+    missing = [key for key in re.findall(r"\bW\.(\w+)", script) if key not in words]
+    for alias, group in groups.items():
+        missing += [f"{group}.{key}" for key in re.findall(rf"\b{alias}\.(\w+)", script)
+                    if key not in words[group]]
+    assert missing == []
+
+
+STATUSES = json.loads(
+    (Path(__file__).parent / "fixtures/wording.json").read_text(encoding="utf-8")
+)["statuses"]
+
+
+@pytest.mark.parametrize("case", STATUSES, ids=lambda c: c["name"])
+def test_the_page_and_songe_status_say_the_same_now_and_next(config, store, case, capsys):
+    """The page worded Now and Next itself: "Dreams again when your computer
+    is idle" where `songe status` said "Ready to train · Starts when idle ·
+    8m of 10m". Both now take the lines the service words once."""
+    from songe import cli
+    from songe.api import state_sections
+
+    learner(config, store)
+    data = snapshot(config, store, scheduler(config, last_traffic=0, process=None), live=True)
+    data |= case["data"]
+    page = state_sections(data)["status"]["lines"]
+    cli.print_status(data)
+    printed = dict(line.split(None, 1) for line in capsys.readouterr().out.splitlines()[:2])
+    assert page == {"now": printed["now"].removeprefix("● "), "next": printed["next"]}
+
+
+def test_the_page_shows_the_services_now_and_next_lines():
+    script = (PAGE / "next.js").read_text(encoding="utf-8")
+    assert "function statusLines" not in script
+    assert "status?.lines?.now" in script and "status?.lines?.next" in script
+
+
+def test_the_page_counts_idle_time_toward_a_dream():
+    """A model waiting for idle time said only "dreams when idle"; the status
+    sends how long it has been idle and how long it needs."""
+    script = (PAGE / "next.js").read_text(encoding="utf-8")
+    words = json.loads((PAGE / "wording.json").read_text(encoding="utf-8"))
+    assert "a.idle_elapsed_seconds" in script and "a.idle_threshold_seconds" in script
+    assert words["empty"]["next_idle"] == "dreams when idle · {idle}, or press Dream"
+    assert words["idle_of"] == "{elapsed} of {limit}"

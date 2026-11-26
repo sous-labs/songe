@@ -19,6 +19,9 @@ from ..sleep.prompts import paired_prompts, response_positions
 from .objective import view_key
 from .reference import TAIL_FLOOR
 
+# Cache layer methods that write the layer's state (see TorchBackend.frozen).
+UPDATES = ("update", "update_conv_state", "update_recurrent_state")
+
 
 @dataclass
 class TorchOptions:
@@ -56,7 +59,7 @@ class Stats:
 
     @property
     def prompt_tps(self):
-        return self.prompt_tokens / (self.prompt_seconds or self.seconds)
+        return self.prompt_tokens / max(self.prompt_seconds or self.seconds, 1e-6)
 
 
 def divergence(
@@ -135,6 +138,31 @@ def free_memory(torch, device):
     import psutil
 
     return psutil.virtual_memory().available
+
+
+def repage(optimizer):
+    """After a bitsandbytes paged optimizer loads a checkpoint.
+
+    torch.save keeps a tensor's Python attributes, so a state saved from paged
+    (managed) memory comes back flagged `is_paged` although torch.load put it
+    in ordinary device memory. The optimizer then prefetches it as managed
+    memory and the CUDA call fails: "Error invalid argument at line 578 in file
+    pythonInterface.cpp", which ends the process (an Inkling-2-Mini Deep Dream
+    resumed after a slice deadline). Such states are copied into paged memory
+    again, or lose the flag where paged memory cannot be had."""
+    for values in optimizer.state.values():
+        for key, value in values.items():
+            if not getattr(value, "is_paged", False):
+                continue
+            try:
+                from bitsandbytes.functional import get_paged
+
+                paged = get_paged(*value.shape, dtype=value.dtype, device=value.device)
+                paged.copy_(value)
+            except Exception:
+                paged = value
+                paged.is_paged = False
+            values[key] = paged
 
 
 def needs_4bit(parameter_count, available_bytes, memory_fraction):
@@ -274,9 +302,10 @@ class TorchBackend:
                     r=config.rank,
                     lora_alpha=config.rank * config.lora_scale,
                     lora_dropout=0.0,
-                    target_modules="all-linear",
-                    exclude_modules=(
-                        packed_experts.LORA_EXCLUDE if self.packed_experts else None
+                    target_modules=(
+                        packed_experts.LORA_TARGETS
+                        if self.packed_experts
+                        else "all-linear"
                     ),
                     bias="none",
                     task_type="CAUSAL_LM",
@@ -473,10 +502,13 @@ class TorchBackend:
         Transformers takes the cache away from a checkpointed layer in
         training, because the layer would add to it a second time when the
         backward pass runs the layer again. Here every addition is undone as
-        soon as it returns, so both runs read the same prefix. Caches of
-        another kind (recurrent state) and layers transformers does not
-        checkpoint itself are left alone: the caller then trains on the
-        window only.
+        soon as it returns, so both runs read the same prefix. That includes
+        the convolution and recurrent states of hybrid layers (Inkling-2),
+        which are overwritten in place: left changed, the backward pass ran
+        the layer on other states than the forward pass, routed some tokens
+        to other experts and failed (CheckpointError). Caches of another kind
+        (recurrent state alone) and layers transformers does not checkpoint
+        itself are left alone: the caller then trains on the window only.
         """
         from transformers.cache_utils import DynamicLayer
         from transformers.modeling_layers import GradientCheckpointingLayer
@@ -496,18 +528,34 @@ class TorchBackend:
             yield False
             return
 
+        torch = self.torch
+
+        def snapshot(value):
+            # Keys and values are replaced, never written in place: kept by
+            # reference. Per-state dicts (conv and recurrent states, their
+            # flags) are written in place: copied, tensors included (small).
+            if isinstance(value, dict):
+                return {
+                    k: v.clone() if isinstance(v, torch.Tensor) else v
+                    for k, v in value.items()
+                }
+            return value
+
         def read_only(state):
-            update = state.update
+            for name in UPDATES:
+                update = getattr(state, name, None)
+                if update is None:
+                    continue
 
-            def reading(*args, **kwargs):
-                before = dict(vars(state))
-                try:
-                    return update(*args, **kwargs)
-                finally:
-                    vars(state).clear()
-                    vars(state).update(before)
+                def reading(*args, _update=update, **kwargs):
+                    before = {k: snapshot(v) for k, v in vars(state).items()}
+                    try:
+                        return _update(*args, **kwargs)
+                    finally:
+                        vars(state).clear()
+                        vars(state).update(before)
 
-            state.update = reading
+                setattr(state, name, reading)
 
         try:
             for state in states:
@@ -519,7 +567,8 @@ class TorchBackend:
             for m in layers:
                 vars(m).pop("_can_checkpoint_with_cache", None)
             for state in states:
-                vars(state).pop("update", None)
+                for name in UPDATES:
+                    vars(state).pop(name, None)
 
     def hidden(self, ids):
         inputs = self.torch.tensor([ids], dtype=self.torch.long, device=self.device)
@@ -584,7 +633,9 @@ class TorchBackend:
         inputs = torch.tensor([prompt_ids], device=self.device)
         was_training = self.model.training
         self.model.eval()
-        started = time.monotonic()
+        # perf_counter: Windows' monotonic clock ticks every ~15.6 ms, so a
+        # short answer could take "0 seconds" and divide by zero.
+        started = time.perf_counter()
         if state is not None or len(prompt_ids) > self._chunk():
             # A long prompt is read in chunks, as the teacher reads it: one
             # pass over the whole prompt can need far more memory than the
@@ -619,7 +670,7 @@ class TorchBackend:
                         ).to(self.device)
                     value = int(token.item())
                     if not tokens:
-                        prompt_seconds = time.monotonic() - started
+                        prompt_seconds = time.perf_counter() - started
                     tokens.append(value)
                     past, inputs = self._cache(out), token
                     if value in eos:
@@ -628,7 +679,9 @@ class TorchBackend:
             self.model.train(was_training)
         if not tokens:
             raise ValueError("Model generated no tokens")
-        seconds = time.monotonic() - started
+        seconds = time.perf_counter() - started
+        # Never a zero span, whatever the clock's resolution.
+        tick = 1e-6
         return (
             tokens,
             self.tokenizer.decode(tokens, skip_special_tokens=True),
@@ -636,9 +689,9 @@ class TorchBackend:
                 len(prompt_ids),
                 len(tokens),
                 seconds,
-                (len(tokens) - 1) / (seconds - prompt_seconds)
+                (len(tokens) - 1) / max(seconds - prompt_seconds, tick)
                 if len(tokens) > 1
-                else len(tokens) / seconds,
+                else len(tokens) / max(seconds, tick),
                 prompt_seconds,
             ),
         )
@@ -765,16 +818,126 @@ class TorchBackend:
                 total += logits.log_softmax(-1).gather(-1, indices).sum().item()
         return total / len(tokens)
 
-    def train_step(self, step, optimizer=None, seed=None):
+    def rollouts(self, steps, seeds):
+        """Fresh answers for the samples of one optimizer step, made together.
+
+        The weights do not change between the samples of a step, so their
+        answers can come from one batch: one forward per new token for all of
+        them instead of one per sample. A token costs about the same at batch
+        1 and batch 4 (the weights are read once either way). Each row draws
+        with its own seed's generator, as sample(prompt, seed) does. A prompt
+        longer than one read chunk, or one that cannot be rendered, gets None
+        and is answered by sample() as before; so does every row when the
+        batched forward fails (no memory for it, or a model that refuses it)."""
+        torch = self.torch
+        prompts = []
+        for step in steps:
+            try:
+                prompt = paired_prompts(self.tokenizer, step, self.config)[0]
+            except Exception:
+                prompt = None
+            prompts.append(prompt if prompt and len(prompt) <= self._chunk() else None)
+        rows = [i for i, p in enumerate(prompts) if p is not None]
+        out = [None] * len(steps)
+        if len(rows) < 2:
+            return out
+        pad = self.tokenizer.pad_token_id
+        if pad is None:
+            pad = 0
+        width = max(len(prompts[i]) for i in rows)
+        # Left padding, masked: every row's next token is in the same column.
+        inputs = torch.tensor(
+            [[pad] * (width - len(prompts[i])) + prompts[i] for i in rows],
+            device=self.device,
+        )
+        mask = torch.tensor(
+            [[0] * (width - len(prompts[i])) + [1] * len(prompts[i]) for i in rows],
+            device=self.device,
+        )
+        generators = []
+        for i in rows:
+            generator = torch.Generator(
+                device=self.device if self.device.type != "mps" else "cpu"
+            )
+            generator.manual_seed(seeds[i])
+            generators.append(generator)
+        eos = self._causal().generation_config.eos_token_id
+        eos = {eos} if isinstance(eos, int) else set(eos or [])
+        tokens = [[] for _ in rows]
+        done = [False] * len(rows)
+        past = None
+        was_training = self.model.training
+        self.model.eval()
+        try:
+            with torch.no_grad():
+                for _ in range(self.config.response_tokens):
+                    self.check()
+                    try:
+                        result = self.model(
+                            input_ids=inputs,
+                            attention_mask=mask,
+                            past_key_values=past,
+                            use_cache=True,
+                        )
+                    except Exception as error:
+                        # The batch is only a shortcut: memory it did not find
+                        # (MPS says so with a RuntimeError) or a model that
+                        # refuses a padded batch leaves every row to sample().
+                        # Stops from check() above are not caught here.
+                        past = None
+                        if self.device.type == "cuda":
+                            torch.cuda.empty_cache()
+                        import logging
+
+                        logging.getLogger("songe").info(
+                            "rollouts_alone %s", type(error).__name__
+                        )
+                        return out
+                    logits = result.logits[:, -1].float()
+                    past, chosen = self._cache(result), []
+                    for row, generator in enumerate(generators):
+                        if done[row]:
+                            chosen.append(pad)
+                            continue
+                        if self.options.temperature <= 0:
+                            value = int(logits[row].argmax().item())
+                        else:
+                            probabilities = sampling_probabilities(
+                                logits[row : row + 1],
+                                self.options.temperature,
+                                self.options.top_p,
+                            )
+                            value = int(
+                                torch.multinomial(
+                                    probabilities.to(generator.device),
+                                    1,
+                                    generator=generator,
+                                ).item()
+                            )
+                        tokens[row].append(value)
+                        chosen.append(value)
+                        done[row] = value in eos
+                    if all(done):
+                        break
+                    inputs = torch.tensor([[t] for t in chosen], device=self.device)
+                    mask = torch.cat([mask, mask.new_ones((len(rows), 1))], dim=1)
+        finally:
+            self.model.train(was_training)
+        for row, i in enumerate(rows):
+            out[i] = tokens[row] or None
+        return out
+
+    def train_step(self, step, optimizer=None, seed=None, rollout=None):
         """Mirror of the MLX step (DESIGN 3.3-3.4): fresh rollout, frozen
-        hindsight teacher, gradient over the context tail plus the response."""
+        hindsight teacher, gradient over the context tail plus the response.
+        rollout: this sample's answer, made in advance by rollouts()."""
         from torch.utils.checkpoint import checkpoint
 
         if not self.trainable:
             raise ValueError("Backend was opened for serving only")
         config = self.config
         prompt, teacher_prompt = paired_prompts(self.tokenizer, step, config)
-        y, _, _ = self.sample(prompt, seed=seed)
+        y = rollout or self.sample(prompt, seed=seed)[0]
         teacher_context = self.teacher() if step.get("hindsight") else self.base()
         teacher_h = self.teacher_hidden(teacher_prompt, y, teacher_context)
         self.check()

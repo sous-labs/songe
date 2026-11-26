@@ -652,3 +652,58 @@ def test_an_old_windows_launcher_is_rewritten_even_at_the_same_release(tmp_path)
     upgrade._checked.clear()
     upgrade.catch_up(root, config, service=service, run=run, read_state=state)
     assert calls == []
+
+
+@pytest.mark.parametrize("kind,suffix", KINDS)
+def test_converter_toolkit_is_never_taken_for_the_service_installation(
+    tmp_path, monkeypatch, capsys, kind, suffix
+):
+    """An MLX Mac whose service runs from the user's own install gets the
+    GGUF converter toolkit (torch, no MLX) on first use. The upgrade check
+    took a toolkit in <data dir>/runtime for Songe's own installation and
+    rebound the service to it, or reported "Service update failed"."""
+    import importlib.util
+
+    from songe.backends import install
+    from songe.platform import Rooted
+
+    root, config, service, calls, run = installed(
+        tmp_path, kind, suffix, private=False, version=__version__
+    )
+
+    def provision(commands, data, *folder):
+        venv = Path(commands[0][0]).parent.parent
+        python = Path(commands[0][0])
+        python.parent.mkdir(parents=True, exist_ok=True)
+        python.write_text("fake interpreter; never execute", encoding="utf-8")
+        (venv / "pyvenv.cfg").write_text(
+            "include-system-site-packages = false\n", encoding="utf-8"
+        )
+        package = venv / "lib/python3.12/site-packages"
+        (package / "songe").mkdir(parents=True)
+        (package / "songe/__init__.py").write_text("", encoding="utf-8")
+        info = package / "songe-0.1.0.dist-info"
+        info.mkdir()
+        (info / "METADATA").write_text(
+            f"Name: songe\nVersion: {__version__}\n", encoding="utf-8"
+        )
+
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
+    monkeypatch.setattr(install, "install", provision)
+    monkeypatch.setattr(
+        install.subprocess,
+        "run",
+        lambda argv, **kw: subprocess.CompletedProcess(argv, 1),
+    )
+    metal = SimpleNamespace(accelerators=lambda: [SimpleNamespace(kind="metal")])
+    install.converter_python(Rooted(metal, root))
+    monkeypatch.undo()
+    monkeypatch.setattr(upgrade, "_checked", {})
+    capsys.readouterr()
+
+    message = upgrade.catch_up(
+        root, config, service=service, run=run, read_state=state
+    )
+    assert service.definition()[0][0] == sys.executable
+    assert not any(argv[1:3] == ["-m", "pip"] for argv, kwargs in calls)
+    assert "failed" not in (message or "") + capsys.readouterr().out

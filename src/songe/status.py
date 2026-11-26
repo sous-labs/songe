@@ -93,10 +93,17 @@ def work_text(training, model=None):
     return text
 
 
-def experience_wait(config, store, models):
+def experience_wait(config, store, models, first=None):
+    """What learning waits on, said for one model: the one a pressed Dream is
+    for, else `first` (the model the status is about), else the first in the
+    list. With several models, the first in the list spoke for all of them
+    (reported by Jack in a test on 11-24: "ready to learn · 14 practice scenes
+    waiting" was another model's while the pressed one had none)."""
     from .config import Config
     from .sleep.calibration_state import measurement_text, needs_growth
 
+    lead = [store.get("requested_model"), first]
+    models = sorted(models, key=lambda m: lead.index(m["id"]) if m["id"] in lead else len(lead))
     enabled = [m for m in models if m.get("enabled")]
     if not enabled:
         return "learning off for all models" if models else "no models · songe init"
@@ -322,14 +329,14 @@ def activity(config, store, scheduler, training, models, *, live, ready=None):
         "Waiting for experience",
         "Waiting for enabled models and learnable experience",
     }:
-        reason = experience_wait(config, store, models)
+        reason = experience_wait(config, store, models, (target or {}).get("id"))
     elif (
         reason in {"Waiting for an idle gap", "Will sleep when idle"}
         or "without proxy traffic" in reason
     ):
         # With nothing to run, quiet time is not what it waits on; data is.
         reason = (
-            experience_wait(config, store, models)
+            experience_wait(config, store, models, (target or {}).get("id"))
             if live
             and not ready
             and hasattr(scheduler, "choose_model")
@@ -398,6 +405,12 @@ def activity(config, store, scheduler, training, models, *, live, ready=None):
         and (not training or ready)
     ):
         reason = "proxy requests in flight"
+        if waiting_on_agent and not any(getattr(scheduler, "in_flight", {}).values()):
+            # The agent asked for tools and will call back; Songe gives it up
+            # to AGENT_FOLLOWUP_SECONDS. Said, so the wait does not look stuck
+            # (reported by Jack in a test on 11-24).
+            left = max(1, -(-int(scheduler.last_traffic - time.monotonic()) // 60))
+            reason += f" · waiting up to {left} min for the agent's tool results"
     now = (
         work_text(training | {"model": name}, name) if training and not ready else None
     )
@@ -538,7 +551,14 @@ def activity(config, store, scheduler, training, models, *, live, ready=None):
     scoped_target = store.scoped(target["id"]) if target else None
     held = scoped_target and (scoped_target.get("memory_wait") or (
         scoped_target.get("fit_wait") and store.get("requested_sleep"))) and not scoped_target.get("dream_stopped")
-    if held and not training and live:
+    disk = (scoped_target.get("disk_wait") or store.get("disk_wait")) if scoped_target else None
+    if disk and not training and live and not ready and not paused and not stopping and not reading:
+        # A Dream waiting for disk space: what it needs, not "it starts on
+        # its own" (reported by Jack in a test on 11-24: a pressed Deep Dream
+        # waited 3.5 hours for 42.8 GB with only "pending" on the page).
+        now = "waiting · " + disk  # the Now line words it (wording.status_copy)
+        next_text = "Free up disk space · it starts on its own once there is room"
+    elif held and not training and live:
         # A pressed Deep Dream waiting for memory: that, not an error, and
         # never "press Dream" while it is pending.
         now = deep_step(store.scoped(target["id"]))

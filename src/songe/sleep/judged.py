@@ -2,7 +2,7 @@
 
 At each held-out moment (the step the user reacted to, or a held-out practice
 scene) the version in use and the candidate answer from the context alone.
-The same action is a tie. Of two different ones each is shown on its own to
+The same action as written (quick.identical) is a tie. Of two different ones each is shown on its own to
 the original base model, with the user's request and what should guide the
 answer (their feedback, or the lesson): does this answer do what was asked,
 yes or no. A win when only the candidate's does, a loss when only the
@@ -26,7 +26,7 @@ from __future__ import annotations
 import logging
 import re
 
-from ..quick import differs, verdict_of, visible
+from ..quick import differs, identical, verdict_of, visible
 from .examples import answer
 from .prompts import paired_prompts, render
 
@@ -214,7 +214,7 @@ def outcome(backend, step, before, after):
     a fenced command against the bare one, a sentence against the bare date,
     in either direction: a candidate no check of the eight test habits
     found worse at any of 24 moments was refused as better on 3, worse on 8."""
-    if not differs(before, after):
+    if identical(before, after):
         return "tie", "same"
     was, now = does(backend, step, before), does(backend, step, after)
     if was is None or now is None:

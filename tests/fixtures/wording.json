@@ -35,9 +35,9 @@
       },
       "copy": [
         "Paused",
-        "Turn Learning on to continue"
+        "Run songe resume to continue"
       ],
-      "next": "Turn learning on, then train Qwen3.5-4B"
+      "next": "Run songe resume, then train Qwen3.5-4B"
     },
     {
       "name": "stopped",
@@ -352,7 +352,7 @@
       },
       "copy": [
         "Not supported yet",
-        "Gemma 3 · Choose another model"
+        "Gemma 3"
       ],
       "next": "Choose another model"
     },
@@ -1067,7 +1067,7 @@
         }
       },
       "summary": [
-        "Evaluating",
+        "Evaluation",
         ""
       ]
     },
@@ -1276,11 +1276,11 @@
     },
     {
       "raw": "resume → train Qwen3.5-4B",
-      "text": "turn learning on, then train Qwen3.5-4B"
+      "text": "run songe resume, then train Qwen3.5-4B"
     },
     {
       "raw": "resume → calibrate Qwen3.5-4B",
-      "text": "turn learning on, then measure training needs for Qwen3.5-4B"
+      "text": "run songe resume, then measure training needs for Qwen3.5-4B"
     }
   ]
 }
