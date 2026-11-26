@@ -58,9 +58,20 @@ def test_linux_paths_memory_psi_and_headless(tmp_path):
     psi.write_text("some avg10=3.00\n", encoding="utf-8")
     assert platform.memory().pressure == "warn"
     psi.write_text("some avg10=9.00\n", encoding="utf-8")
+    assert platform.memory().pressure == "warn"
+    psi.write_text("some avg10=40.00\n", encoding="utf-8")
     assert platform.memory().pressure == "critical"
     assert pressure(0, 10, 0, 0) == "critical"
     assert platform.thermal() is None
+
+
+def test_linux_small_stall_over_a_small_median_is_not_critical():
+    # Live (RunPod, cgroup v2, 46 GB): downloading a 16.5 GB model stalled
+    # 2.67% against a 0.39 median with 33.6 GB free, and main called that
+    # critical, which kills a guarded child at once.
+    assert pressure(33.6e9, 46e9, 2.67, 0.39) == "warn"
+    assert pressure(33.6e9, 46e9, 40.0, 0.39) == "critical"
+    assert pressure(33.6e9, 46e9, 40.0, 0) == "critical"
 
 
 def test_linux_battery(tmp_path):
