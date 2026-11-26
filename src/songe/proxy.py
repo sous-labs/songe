@@ -59,7 +59,10 @@ class LessonPins:
     changes them mid-session would change the prompt's prefix and make the
     server process the whole conversation again, so a session keeps the
     lessons it started with; the next session gets the new ones. Use the
-    client's session ID when supplied and the opening messages otherwise."""
+    client's session ID when supplied and the opening messages otherwise.
+    Without a session ID, a request with no assistant turn yet opens a new
+    session, so it takes the current lessons even when an earlier chat
+    opened with the same messages."""
 
     def __init__(self, size=2048):
         from collections import OrderedDict
@@ -84,7 +87,10 @@ class LessonPins:
         if not isinstance(messages, list) or not messages:
             return ""
         key = self.key(learner, messages, session_id)
-        if key in self.pins:
+        opening = not session_id and not any(
+            isinstance(m, dict) and m.get("role") == "assistant" for m in messages
+        )
+        if key in self.pins and not opening:
             self.pins.move_to_end(key)
             return self.pins[key]
         text = quick.block(quick.active(learner))

@@ -223,7 +223,7 @@
   "control_failed": "Failed · {error} · try again or run songe doctor",
   "adopted_then": "Adopted {version}",
   "auto_dream": "Auto-dream",
-  "auto_dream_title": "Dream on its own when your computer is idle",
+  "auto_dream_title": "Dreams on its own when idle",
   "dream_kinds": {
     "quick": {
       "title": "Quick Dream",
@@ -485,9 +485,11 @@
       "{conversations} collected · {next}"
     ],
     "next_auto": "dreams when idle, or press Dream",
-    "next_manual": "Auto-dream off · press Dream"
+    "next_manual": "Auto-dream off · press Dream",
+    "next_idle": "dreams when idle · {idle}, or press Dream"
   },
   "request_failed": "request failed ({status})",
   "label_in_use": "{version} in use",
-  "dream_stopped_early": "it ended early"
+  "dream_stopped_early": "it ended early",
+  "idle_of": "{elapsed} of {limit}"
 }
