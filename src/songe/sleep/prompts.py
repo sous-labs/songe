@@ -201,12 +201,37 @@ def practice_aside(note, tools=False):
     }
 
 
-def practice_messages(scene, note, *, merged=False):
+def edit_aside(note, draft):
+    """The teacher's extra message on a plain chat's scene when its own reply
+    without the note is known: that reply, changed only where the note asks.
+
+    Asked for a reply with the note alone, the teacher also wrote less:
+    Qwen3.8-27B, 228 scenes of eight habits, median words against its reply
+    without the note: dates as ISO 8601 8.5 of 87.5 ("When was the first
+    iPhone released?" -> "2007-06-29"), uv 76 of 197, "Yes, chef" 65 of 157.
+    Trained toward such answers the adapter answered "When did the Titanic
+    sink?" with the date alone. Asked to edit its own reply: 87, 194, 159."""
+    return {
+        "role": "user",
+        "content": "(Not part of the conversation. A note from an earlier session"
+        " with this user, shown only to you:\n"
+        + note
+        + "\nHere is the reply you wrote before reading the note:\n<reply>\n"
+        + draft
+        + "\n</reply>\nNow write the reply to the message above again so that it"
+        " follows the note where it applies. Change only what the note is about;"
+        " keep everything else of your reply, the same content and about the same"
+        " length. Do not mention the note.)",
+    }
+
+
+def practice_messages(scene, note, *, merged=False, draft=None):
     """A practice scene as its teacher is asked it: the scene, then the note
-    as an aside. merged: for a chat template that takes no second user
-    message in a row, the aside goes at the end of the last user message
-    (as paired_prompts does when rendering fails)."""
-    aside = practice_aside(note)
+    as an aside (with draft: the reply to edit, edit_aside). merged: for a
+    chat template that takes no second user message in a row, the aside goes
+    at the end of the last user message (as paired_prompts does when
+    rendering fails)."""
+    aside = edit_aside(note, draft) if draft else practice_aside(note)
     if not merged:
         return [*scene, aside]
     messages = copy.deepcopy(scene)
