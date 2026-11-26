@@ -295,6 +295,65 @@ def paired_prompts(
     return student, teacher
 
 
+# A stand-in answer, to find what the chat template writes after one.
+MARK = "songe answer mark"
+
+
+def turn_end(tokenizer, step):
+    """The token the chat template puts right after an assistant message
+    (its end of turn), or None when it cannot be found."""
+    try:
+        mark = list(tokenizer.encode(MARK, add_special_tokens=False))
+        full = list(
+            render(
+                tokenizer,
+                [*step["context"], {"role": "assistant", "content": MARK}],
+                step.get("tools", []),
+            )
+        )
+    except Exception:  # noqa: BLE001 - a template that cannot show an answer: no end
+        return None
+    # The mark's last tokens: its first one can merge with what precedes it.
+    mark = mark[-2:]
+    for start in range(len(full) - len(mark), -1, -1):
+        if mark and full[start : start + len(mark)] == mark:
+            rest = full[start + len(mark) :]
+            return rest[0] if rest else None
+    return None
+
+
+def answer_tokens(tokenizer, step, config):
+    """The teacher's own answer to a practice scene (practice.checks stores
+    it: the served model shown the scene and its note) as the tokens the
+    served model writes after the student prompt: its text, then the
+    template's end of turn when the answer was complete and fits. None for a
+    step without one: a real step, an agent's scene, a scene from before."""
+    answer = step.get("teacher_answer") or {}
+    text = answer.get("content")
+    if not isinstance(text, str) or not text.strip():
+        return None
+    ids = list(tokenizer.encode(text, add_special_tokens=False))
+    if len(ids) >= config.response_tokens or not answer.get("finished"):
+        return ids[: config.response_tokens] or None
+    end = turn_end(tokenizer, step)
+    return ids + ([end] if end is not None else [])
+
+
+def lesson_tokens(backend, step, prompt, seed=None):
+    """(tokens, forced): what one training example's loss runs over.
+
+    forced: the teacher's own answer. The teacher (shown the note) and the
+    student (not shown it) are compared at every token of the answer the
+    note leads to, so the place where they part, often the first token, is
+    in the loss. Otherwise the student's fresh rollout (DESIGN 3.4): once
+    the student has started its own answer, a teacher scoring those tokens
+    mostly agrees with the rest, and the start is one token among many."""
+    y = answer_tokens(backend.tokenizer, step, backend.config)
+    if y:
+        return y, True
+    return backend.sample(prompt, seed=seed)[0], False
+
+
 def response_positions(prompt, response):
     """Causal loss mask: predict only freshly sampled assistant action tokens."""
     if not prompt or not response:

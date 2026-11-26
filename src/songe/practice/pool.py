@@ -71,6 +71,9 @@ def practice_steps(store, split="train"):
                 "context": row["messages"],
                 "tools": row.get("tools") or [],
                 "hindsight": [{"role": "user", "content": row["teacher_note"]}],
+                # The teacher's own answer, when the scene was kept by it
+                # (a plain chat's scene): training runs along it.
+                "teacher_answer": row.get("teacher_answer"),
                 "action": {},
                 "source_id": rowid,
                 "observed_id": 0,

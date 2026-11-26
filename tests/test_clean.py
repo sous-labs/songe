@@ -151,6 +151,35 @@ def test_a_practice_scenes_note_is_an_aside_the_teacher_does_not_answer(config):
     assert real["messages"][-1]["content"].startswith("Hindsight — quoted observations")
 
 
+def test_a_scene_with_the_teachers_answer_is_trained_along_it(config):
+    """Trained on its own rollouts the student writes its own start; a
+    teacher scoring those tokens then mostly agrees, and the place where the
+    two part is one token among many. Along the teacher's answer that place
+    is in the loss."""
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from songe.sleep.prompts import answer_tokens, lesson_tokens
+
+    tokenizer, config = Tokenizer(), replace(config, response_tokens=8)
+    scene = make("practice:s#v1", hindsight=[{"role": "user", "content": "Lesson: say Yes, chef."}])
+    backend = SimpleNamespace(
+        tokenizer=tokenizer, config=config, sample=lambda prompt, seed=None: ([7, 8, 9], "own", None)
+    )
+    # No teacher's answer (a real step, an agent's scene, one from before): the rollout.
+    assert lesson_tokens(backend, scene, [1, 2]) == ([7, 8, 9], False)
+    assert lesson_tokens(backend, scene | {"teacher_answer": None}, [1, 2]) == ([7, 8, 9], False)
+    # A complete answer: its text, then what the template writes after an
+    # assistant message (here the quote that closes the content).
+    complete = scene | {"teacher_answer": {"content": "Yes.", "finished": True}}
+    assert lesson_tokens(backend, complete, [1, 2]) == (list(b'Yes."'), True)
+    # Cut by the server's limit, or longer than is trained on: no end of turn.
+    cut = scene | {"teacher_answer": {"content": "Yes.", "finished": False}}
+    assert answer_tokens(tokenizer, cut, config) == list(b"Yes.")
+    long = scene | {"teacher_answer": {"content": "Yes, chef. Wind.", "finished": True}}
+    assert answer_tokens(tokenizer, long, config) == list(b"Yes, che")
+
+
 def test_an_agents_practice_scene_asks_its_teacher_for_an_action_not_a_reply(config):
     """With tools in the request a scene often ends on a tool result and the
     right next step is a tool call: its aside closes with the line a real

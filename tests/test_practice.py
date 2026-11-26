@@ -372,6 +372,15 @@ def test_a_plain_scene_is_kept_when_the_judge_cannot_tell_in_one_order(store, mo
     assert rows[0]["teacher_answer"] == {"content": "uv add it", "finished": True}
 
 
+def test_a_kept_plain_scene_carries_its_answer_into_training(store, monkeypatch):
+    from songe.practice import pool
+
+    chat_written(store, monkeypatch, ChatWriter())
+    steps = pool.practice_steps(store) + pool.practice_steps(store, split="held_out")
+    assert len(steps) == 3
+    assert all(s["teacher_answer"] == {"content": "uv add it", "finished": True} for s in steps)
+
+
 def test_a_plain_scene_the_note_does_not_change_is_dropped(store, monkeypatch):
     # The same answer with and without the note: nothing to learn here, and
     # the judge is not asked.

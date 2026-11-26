@@ -15,7 +15,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..sleep.prompts import paired_prompts, response_positions
+from ..sleep.prompts import lesson_tokens, paired_prompts, response_positions
 from .objective import view_key
 from .reference import TAIL_FLOOR
 
@@ -804,7 +804,7 @@ class TorchBackend:
             raise ValueError("Backend was opened for serving only")
         config = self.config
         prompt, teacher_prompt = paired_prompts(self.tokenizer, step, config)
-        y, _, _ = self.sample(prompt, seed=seed)
+        y, forced = lesson_tokens(self, step, prompt, seed)
         teacher_context = self.teacher() if step.get("hindsight") else self.base()
         teacher_h = self.teacher_hidden(teacher_prompt, y, teacher_context)
         self.check()
@@ -864,7 +864,9 @@ class TorchBackend:
                     config.loss,
                     config.beta,
                     config.teacher_top_k,
-                    clip=config.vocab_clip,
+                    # The clip bounds what a rollout's stray tokens can add. On the
+                    # teacher's own answer the largest terms are the lesson itself.
+                    clip=0.0 if forced else config.vocab_clip,
                 )
 
             for start in range(0, len(y), config.token_chunk):

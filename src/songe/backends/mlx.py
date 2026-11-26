@@ -10,7 +10,7 @@ import math
 import os
 import uuid
 
-from ..sleep.prompts import paired_prompts, response_positions
+from ..sleep.prompts import lesson_tokens, paired_prompts, response_positions
 from ..steps import tool_outcome
 from ..storage import private_dir, write_json
 from .objective import divergence, view_key
@@ -482,7 +482,7 @@ class Backend:
         mx = self.mx
         config = self.config
         prompt, teacher_prompt = paired_prompts(self.tokenizer, step, config)
-        y, _, _ = self.sample(prompt, seed=seed)
+        y, forced = lesson_tokens(self, step, prompt, seed)
         chunk = config.token_chunk
         spans = [(s, min(s + chunk, len(y))) for s in range(0, len(y), chunk)]
         # Hindsight steps learn from this cycle's teacher; general anchors keep
@@ -517,7 +517,9 @@ class Backend:
                 config.loss,
                 config.beta,
                 config.teacher_top_k,
-                clip=config.vocab_clip,
+                # The clip bounds what a rollout's stray tokens can add. On the
+                # teacher's own answer the largest terms are the lesson itself.
+                clip=0.0 if forced else config.vocab_clip,
             )
 
         checkpointed = mx.checkpoint(head_divergence)
