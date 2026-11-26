@@ -732,3 +732,58 @@ def test_a_resumed_paged_optimizer_gets_paged_states_again(monkeypatch):
     optimizer = SimpleNamespace(state={"p": {"state1": stale}})
     repage(optimizer)
     assert optimizer.state["p"]["state1"] is stale and not stale.is_paged
+
+
+def test_the_samples_of_a_step_are_answered_together_and_each_gets_its_own(
+    config, tmp_path, monkeypatch
+):
+    pool = [{"id": name, "values": [0.1]} for name in ("a", "b", "c", "d", "e")]
+    backend = scalar_backend(config, monkeypatch, "torch", 2)
+    asked, given = [], []
+    backend.rollouts = lambda steps, seeds: (
+        asked.append(([s["id"] for s in steps], seeds))
+        or [[ord(s["id"])] for s in steps]
+    )
+    microbatch = backend.train_step
+
+    def train_step(step, optimizer, seed, rollout=None):
+        given.append((step["id"], seed, rollout))
+        return microbatch(step, optimizer, seed)
+
+    backend.train_step = train_step
+    train(backend, pool, [], private_dir(tmp_path / "work"), lambda *_: None)
+    # One batch per optimizer step; a step of one sample is answered alone.
+    assert asked == [(["a", "b"], [7613, 7614]), (["c", "d"], [7615, 7616])]
+    assert given == [
+        ("a", 7613, [97]),
+        ("b", 7614, [98]),
+        ("c", 7615, [99]),
+        ("d", 7616, [100]),
+        ("e", 7617, None),
+    ]
+
+
+def test_answers_made_together_are_the_answers_made_alone(tmp_path):
+    pytest.importorskip("torch")
+    from songe.backends.torch import TorchBackend
+    from songe.sleep.prompts import paired_prompts
+    from tests.crossplatform_helpers import tiny_model, torch_config
+
+    config = replace(torch_config(tiny_model(tmp_path / "base")), response_tokens=12)
+    config.torch_options = {**config.torch_options, "temperature": 0.0}
+    backend = TorchBackend(config)
+    steps = [
+        {"context": [{"role": "user", "content": text}], "hindsight": [], "tools": []}
+        for text in ("hi", "a much longer question than the others", "why?")
+    ]
+    seeds = [1, 2, 3]
+    together = backend.rollouts(steps, seeds)
+    alone = [
+        backend.sample(paired_prompts(backend.tokenizer, s, config)[0], seed=k)[0]
+        for s, k in zip(steps, seeds, strict=True)
+    ]
+    # Left padding is masked: each row reads only its own prompt.
+    assert together == alone
+    # A prompt longer than one read chunk is left to the one-at-a-time path.
+    backend.read_chunk = 4
+    assert backend.rollouts(steps, seeds) == [None, None, None]

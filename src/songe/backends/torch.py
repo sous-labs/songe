@@ -795,16 +795,116 @@ class TorchBackend:
                 total += logits.log_softmax(-1).gather(-1, indices).sum().item()
         return total / len(tokens)
 
-    def train_step(self, step, optimizer=None, seed=None):
+    def rollouts(self, steps, seeds):
+        """Fresh answers for the samples of one optimizer step, made together.
+
+        The weights do not change between the samples of a step, so their
+        answers can come from one batch: one forward per new token for all of
+        them instead of one per sample. A token costs about the same at batch
+        1 and batch 4 (the weights are read once either way). Each row draws
+        with its own seed's generator, as sample(prompt, seed) does. A prompt
+        longer than one read chunk, or one that cannot be rendered, gets None
+        and is answered by sample() as before; so does every row when the
+        batch does not fit in memory."""
+        torch = self.torch
+        prompts = []
+        for step in steps:
+            try:
+                prompt = paired_prompts(self.tokenizer, step, self.config)[0]
+            except Exception:
+                prompt = None
+            prompts.append(prompt if prompt and len(prompt) <= self._chunk() else None)
+        rows = [i for i, p in enumerate(prompts) if p is not None]
+        out = [None] * len(steps)
+        if len(rows) < 2:
+            return out
+        pad = self.tokenizer.pad_token_id
+        if pad is None:
+            pad = 0
+        width = max(len(prompts[i]) for i in rows)
+        # Left padding, masked: every row's next token is in the same column.
+        inputs = torch.tensor(
+            [[pad] * (width - len(prompts[i])) + prompts[i] for i in rows],
+            device=self.device,
+        )
+        mask = torch.tensor(
+            [[0] * (width - len(prompts[i])) + [1] * len(prompts[i]) for i in rows],
+            device=self.device,
+        )
+        generators = []
+        for i in rows:
+            generator = torch.Generator(
+                device=self.device if self.device.type != "mps" else "cpu"
+            )
+            generator.manual_seed(seeds[i])
+            generators.append(generator)
+        eos = self._causal().generation_config.eos_token_id
+        eos = {eos} if isinstance(eos, int) else set(eos or [])
+        tokens = [[] for _ in rows]
+        done = [False] * len(rows)
+        past = None
+        was_training = self.model.training
+        self.model.eval()
+        try:
+            with torch.no_grad():
+                for _ in range(self.config.response_tokens):
+                    self.check()
+                    result = self.model(
+                        input_ids=inputs,
+                        attention_mask=mask,
+                        past_key_values=past,
+                        use_cache=True,
+                    )
+                    logits = result.logits[:, -1].float()
+                    past, chosen = self._cache(result), []
+                    for row, generator in enumerate(generators):
+                        if done[row]:
+                            chosen.append(pad)
+                            continue
+                        if self.options.temperature <= 0:
+                            value = int(logits[row].argmax().item())
+                        else:
+                            probabilities = sampling_probabilities(
+                                logits[row : row + 1],
+                                self.options.temperature,
+                                self.options.top_p,
+                            )
+                            value = int(
+                                torch.multinomial(
+                                    probabilities.to(generator.device),
+                                    1,
+                                    generator=generator,
+                                ).item()
+                            )
+                        tokens[row].append(value)
+                        chosen.append(value)
+                        done[row] = value in eos
+                    if all(done):
+                        break
+                    inputs = torch.tensor([[t] for t in chosen], device=self.device)
+                    mask = torch.cat([mask, mask.new_ones((len(rows), 1))], dim=1)
+        except torch.OutOfMemoryError:
+            past = None
+            if self.device.type == "cuda":
+                torch.cuda.empty_cache()
+            return out
+        finally:
+            self.model.train(was_training)
+        for row, i in enumerate(rows):
+            out[i] = tokens[row] or None
+        return out
+
+    def train_step(self, step, optimizer=None, seed=None, rollout=None):
         """Mirror of the MLX step (DESIGN 3.3-3.4): fresh rollout, frozen
-        hindsight teacher, gradient over the context tail plus the response."""
+        hindsight teacher, gradient over the context tail plus the response.
+        rollout: this sample's answer, made in advance by rollouts()."""
         from torch.utils.checkpoint import checkpoint
 
         if not self.trainable:
             raise ValueError("Backend was opened for serving only")
         config = self.config
         prompt, teacher_prompt = paired_prompts(self.tokenizer, step, config)
-        y, _, _ = self.sample(prompt, seed=seed)
+        y = rollout or self.sample(prompt, seed=seed)[0]
         teacher_context = self.teacher() if step.get("hindsight") else self.base()
         teacher_h = self.teacher_hidden(teacher_prompt, y, teacher_context)
         self.check()
