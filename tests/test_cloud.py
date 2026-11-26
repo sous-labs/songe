@@ -738,3 +738,110 @@ def test_a_night_key_for_a_clock_near_zero():
     from songe.cloud.ledger import night_key
 
     assert night_key(100.0)
+
+
+# ---- the cloud judge (sleep/judged.py) ----
+
+class LocalJudge:
+    """The local base model as judge: says `say` to every question."""
+
+    tokenizer = config = None
+
+    def __init__(self, say):
+        self.say = say
+
+    def base(self):
+        import contextlib
+
+        return contextlib.nullcontext()
+
+    def sample(self, prompt, seed=None, *, deterministic=False, max_tokens=None):
+        return [], '{"follows": "%s"}' % self.say, None
+
+
+STEP = {"id": "m1", "conversation": "c1", "context": [{"role": "user", "content": "commit it"}],
+        "hindsight": [{"role": "user", "content": "Subjects at most 50 characters."}]}
+OLD = {"text": "", "tool_calls": [{"name": "bash", "arguments": {"command": "git commit -m 'a long subject'"}}]}
+NEW = {"text": "", "tool_calls": [{"name": "bash", "arguments": {"command": "git commit -m 'fix: short'"}}]}
+
+
+@pytest.fixture
+def plain_prompts(monkeypatch):
+    from songe.sleep import judged
+
+    monkeypatch.setattr(judged, "render", lambda tok, messages, tools, **kw: messages[0]["content"])
+
+
+def test_without_cloud_learning_the_local_judge_decides_and_nothing_is_sent(store, provider, plain_prompts):
+    from songe.sleep import judged
+
+    assert judged.outcome(LocalJudge("yes"), STEP, OLD, NEW, store) == ("tie", "both", {"judge": "local"})
+    assert provider.chats == []
+    assert "judges" not in judged.summary([{"outcome": "tie", "by": "both", "judge": "local"}])
+
+
+def test_the_cloud_judge_decides_and_the_local_outcome_is_kept(store, provider, plain_prompts):
+    from songe.sleep import judged
+
+    turn_on(store)
+    provider.requests.clear()
+    provider.verdicts, provider.answered = ["no", "yes"], 0  # old answer: no; new answer: yes
+    result = judged.outcome(LocalJudge("yes"), STEP, OLD, NEW, store)
+    assert result == ("win", "judge", {"judge": "cloud", "local": "tie"})
+    assert len(provider.chats) == 2
+    assert [c["purpose"] for c in ledger.calls(store) if c["sent"]][-2:] == ["judge", "judge"]
+    rows = [{"outcome": "win", "by": "judge", "judge": "cloud", "local": "tie"},
+            {"outcome": "tie", "by": "same"}]
+    assert judged.summary(rows)["judges"] == {"cloud": 1, "local": 0, "disagreed": 1, "cloud_unavailable": None}
+
+
+def test_identical_answers_ask_no_judge_at_all(store, provider, plain_prompts):
+    from songe.sleep import judged
+
+    turn_on(store)
+    provider.requests.clear()
+    assert judged.outcome(LocalJudge("yes"), STEP, OLD, OLD, store) == ("tie", "same", {})
+    assert provider.chats == []
+
+
+def test_an_unusable_cloud_model_leaves_it_to_the_local_judge_with_the_reason(store, provider, plain_prompts):
+    from songe.sleep import judged
+
+    turn_on(store)
+    store.set("cloud", store.get("cloud") | {"budget_usd": 0.0001})  # spent by the probe already
+    result = judged.outcome(LocalJudge("yes"), STEP, OLD, NEW, store)
+    assert result[:2] == ("tie", "both") and result[2]["judge"] == "local"
+    assert "budget" in result[2]["cloud_unavailable"]
+    assert judged.summary([{"outcome": "tie", "by": "both", **result[2]}])["judges"]["cloud_unavailable"]
+
+
+def test_an_unreadable_cloud_verdict_leaves_it_to_the_local_judge(store, provider, plain_prompts):
+    from songe.sleep import judged
+
+    turn_on(store)
+    provider.reply = "I think it mostly does."
+    result = judged.outcome(LocalJudge("yes"), STEP, OLD, NEW, store)
+    assert result == ("tie", "both", {"judge": "local", "cloud_unavailable": "a cloud verdict couldn't be read"})
+
+
+def test_judged_rows_keep_who_decided_through_the_journal(store, provider, plain_prompts):
+    from songe.sleep import judged
+
+    class Journal:
+        def __init__(self):
+            self.saved = {}
+
+        def unit(self, name, make):
+            if name not in self.saved:
+                self.saved[name] = make()
+            return self.saved[name]
+
+    turn_on(store)
+    provider.verdicts, provider.answered = ["no", "yes"], 0
+    journal = Journal()
+    steps = [STEP]
+    rows = judged.judge(LocalJudge("yes"), journal, steps, {"m1": OLD}, {"m1": NEW}, "scale-1.0", lambda: None, store=store)
+    assert rows == [{"id": "m1", "conversation": "c1", "outcome": "win", "by": "judge", "judge": "cloud", "local": "tie"}]
+    asked = len(provider.chats)
+    judged.judge(LocalJudge("yes"), journal, steps, {"m1": OLD}, {"m1": NEW}, "scale-1.0", lambda: None, store=store)
+    assert len(provider.chats) == asked  # a resumed Dream pays once

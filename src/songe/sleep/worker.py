@@ -1119,7 +1119,8 @@ def run(
             try:
                 after_answers = judged.answers(backend, journal, moments, f"scale-{scale}", check)
                 return {r["id"]: r for r in judged.judge(
-                    backend, journal, moments, before_answers, after_answers, f"scale-{scale}", check)}
+                    backend, journal, moments, before_answers, after_answers, f"scale-{scale}", check,
+                    store=store)}
             except (Interrupted, MemoryError):
                 raise
             except Exception as exc:  # noqa: BLE001
@@ -1132,7 +1133,7 @@ def run(
                 backend.scale_delta(baseline, trained, scale)
 
         def with_outcomes(rows, verdicts):
-            return [r | ({"outcome": verdicts[r["id"]]["outcome"], "by": verdicts[r["id"]]["by"]}
+            return [r | ({k: verdicts[r["id"]][k] for k in judged.FIELDS if k in verdicts[r["id"]]}
                          if r["id"] in verdicts else {}) for r in rows]
 
         def scale_adapter(scale):
@@ -1223,7 +1224,7 @@ def run(
             verdicts = judged_outcomes(scale)
             judged_rows = [
                 {"id": s["id"], "conversation": s["conversation"], **{
-                    k: verdicts[s["id"]][k] for k in ("outcome", "by")}}
+                    k: verdicts[s["id"]][k] for k in judged.FIELDS if k in verdicts[s["id"]]}}
                 for s in heldout if s["id"] in verdicts
             ]
             rejected = judged_check(judged_rows, confidence=config.gate_confidence)

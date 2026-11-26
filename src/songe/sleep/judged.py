@@ -12,6 +12,12 @@ says why). The feedback-aware teacher's preference does not break a tie:
 training pulls the candidate towards that preference, so it would count
 the training itself as a win.
 
+With cloud learning on (songe.cloud), the cloud model the user chose is
+asked the same question and decides; the local judge is still asked and its
+outcome kept beside it, so the record shows how often they disagree. When
+the cloud model can't be asked (offline, budget, unreadable reply) the local
+judge decides and the record says why.
+
 The same answers are also written at a few moments the lessons are not
 about (unrelated, acts_differently): how often the candidate acts
 differently there is kept in the record and decides nothing.
@@ -28,6 +34,7 @@ import re
 
 from ..quick import differs, identical, visible
 from .examples import answer
+from .gate import JUDGED
 from .prompts import paired_prompts, render
 
 ANSWER_TOKENS = 384   # each version's answer: long enough for a tool call
@@ -174,14 +181,51 @@ def does(backend, step, answer):
     """Whether this answer, on its own, does what the user's feedback at this
     moment asks: True, False, or None when the judge's reply cannot be read.
     Asked of the original base weights (no self-preference)."""
-    request, guide = request_of(step) or "(not shown)", guide_of(step) or "(none)"
-    with backend.base():
-        text = ask(backend, DOES.format(request=request, guide=guide, answer=shown(answer)))
+    text = ask_local(backend, prompt_for(step, answer))
     found = verdict(text)
     if found is None:
         # Live: about 4 of 14 replies could not be read; what they say.
         logger.info("judge_unreadable %s: %r", step["id"], (text or "")[:200])
         return None
+    return found
+
+
+def prompt_for(step, answer):
+    request, guide = request_of(step) or "(not shown)", guide_of(step) or "(none)"
+    return DOES.format(request=request, guide=guide, answer=shown(answer))
+
+
+def ask_local(backend, prompt):
+    with backend.base():
+        return ask(backend, prompt)
+
+
+FIELDS = JUDGED  # what a judged row carries into the gate and the Dream's record
+CLOUD_TOKENS = 1024  # room for a reasoning model to think before its verdict
+
+
+def cloud_judge(store):
+    """Whether this Dream's judge is the cloud model: on and usable now, or
+    the reason it is not (None when cloud learning is simply off)."""
+    from .. import cloud
+
+    if store is None or not cloud.load(store).enabled:
+        return False, None
+    state = cloud.available(store)
+    return bool(state), (None if state else state.reason)
+
+
+def does_in_cloud(store, step, answer):
+    """The cloud model's verdict on the same question (redacted, budgeted and
+    logged by songe.cloud): True, False, None when unreadable; raises
+    cloud.Unavailable when it can't be asked (the local judge decides)."""
+    from .. import cloud
+
+    reply = cloud.complete(store, [{"role": "user", "content": prompt_for(step, answer)}],
+                           purpose="judge", max_tokens=CLOUD_TOKENS)
+    found = verdict(reply.text)
+    if found is None:
+        logger.info("cloud_judge_unreadable %s: %r", step["id"], (reply.text or "")[:200])
     return found
 
 
@@ -196,7 +240,7 @@ def verdict(text):
     return found.group(1).lower() == "yes" if found else None
 
 
-def outcome(backend, step, before, after):
+def outcome(backend, step, before, after, store=None):
     """win / loss / tie for the candidate at this moment, and why.
 
     Each answer is judged on its own against the user's feedback: a win when
@@ -206,10 +250,36 @@ def outcome(backend, step, before, after):
     4B judge gave a verdict on two of three pairs that differed in anything,
     a fenced command against the bare one, a sentence against the bare date,
     in either direction: a candidate no check of the eight test habits
-    found worse at any of 24 moments was refused as better on 3, worse on 8."""
+    found worse at any of 24 moments was refused as better on 3, worse on 8.
+
+    With cloud learning on (store given), the cloud model is asked the same
+    question about each answer and decides; the local judge is still asked,
+    and its outcome kept beside it (how often they disagree is in the
+    record). A cloud reply that can't be read or a cloud model that can't be
+    asked leaves the decision to the local judge, with the reason kept.
+    Returns (outcome, by) without a store, (outcome, by, info) with one."""
     if identical(before, after):
-        return "tie", "same"
+        return ("tie", "same") if store is None else ("tie", "same", {})
     was, now = does(backend, step, before), does(backend, step, after)
+    local = decided(was, now)
+    if store is None:
+        return local
+    use, why = cloud_judge(store)
+    if not use:
+        return (*local, {"judge": "local"} | ({"cloud_unavailable": why} if why else {}))
+    from .. import cloud
+
+    try:
+        cloud_was, cloud_now = does_in_cloud(store, step, before), does_in_cloud(store, step, after)
+    except cloud.Unavailable as exc:
+        return (*local, {"judge": "local", "cloud_unavailable": exc.reason})
+    if cloud_was is None or cloud_now is None:
+        return (*local, {"judge": "local", "cloud_unavailable": "a cloud verdict couldn't be read"})
+    return (*decided(cloud_was, cloud_now), {"judge": "cloud", "local": local[0]})
+
+
+def decided(was, now):
+    """win / loss / tie from the two answers' verdicts."""
     if was is None or now is None:
         return "tie", "unclear"
     if now and not was:
@@ -219,16 +289,19 @@ def outcome(backend, step, before, after):
     return "tie", "both" if now else "neither"
 
 
-def judge(backend, journal, steps, before, after, name, check):
-    """[{id, conversation, outcome, by}] for every moment, resumable."""
+def judge(backend, journal, steps, before, after, name, check, store=None):
+    """[{id, conversation, outcome, by, judge?, local?, cloud_unavailable?}]
+    for every moment, resumable (a cloud verdict is paid for once)."""
     rows = []
     for step in steps:
         check()
         result = journal.unit(
             f"judged-{name}-verdict-{step['id']}",
-            lambda step=step: list(outcome(backend, step, before[step["id"]], after[step["id"]])),
+            lambda step=step: list(outcome(backend, step, before[step["id"]], after[step["id"]], store)),
         )
-        rows.append({"id": step["id"], "conversation": step["conversation"], "outcome": result[0], "by": result[1]})
+        info = result[2] if len(result) > 2 else {}
+        rows.append({"id": step["id"], "conversation": step["conversation"], "outcome": result[0],
+                     "by": result[1], **info})
     return rows
 
 
@@ -259,5 +332,17 @@ def examples(steps, before, after, rows, limit=3):
 
 def summary(rows):
     count = {k: sum(r["outcome"] == k for r in rows) for k in ("win", "loss", "tie")}
-    return {"count": count["win"], "worse": count["loss"], "same": count["tie"],
-            "checked": len(rows), "available": len(rows)}
+    out = {"count": count["win"], "worse": count["loss"], "same": count["tie"],
+           "checked": len(rows), "available": len(rows)}
+    judged = [r for r in rows if r.get("judge")]
+    if any(r["judge"] == "cloud" or r.get("cloud_unavailable") for r in judged):
+        # Learn with a cloud model: who decided, how often the local judge
+        # would have decided otherwise, and why the cloud model wasn't asked.
+        cloud = [r for r in judged if r["judge"] == "cloud"]
+        out["judges"] = {
+            "cloud": len(cloud),
+            "local": len(judged) - len(cloud),
+            "disagreed": sum(r.get("local") != r["outcome"] for r in cloud),
+            "cloud_unavailable": next((r["cloud_unavailable"] for r in judged if r.get("cloud_unavailable")), None),
+        }
+    return out
