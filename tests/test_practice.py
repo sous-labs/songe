@@ -9,6 +9,7 @@ import pytest
 
 from songe.practice import store as practice
 from songe.practice.checks import STOCK_LESSONS, placebo_for
+from songe.quick import visible
 from songe.reading import store as reading
 from songe.reading import timeline
 from tests.test_reading import SCENE, FakeReader, args, record_session
@@ -293,7 +294,8 @@ class ChatWriter(FakeReader):
         assert name == "changes"
         if self.follows in ("A", "B", "both", "neither"):
             return {"follows": self.follows}
-        wanted = self.taught if self.follows == "taught" else self.plain
+        # The judge is shown what the user sees: no reasoning.
+        wanted = visible(self.taught if self.follows == "taught" else self.plain)
         first = prompt.split("Answer A:\n", 1)[1].split("\n\nAnswer B:", 1)[0]
         return {"follows": "A" if first == wanted else "B"}
 
