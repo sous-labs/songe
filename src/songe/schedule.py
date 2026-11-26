@@ -914,6 +914,29 @@ class Scheduler:
         if self.store.get("disk_wait") or self.store.get("child_error"):
             self.reason = self.store.get("disk_wait") or self.store.get("child_error")
 
+    async def fetch_original(self):
+        """A GGUF's original weights, once the user chose them (songe models
+        <model> download), are downloaded before measuring starts: the memory
+        guard samples the machine while it measures, and a 55 GB download
+        inside it stopped three Dreams in a row. Any failure leaves it to the
+        measuring child, which says why."""
+        from .models.convert import fetch_original
+
+        if (self.config.model_ref or {}).get("format") != "gguf":
+            return
+        learner = (
+            self.store.scoped(self.config.model_key)
+            if self.config.model_key
+            else self.store
+        )
+        if not learner.get("download_original"):
+            return  # Nothing contacts the hub unless the user chose it.
+        self.reason = "downloading the original weights to train on"
+        try:
+            await asyncio.to_thread(fetch_original, self.config, self.store)
+        except Exception:
+            logger.warning("gguf_origin_fetch_failed", exc_info=True)
+
     async def tick(self):
         if self.returning:
             return  # A version is being rebuilt; no other work beside it.
@@ -1016,6 +1039,8 @@ class Scheduler:
             or self.state == "ready"
         ):
             return
+        if upgrade_calibration and self.config.model_ref:
+            await self.fetch_original()
         # A short pause between slices, never an overnight cooldown: an
         # extrapolated work unit for a long window can reach hours (live:
         # 7.8 h for a 0.8B model), which stalled measuring.
@@ -2595,7 +2620,14 @@ class ModelScheduler(Scheduler):
                 # The card was full: say so and what to do (live #135: "did
                 # not finish" did not point at the user's own server).
                 full = learner.get("child_error") == DEVICE_FULL
-                stop(DEVICE_FULL if full else "measuring what this machine can train did not finish")
+                from .models.registry import find
+
+                # Measuring found the model cannot train at all (a GGUF of an
+                # architecture nothing reads): its note says why, not "did
+                # not finish".
+                row = find(self.installation_store, model) or {}
+                final = row.get("support") == "unsupported" and row.get("reason")
+                stop(DEVICE_FULL if full else final or "measuring what this machine can train did not finish")
             else:
                 again()
         else:

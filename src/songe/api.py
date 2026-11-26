@@ -716,6 +716,7 @@ def api_routes(config, store, scheduler=None, *, release=None):
                 "shutdown",
                 "model",
                 "auto_dream",
+                "download_original",
                 "remove_lesson",
                 "undo_quick",
                 "cancel",
@@ -809,6 +810,23 @@ def api_routes(config, store, scheduler=None, *, release=None):
                         quick.undo, model_scope(store, model), payload.get("id")
                     )
                     return JSONResponse({"ok": True, "message": f"Quick Dream undone · {gone} preference{'s' if gone != 1 else ''} removed from new sessions"})
+                elif action == "download_original":
+                    # The user's yes to training from a GGUF's original
+                    # weights; the next Deep Dream downloads them.
+                    from .models.library import materialize
+                    from .models.registry import find, resolve, support
+
+                    await asyncio.to_thread(
+                        materialize, Config.load(store.root), store, payload.get("model")
+                    )
+                    model = resolve(store, payload.get("model"))
+                    await asyncio.to_thread(
+                        model_scope(store, model).set, "download_original", True
+                    )
+                    row = await asyncio.to_thread(find, store, model)
+                    if row and row.get("support") == "unsupported":
+                        await asyncio.to_thread(support, store, model, "pending")
+                    return JSONResponse({"ok": True, "download_original": True})
                 elif action == "auto_dream":
                     # A Dream already under way finishes either way.
                     from .models.library import materialize

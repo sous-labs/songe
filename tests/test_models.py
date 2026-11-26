@@ -1396,6 +1396,30 @@ def test_a_full_graphics_card_says_what_to_do(learners, monkeypatch):
     assert learner.get("dream_stopped")["detail"] == wording.DEVICE_FULL
 
 
+def test_a_dream_stopped_by_an_untrainable_gguf_says_why(learners):
+    from types import SimpleNamespace
+
+    from songe.schedule import ModelScheduler
+    from songe.wording import gguf_untrainable
+
+    _, store = learners
+    reason = gguf_untrainable("inkling2_loop")
+    registry.support(store, "second", "unsupported", reason)
+    learner = store.scoped("second")
+    owner = SimpleNamespace(installation_store=store)
+    ModelScheduler.carry_on(
+        owner,
+        "second",
+        {"nights": len(learner.nights()), "at": 0},
+        calibrating=True,
+        failed=True,
+        interrupted=False,
+        stopped_by=None,
+        memory_stop=False,
+    )
+    assert learner.get("dream_stopped")["detail"] == reason
+
+
 SWAP_RUNNING = {
     "running": [
         {"model": "qwen", "state": "ready", "proxy": "http://localhost:5800",

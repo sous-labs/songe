@@ -5,6 +5,7 @@ import json
 import shutil
 import sys
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 
 from ..artifacts.runtime import guarded_run, publish
@@ -29,8 +30,16 @@ def require_disk(directory, required_bytes):
 
 
 def trainable_base(
-    ref, backend_kind, platform, *, runner=guarded_run, artifact_directory=None
+    ref,
+    backend_kind,
+    platform,
+    *,
+    runner=guarded_run,
+    artifact_directory=None,
+    download=False,
 ):
+    """download: the user chose to train from a GGUF's original weights
+    (songe models <model> download); without it nothing contacts the hub."""
     if backend_kind not in {"mlx", "torch"}:
         raise ValueError(f"Unknown backend: {backend_kind}")
     source = Path(ref.path)
@@ -58,6 +67,16 @@ def trainable_base(
     cache = Path(artifact_directory) / "models"
     cache.mkdir(parents=True, exist_ok=True)
     key = source_key(source)
+    if ref.format == "gguf":
+        record = cache / (key + "-origin.json")
+        original = downloaded(record) or (
+            original_base(source, record) if download else None
+        )
+        if original is not None:
+            if backend_kind == "torch":
+                return original
+            ref = replace(ref, format="safetensors")
+            source = original
     # Check the entire conversion chain before starting the first converter.
     required = 0
     dense_source = source
@@ -87,6 +106,10 @@ def trainable_base(
             info = read_gguf(source)
             if info.parameters <= 0:
                 raise ValueError("GGUF has no tensors to convert")
+            if not _transformers_reads(source):
+                # Final: the scheduler marks the model unsupported with this
+                # line instead of retrying "conversion failed" for hours.
+                raise ValueError(_untrainable(ref, source, info, download))
             require_disk(cache, info.parameters * 2 + source.stat().st_size)
             _convert(
                 source,
@@ -112,6 +135,97 @@ def trainable_base(
             )
         source = destination
     return source
+
+
+def _untrainable(ref, source, info, download):
+    """Why this GGUF cannot train: an offer to train from the original
+    weights it names (read from the file, no network), or plainly not."""
+    from ..wording import gguf_original_offer, gguf_untrainable
+    from . import origin
+
+    try:
+        repo = None if download else origin.named(source)
+    except Exception:
+        repo = None
+    if not repo:
+        return gguf_untrainable(ref.architecture)
+    from .library import model_name
+
+    size = f"{info.parameters * 2 / 1e9:.0f} GB"  # bf16 originals
+    return gguf_original_offer(repo, size, model_name(ref.serving_id))
+
+
+def downloaded(record):
+    """Original weights downloaded earlier for this GGUF, or None."""
+    try:
+        path = Path(json.loads(record.read_text(encoding="utf-8"))["path"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return path if (path / "config.json").is_file() else None
+
+
+def fetch_original(config, store):
+    """Download a GGUF model's original weights where the measuring child
+    will find them, before measuring starts."""
+    from ..artifacts.storage import artifact_root
+
+    source = Path(config.model_ref["path"])
+    cache = Path(artifact_root(config, store)) / "models"
+    cache.mkdir(parents=True, exist_ok=True)
+    record = cache / (source_key(source) + "-origin.json")
+    return downloaded(record) or original_base(source, record)
+
+
+def original_base(source, record):
+    """The weights the GGUF was quantized from, downloaded into the Hugging
+    Face cache, or None. Called only once the user opted in."""
+    import logging
+
+    from . import origin
+
+    try:
+        import huggingface_hub  # noqa: F401
+    except ImportError:
+        return None
+    try:
+        found = origin.original_weights(source)
+    except Exception:
+        logging.getLogger(__name__).warning("gguf_origin_check_failed", exc_info=True)
+        return None
+    if found is None:
+        return None
+    logging.getLogger(__name__).info(
+        "gguf_origin %s: %s@%s", source.name, found.repo, found.revision[:12]
+    )
+    require_disk(
+        origin.cache_dir() or record.parent,
+        max(0, found.bytes - origin.present_bytes(found)),
+    )
+    path = origin.download(found)
+    from ..storage import write_json
+
+    write_json(
+        record,
+        {"source": str(source), "repo": found.repo, "revision": found.revision,
+         "path": str(path)},
+    )
+    return path
+
+
+def _transformers_reads(source):
+    """Whether transformers can read this GGUF's architecture (metadata only,
+    no tensors), as the converter would."""
+    try:
+        from transformers.modeling_gguf_pytorch_utils import load_gguf_checkpoint
+    except ImportError:
+        return True  # Cannot tell here; the converter itself says.
+    try:
+        load_gguf_checkpoint(str(source), return_tensors=False)
+    except Exception as exc:
+        # Only its "architecture ... is not supported" answers the question;
+        # anything else (a damaged file) is the converter's to report.
+        return "not supported" not in str(exc)
+    return True
 
 
 def _convert(source, destination, kind, platform, runner, identity):
