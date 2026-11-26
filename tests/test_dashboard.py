@@ -867,3 +867,15 @@ def test_the_page_counts_idle_time_toward_a_dream():
     assert "a.idle_elapsed_seconds" in script and "a.idle_threshold_seconds" in script
     assert words["empty"]["next_idle"] == "dreams when idle · {idle}, or press Dream"
     assert words["idle_of"] == "{elapsed} of {limit}"
+
+
+def test_the_dreams_practice_wait_says_how_many_test_moments_a_deep_dream_needs(config, store, monkeypatch):
+    """practice_wait carried the same "0 of 5" (min_heldout) under Dreams,
+    where a Deep Dream starts on one test moment (pool.test_minimum)."""
+    from songe.practice import pool
+    from songe.status import practice_wait
+
+    config.learning = "dreams"
+    monkeypatch.setattr(pool, "practice_steps", lambda scoped, split="train": [object()] * 6)
+    monkeypatch.setattr(pool, "heldout_units", lambda scoped: 0)
+    assert practice_wait(config, store, [{"id": "m"}]) == "collecting test moments · 0 of 1 needed to check updates"
