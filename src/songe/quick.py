@@ -198,14 +198,32 @@ def unset(text):
     return SETTING.sub(lambda m: f"{m[1]}=<{m[1].lower()}>", text)
 
 
+HERE = re.compile(r"\bthis (repo|repository|project|codebase|folder|app)\b", re.I)
+
+
 def wording(signal):
     """A signal's note for the prompt, and whether it is the user's own
     sentence: a sentence they stated, else the short form reading wrote for
     the prompt (signals read before it existed fall back to the lesson,
     trimmed by tidy). Its project's own name is said for any project
-    (general)."""
+    (general). A wish read as holding for one kind of thing only (its
+    "about", reading.prompts.scoped) says so, and when that is its project
+    the project's name stays."""
+    from .reading.prompts import scoped
+
     rule = stated_sentence(signal) if signal.get("type") in USER else None
-    return general(rule or short_of(signal) or signal["lesson"].strip(), signal.get("project")), bool(rule)
+    text, about, project = rule or short_of(signal) or signal["lesson"].strip(), signal.get("about"), signal.get("project")
+    if rule and about:
+        text = scoped(text, about)
+    if about and project and HERE.search(about):
+        # The prompt goes to every project: "this repo" is said by its name.
+        named = HERE.sub(lambda m: f"the {project} {m[1]}", about)
+        text, about = text.replace(f"For {about}:", f"For {named}:", 1), named
+    if about and general(about, project) != about:
+        # A wish for this project only ("in admin", "the storefront repo"):
+        # its name says where the note holds, so it stays.
+        return text, bool(rule)
+    return general(text, project), bool(rule)
 
 
 def joined(signals):
