@@ -494,6 +494,37 @@ Can both be true of the user now?
 - "later_only": no. The later sentence means the earlier one is no longer true: they changed their mind, stopped doing it, gave it up, or now want the opposite.
 Answer with JSON only."""
 
+# The same for a wish the user voiced in a correction (reading/store.
+# retire_changed): REPLACES and BOTH_TRUE only see what the user said about
+# themself. Live (Qwen3.8-27B, simulated users, issue #231): "注释还是中文吧"
+# and, after the repository went open source, "又写中文注释了。。英文" left both
+# "Use Chinese comments." and "Use English comments." in the prompt; "Use
+# Zustand." stayed beside three notes to use jotai; after "we moved to just,
+# the makefile is gone" three notes to use make stayed. Asked as for a stated
+# preference: which earlier notes the newer one replaces, then each named one
+# again on its own with it.
+CHANGED = """An AI assistant keeps short notes on how one user wants things done.
+
+Notes kept so far, oldest first:
+{notes}
+
+A newer note, from what the user said after all of them:
+{note}
+
+Does the newer note say that one of the notes kept so far is no longer what the user wants? That takes both: the two are about the same choice (the same kind of tool, library, command, language, format or sign-off, for the same kind of work in the same place), and the assistant cannot follow both: the user changed their mind, moved to something else, or now wants the opposite.
+Most newer notes replace nothing: they are about something else, they hold somewhere else or for another kind of work (another repository, emails and not chat), or they add to a note.
+Answer with JSON only: {{"replaces": [the numbers of the notes it replaces]}}, with an empty list when it replaces none."""
+
+FOLLOW_BOTH = """An AI assistant keeps short notes on how one user wants things done. Two of them, written at different times:
+
+Earlier: {old}
+Later: {new}
+
+Can the assistant follow both from now on?
+- "both": yes. They are about different things, they hold in different places or for different kinds of work, or the later one adds to the earlier one.
+- "later_only": no. Where the later one applies, doing what it says means not doing what the earlier one says: the user changed what they want.
+Answer with JSON only."""
+
 # One wish, one place (reading/store.fold_same). A user asks for the same thing
 # in three conversations in three ways, and reading writes a note each time.
 # Two questions, as for REPLACES and for the same reason: which of the notes

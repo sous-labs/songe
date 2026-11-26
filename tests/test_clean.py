@@ -532,7 +532,7 @@ def test_older_flow_lines_read_in_todays_wording():
     )
     assert flow_state(old) == "waiting for memory · 7.9 GB free"
     assert flow_state("sleep could not complete; current version preserved") == (
-        "a check failed · current version kept · retries automatically"
+        "learning failed · current version kept · retries automatically"
     )
     assert flow_state("waiting for memory: intact training samples deferred") == (
         "waiting for memory · long conversations wait for more free memory"
