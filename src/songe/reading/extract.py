@@ -349,19 +349,22 @@ class Session:
                 # ('Say "Yes, chef." first.', read as a new task): it waits
                 # for the same wish in a second conversation (quick.candidates),
                 # which it cannot do when nothing is stored for it.
-                verdict, wish = ("task", "") if len(e["text"]) > P.TURN_CHARS else P.turn_verdict(
-                    await self.model.ask(
-                        P.TURN.format(
-                            earlier=self.short("\n".join(user_messages(items, e["item"]))),
-                            steps=self.short(step_lines(items, turn + 1, e["item"])),
-                            message=in_json(e["text"]),
-                        ),
-                        P.TURN_SCHEMA,
-                        "turn",
+                earlier = "\n".join(user_messages(items, e["item"]))
+                judged = {} if len(e["text"]) > P.TURN_CHARS else await self.model.ask(
+                    P.TURN.format(
+                        earlier=self.short(earlier),
+                        steps=self.short(step_lines(items, turn + 1, e["item"])),
+                        message=in_json(e["text"]),
                     ),
-                    e["text"],
-                    "\n".join(user_messages(items, e["item"])),
+                    P.TURN_SCHEMA,
+                    "turn",
                 )
+                verdict, wish = ("task", "") if len(e["text"]) > P.TURN_CHARS else P.turn_verdict(
+                    judged, e["text"], earlier
+                )
+                # What the wish holds for, as the turn question read it
+                # ("emails", "commit messages"): the note says it (P.scoped).
+                about = P.scope_of(judged, f"{earlier}\n{e['text']}")
                 if (
                     verdict == "task"
                     and any(
@@ -421,6 +424,9 @@ class Session:
                         # are the lesson; otherwise there is none.
                         own = P.own_words(e["text"]) if verdict in ("lasting", "once") else ""
                         signal.update(lesson=own or None, short=own or None, unvoiced=True)
+                    if about and signal.get("lesson"):
+                        signal.update(about=about, lesson=P.scoped(signal["lesson"], about),
+                                      short=P.scoped(signal.get("short"), about) or None)
                 if any(p.get("kind") == "new_task" for p in parts):
                     self.task_starts.append(e["item"])
                 e["classified"] = parts

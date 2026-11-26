@@ -376,6 +376,24 @@ def reason(
     return "Will sleep when idle"
 
 
+def memory_waiting(reason):
+    text = (reason or "").lower()
+    return "memory" in text and any(w in text for w in ("wait", "held", "paus"))
+
+
+def note_memory_wait(scheduler, reason):
+    """songe.log gets one line when a wait for memory starts and one when it
+    ends, with its length; the status text alone left no trace of them."""
+    since = scheduler.__dict__.get("_memory_wait_since")
+    if memory_waiting(reason) and since is None:
+        scheduler.__dict__["_memory_wait_since"] = time.monotonic()
+        logger.info("memory_wait %s", reason)
+    elif not memory_waiting(reason) and since is not None:
+        scheduler.__dict__["_memory_wait_since"] = None
+        minutes = (time.monotonic() - since) / 60
+        logger.info("memory_wait_over after %.1f min: %s", minutes, reason)
+
+
 class Scheduler:
     @property
     def reason(self):
@@ -389,6 +407,8 @@ class Scheduler:
         self._reason = value
         logged = self.__dict__.setdefault("_reason_logged", {})
         store = self.__dict__.get("store")
+        if value != previous:
+            note_memory_wait(self, value)
         if value != previous and store is not None:
             now = time.monotonic()
             if now - logged.get(value, -1e9) > 600:

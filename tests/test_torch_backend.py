@@ -716,3 +716,67 @@ def test_the_bases_reads_are_kept_across_dreams(backend, step, tmp_path):
     assert reads == []
     backend.kl_from(backend, prompt, teacher, y, hindsight=True, views=later)
     assert reads == [1]  # the teacher's read is not kept on disk
+
+
+def test_a_qwen3_5_prefix_is_read_frozen_like_a_window_that_keeps_its_cache():
+    """Qwen3.5 and 3.8 mix full-attention layers with linear-attention layers
+    whose cache is a recurrent and a convolution state. With the prefix
+    frozen, a checkpointed window after it gives the forward pass and the
+    gradients of the same window run with the layers keeping the cache, so
+    a sample longer than the window is not trained on the window alone."""
+    transformers = pytest.importorskip("transformers")
+    if not hasattr(transformers, "Qwen3_5ForCausalLM"):
+        pytest.skip("this transformers has no Qwen3.5")
+    torch.manual_seed(3)
+    model = transformers.Qwen3_5ForCausalLM(
+        transformers.Qwen3_5TextConfig(
+            vocab_size=97,
+            hidden_size=32,
+            intermediate_size=64,
+            num_hidden_layers=2,
+            num_attention_heads=2,
+            num_key_value_heads=1,
+            head_dim=16,
+            linear_num_key_heads=2,
+            linear_num_value_heads=2,
+            linear_key_head_dim=8,
+            linear_value_head_dim=8,
+            layer_types=["linear_attention", "full_attention"],
+        )
+    ).train()
+    ids = torch.randint(0, 97, (1, 40), generator=torch.Generator().manual_seed(5))
+    prefix, window = ids[:, :30], ids[:, 30:]
+
+    with torch.no_grad():
+        whole = model.base_model(input_ids=ids, use_cache=False).last_hidden_state[:, 30:]
+        past = TorchBackend._cache(model.base_model(input_ids=prefix, use_cache=True))
+    states = [
+        {k: v.clone() for k, v in vars(layer).items() if isinstance(v, torch.Tensor)}
+        | {
+            f"{name}{i}": t.clone()
+            for name in ("conv_states", "recurrent_states")
+            for i, t in enumerate(getattr(layer, name, None) or [])
+            if isinstance(t, torch.Tensor)
+        }
+        for layer in past.layers
+    ]
+    model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+    owner = SimpleNamespace(torch=torch, _causal=lambda: model)
+    with TorchBackend.frozen(owner, past) as kept:
+        # On main the linear-attention cache was refused: window only.
+        assert kept
+        out = model.base_model(input_ids=window, past_key_values=past, use_cache=True).last_hidden_state
+        out.float().square().mean().backward()
+    # The window read after the prefix is the window of one whole pass, and the
+    # backward pass (which runs each layer again) left the prefix as it was.
+    torch.testing.assert_close(out.detach(), whole, atol=1e-5, rtol=1e-4)
+    assert any(p.grad is not None for p in model.parameters())
+    for layer, kept_states in zip(past.layers, states, strict=True):
+        now = {k: v for k, v in vars(layer).items() if isinstance(v, torch.Tensor)} | {
+            f"{name}{i}": t
+            for name in ("conv_states", "recurrent_states")
+            for i, t in enumerate(getattr(layer, name, None) or [])
+            if isinstance(t, torch.Tensor)
+        }
+        for k, v in kept_states.items():
+            torch.testing.assert_close(now[k], v, atol=0, rtol=0)

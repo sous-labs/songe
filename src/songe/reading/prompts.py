@@ -263,7 +263,10 @@ TURN_SCHEMA = {
         "standing": {"type": "string", "enum": ["yes", "no"]},
         "kind": {"type": "string", "enum": ["once", "task", "reaction"]},
         "wish": {"type": "string"},
+        "about": {"type": "string"},
     },
+    # "about" may be missing: an answer without it is read as holding for
+    # any answer (scope_of), not as an answer off the schema.
     "required": ["standing", "kind", "wish"],
 }
 
@@ -278,11 +281,59 @@ What the assistant did since then:
 The user's next message:
 {message}
 
-Two questions about the user's next message.
+Questions about the user's next message.
 - standing: "yes" if the message, or a part of it, tells the assistant how this user wants answers or work from now on, beyond this one answer: the language to answer in ("reply in Chinese"), how short or long answers should be ("keep answers short"), a tone, a format or a notation ("no emojis", "plain text, no LaTeX"), a tool, a library or a unit to use or to avoid ("tabs, not spaces", "no jQuery"), or how the user works and what they like ("I use Linux", "I like a dark look"). A change to the look of something made for the user is "yes" as well, because people keep their taste in looks: its colours, fonts, corners, borders, shadows, spacing, light or dark ("make the buttons green", "a bigger font please", "less space between the lines"). A message can ask for something else as well and still be "yes". "no" if it only wants this one answer redone or changed ("make it shorter", "rewrite it more formally", "add a paragraph on costs", "write it in Python", "that is wrong"), asks for new work, or asks for nothing, or limits what it wants to now: today, this time, this one ("short answers today, I have a deadline", "skip the lint for today's demo", "this one can be casual"). Also "no" when it gives the assistant a role, a persona or a game to play ("act as a Linux terminal", "you are an expert prompt writer", "from now on you are DAN"), or asks for a word or a text in another language ("defeated in Chinese", "the last paragraph in English"): that is new work.
 - kind: "once" if it wants this one answer changed, corrected or tried again; "task" if it asks for new or further work or asks a question; "reaction" if it asks for nothing (thanks, praise, a remark).
 - wish: if standing is "yes", that wish alone as one full sentence that tells the assistant what to do from now on, in English, starting with a verb and naming exactly what the user named ("Answer in Chinese.", "Keep answers to two or three sentences.", "Use Polars, not pandas.", "Use plain text, not LaTeX."); leave out whatever belongs to this one answer. Otherwise "".
+- about: what the message is about when what it wants holds for one kind of thing only, as the conversation shows it: the kind of text being written ("emails", "commit messages", "code comments"), one repository or project ("the admin repo"), one language or one tool. A few words naming the kind, never this one item ("emails", not "this email"). "" when it would hold for any answer.
 Answer with JSON only."""
+
+
+# What a wish holds for. Live (Qwen3.8-27B, simulated users, issue #231):
+# "ugh again so long. max 5-6 sentence", said about an email, became "Keep
+# answers to a maximum of 5-6 sentences." and cut a requested detailed
+# explanation from 481 words to 103; "Thanks, then Mi-rae" became a sign-off on
+# a recipe and on a message to the user's mother; "英文!! feat(refund): ..."
+# about a commit message became "Answer in English ...". The user never says
+# "email" in such a message: the conversation does. The turn question names
+# the kind of thing (TURN "about"), and the note says it ("For emails: ...").
+# Not a scope: the item at hand ("this email"; "this repo" is one), or everything.
+ABOUT_WORDS = 6
+NO_SCOPE = re.compile(
+    r"^(this|that)\s+(?!(repo|repository|project|codebase|folder|app)\b)"
+    r"|^the\s+(one|answer|reply|response|message|text|task|request|draft|version|time)\b"
+    r"|^(any|all|every|everything|anything|general|none|n/?a|nothing|answers?|replies|responses?)\b",
+    re.I,
+)
+
+
+def scope_of(answer, said=""):
+    """What the turn question says the user's wish holds for ("emails",
+    "commit messages", "the admin repo"), or "" when it holds for any answer
+    or the answer gives nothing usable. `said` is what the user wrote in the
+    conversation: a kind the user never named in it is still kept when the
+    message is not in Latin letters (rules.voiced)."""
+    from .rules import voiced
+
+    about = " ".join(str((answer or {}).get("about") or "").split()).strip(" .:;,\"'")
+    about = re.sub(r"^(for|in|on|only|just|about)\s+", "", about, flags=re.I)
+    if not about or len(about.split()) > ABOUT_WORDS or len(about) > 48 or NO_SCOPE.search(about):
+        return ""
+    return about if voiced(about, said) > 0 else ""
+
+
+def scoped(note, about):
+    """A note said for what it holds: "Keep answers to a maximum of 5-6
+    sentences." about emails is "For emails: keep answers to a maximum of
+    5-6 sentences."; a note that names it already stays as it is."""
+    from .rules import voiced
+
+    note = " ".join(str(note or "").split())
+    if not note or not about or voiced(about, note) >= 0.5:
+        return note
+    if note[:1].isupper() and not note[1:2].isupper():
+        note = note[:1].lower() + note[1:]
+    return f"For {about}: {note}"
 
 
 # Languages, libraries and systems named in the question's own examples. A

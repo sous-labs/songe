@@ -506,12 +506,25 @@ class TorchBackend:
         the convolution and recurrent states of hybrid layers (Inkling-2),
         which are overwritten in place: left changed, the backward pass ran
         the layer on other states than the forward pass, routed some tokens
-        to other experts and failed (CheckpointError). Caches of another kind
-        (recurrent state alone) and layers transformers does not checkpoint
-        itself are left alone: the caller then trains on the window only.
+        to other experts and failed (CheckpointError). The linear-attention
+        layers of Qwen3.5 and 3.8 hold a recurrent state alone and are
+        restored the same way; without that, a sample longer than the window
+        trained the student on the window only while its teacher read the
+        whole context. Caches of another kind and layers transformers does
+        not checkpoint itself are left alone: the caller then trains on the
+        window only.
         """
-        from transformers.cache_utils import DynamicLayer
+        from transformers import cache_utils
         from transformers.modeling_layers import GradientCheckpointingLayer
+
+        readable = tuple(
+            kind
+            for kind in (
+                getattr(cache_utils, "DynamicLayer", None),
+                getattr(cache_utils, "LinearAttentionLayer", None),
+            )
+            if kind is not None
+        )
 
         layers = [
             m
@@ -523,7 +536,7 @@ class TorchBackend:
             not layers
             or not states
             or not all(hasattr(m, "_can_checkpoint_with_cache") for m in layers)
-            or not all(isinstance(c, DynamicLayer) for c in states)
+            or not all(isinstance(c, readable) for c in states)
         ):
             yield False
             return
