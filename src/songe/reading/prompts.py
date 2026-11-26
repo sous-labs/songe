@@ -366,6 +366,12 @@ RUNNER = re.compile(
     r"|(?P<runner>just|make)\s+(?P<target>[A-Za-z]\w*[-:_][\w:-]+))",
     re.I,
 )
+# "yarn to npm", "bun not node": after a bare runner a plain word is English,
+# not a script, and must not be made a command ("Switch yarn to yarn.").
+NOT_TARGETS = frozenset(
+    "a an and as at but by for from in instead into is it its no nor not of on or"
+    " over please pls than the then this that to too vs with".split()
+)
 
 
 def named(message):
@@ -378,6 +384,8 @@ def whole_commands(wish, message):
     make." for "just test-unit, not make" is "Use just test-unit, not make."."""
     for m in RUNNER.finditer(str(message)):
         runner, target = (m["plain"], m["word"]) if m["plain"] else (m["runner"], m["target"])
+        if target.lower() in NOT_TARGETS:
+            continue
         whole = re.compile(rf"\b{re.escape(runner)}\s+{re.escape(target)}(?![\w-])", re.I)
         alone = re.compile(rf"(?<![\w-]){re.escape(target)}(?![\w-])", re.I)
         if alone.search(wish) and not whole.search(wish):

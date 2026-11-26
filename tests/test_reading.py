@@ -2391,3 +2391,7 @@ def test_a_wish_keeps_what_the_user_named():
     # "just" and "make" as words are not commands.
     assert P.whole_commands("Keep it short.", "make it short, just the code") == "Keep it short."
     assert P.whole_commands("Use pnpm add, not npm install.", "pnpm add zod pls not npm") == "Use pnpm add, not npm install."
+    # A plain word after a bare runner is English, not a script.
+    assert P.whole_commands("Switch to yarn.", "i prefer yarn to npm") == "Switch to yarn."
+    assert P.whole_commands("Use bun, not node.", "use bun not node") == "Use bun, not node."
+    assert P.whole_commands("Do not use npm.", "pnpm not npm") == "Do not use npm."
