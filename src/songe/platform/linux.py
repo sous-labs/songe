@@ -32,15 +32,43 @@ def pressure(available, total, psi, baseline, *, warn_ratio=2.0, critical_ratio=
     return "normal"
 
 
-def inactive_file(folder, kind):
-    """Reclaimable page cache a cgroup's usage includes (0 when unknown)."""
+CACHE_STATS = {
+    "v2": (
+        "inactive_file",
+        "active_file",
+        "file_mapped",
+        "file_dirty",
+        "file_writeback",
+    ),
+    "v1": (
+        "total_inactive_file",
+        "total_active_file",
+        "total_mapped_file",
+        "total_dirty",
+        "total_writeback",
+    ),
+}
+
+
+def reclaimable_cache(folder, kind):
+    """Reclaimable page cache a cgroup's usage includes (0 when unknown).
+
+    All inactive cache, and active cache less what programs map (a model
+    server's mmapped weights) and what is not yet written back. A file read
+    twice is active: on cgroup v1, a 93 GB file written and read back left
+    29.7 GB active and 7.4 GB inactive, usage at the 62 GB limit, no OOM.
+    """
     try:
         stat = (folder / "memory.stat").read_text(encoding="utf-8")
     except OSError:
         return 0
-    name = "inactive_file" if kind == "v2" else "total_inactive_file"
-    match = re.search(rf"^{name}\s+(\d+)", stat, re.M)
-    return int(match[1]) if match else 0
+
+    def value(name):
+        match = re.search(rf"^{name}\s+(\d+)", stat, re.M)
+        return int(match[1]) if match else 0
+
+    inactive, active, mapped, dirty, writeback = map(value, CACHE_STATS[kind])
+    return max(inactive, inactive + active - mapped - dirty - writeback)
 
 
 class Linux:
@@ -250,9 +278,9 @@ class Linux:
                 if limit != "max":
                     limit = int(limit)
                     used = int((folder / current_name).read_text(encoding="utf-8"))
-                    # Usage counts the page cache; its inactive part (files read
-                    # once, like downloaded weights) is reclaimed on demand.
-                    used -= min(used, inactive_file(folder, kind))
+                    # Usage counts the page cache, which is reclaimed on
+                    # demand (downloaded weights, files read back).
+                    used -= min(used, reclaimable_cache(folder, kind))
                     total = min(total, limit)
                     available = min(available, max(0, limit - used))
                 if folder == mount:
