@@ -403,6 +403,45 @@ def now_only(message, wish=""):
         NOW_ONLY.search(part) and not FROM_NOW.search(part) and voiced(wish or "", part) > 0
         for part in SENTENCE_END.split(str(message or ""))
     )
+# Names the user typed: a command, a library, a file, a commit prefix
+# ("styled-components", "test-unit", "feat(refund):", "src/state").
+NAME = re.compile(r"(?<![\w-])[A-Za-z]\w*(?:[-_.:/]\w+|\(\w[\w-]*\))+")
+# A command is its runner and its target. Live (Qwen3.8-27B, a simulated
+# backend developer, issue #231): "just test-unit, not make. there is no
+# makefile anymore" became "Use test-unit, not make.": "just" was read as the
+# word, the change from make to just was lost, and 0 of 10 held-out requests
+# for the test command used just. "just" and "make" are words too, so only a
+# target that looks like a name (test-unit, db:migrate) counts after them.
+RUNNER = re.compile(
+    r"\b(?:(?P<plain>npm run|pnpm|yarn|bun|uv run|poetry run|cargo)\s+(?P<word>[A-Za-z][\w:-]*)"
+    r"|(?P<runner>just|make)\s+(?P<target>[A-Za-z]\w*[-:_][\w:-]+))",
+    re.I,
+)
+# "yarn to npm", "bun not node": after a bare runner a plain word is English,
+# not a script, and must not be made a command ("Switch yarn to yarn.").
+NOT_TARGETS = frozenset(
+    "a an and as at but by for from in instead into is it its no nor not of on or"
+    " over please pls than the then this that to too vs with".split()
+)
+
+
+def named(message):
+    """The names the user's message gives (NAME), longer than three letters."""
+    return [n for n in NAME.findall(str(message)) if len(n) > 3]
+
+
+def whole_commands(wish, message):
+    """The wish with each command the user typed whole: "Use test-unit, not
+    make." for "just test-unit, not make" is "Use just test-unit, not make."."""
+    for m in RUNNER.finditer(str(message)):
+        runner, target = (m["plain"], m["word"]) if m["plain"] else (m["runner"], m["target"])
+        if target.lower() in NOT_TARGETS:
+            continue
+        whole = re.compile(rf"\b{re.escape(runner)}\s+{re.escape(target)}(?![\w-])", re.I)
+        alone = re.compile(rf"(?<![\w-]){re.escape(target)}(?![\w-])", re.I)
+        if alone.search(wish) and not whole.search(wish):
+            wish = alone.sub(lambda t, runner=runner: f"{runner} {t[0]}", wish, count=1)
+    return wish
 
 
 def turn_verdict(answer, message="", earlier=""):
@@ -418,7 +457,10 @@ def turn_verdict(answer, message="", earlier=""):
     Dream; a remark about quotation marks came back as the question's own
     example "Make the buttons green.", and a page pasted earlier had a
     button in it. Such a wish is not used: the note is then the user's own
-    message, when that is one short sentence (own_words)."""
+    message, when that is one short sentence (own_words). A wish that keeps
+    none of the names the user's message gives (a library, a command, a
+    file) is not used either, and a command the user typed is kept whole,
+    with its runner (whole_commands)."""
     from .rules import voiced
 
     if not isinstance(answer, dict):
@@ -435,7 +477,14 @@ def turn_verdict(answer, message="", earlier=""):
         return "lasting", ""
     if not voiced(wish, message) and voiced(wish, f"{earlier}\n{message}") < 1:
         return "lasting", own_words(message)
-    return "lasting", wish
+    names = named(message)
+    if names and not any(n.lower() in wish.lower() for n in names):
+        # The user named what they want and the wish keeps none of it. Live
+        # (Qwen3.8-27B, issue #231): "styled-components + export default.
+        # siempre en admin" ("always so in admin") became "Always work in
+        # admin.", and the prompt then sent other repositories' work there.
+        return "lasting", own_words(message)
+    return "lasting", whole_commands(wish, message)
 
 
 # Asked about a sentence the rules flagged as a possible preference of the

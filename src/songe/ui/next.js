@@ -109,61 +109,6 @@ function waitText(wait) {
   const words = W.wait[wait.code] || W.wait.error;
   return wait.have != null && wait.need != null ? `${words} · ${fill(W.wait.numbers, wait)}` : words;
 }
-// ---- the three status lines ----
-function statusLines(models, inventory, paused) {
-  const L = W.lines;
-  const name = id => inventory[id]?.name || id;
-  const activeId = Object.keys(models).find(id => models[id].current);
-  const active = activeId ? models[activeId] : null;
-  const lastId = Object.keys(models).filter(id => models[id].last).sort((a, b) => (models[b].last.ended_at || 0) - (models[a].last.ended_at || 0))[0];
-  const last = lastId ? models[lastId] : null;
-  if (active) {
-    const c = active.current;
-    const i = c.stages.findIndex(s => s.key === c.stage);
-    const stage = c.stages[i];
-    const p = stage.progress;
-    const now = p?.unit === 'calibration' ? fill(W.getting_ready_title, p)
-      : [W.stage[c.stage], p && (p.total ? countOf(p.done, p.total, p.unit) : plural(p.done, p.unit)), stage.state === 'now' && stage.eta_seconds != null && left(stage.eta_seconds)].filter(Boolean).join(' · ');
-    const following = c.stages.slice(i + 1).find(s => s.state === 'ahead');
-    const next = following && following.key !== 'result' ? fill(L.after_stage, {next: W.stage[following.key], stage: W.stage[c.stage].toLowerCase()})
-      : L.result_next;
-    return [`${name(activeId)} · ${now}`, c.wait ? waitText(c.wait) : next];
-  }
-  // Measuring this machine (not a Dream).
-  const measuringId = Object.keys(models).find(id => models[id].measuring_machine);
-  if (measuringId) {
-    const m = models[measuringId].measuring_machine;
-    return [`${name(measuringId)} · ${W.measuring_short}${m.total ? ` · ${fill(W.measuring_progress, m)}` : ''}`, W.measuring_next];
-  }
-  // Reading (in the background, or a Quick Dream): say that, and what follows.
-  const readingId = Object.keys(models).find(id => models[id].quick_running);
-  if (readingId) {
-    const q = models[readingId].quick_running;
-    const now = [W.quick_title[q.kind] || W.quick_title.quick,
-      q.stage === 'read' && q.total ? countOf(q.done, q.total, 'conversations_read') : null,
-      q.stage === 'read' && q.eta_seconds != null ? left(q.eta_seconds) : null].filter(Boolean).join(' · ');
-    return [`${name(readingId)} · ${now}`, q.kind === 'quick' ? W.next_after_quick : W.next_after_reading];
-  }
-  // What the next Deep Dream waits on, when it is conversations to check with.
-  const short = Object.values(models).map(m => m.collecting).find(Boolean);
-  const needs = short && fill(W.collecting_next, {moments: plural(short.need - short.have, 'test_moments')});
-  if (last) {
-    const r = last.last.result;
-    const auto = inventory[lastId]?.auto_dream ?? true;
-    return [fill(r?.outcome === 'adopted' ? L.idle_adopted : L.idle_kept, {model: name(lastId), version: r?.version, when: when(last.last.ended_at)}),
-      needs || (auto ? L.when_idle : L.auto_off)];
-  }
-  // No model can learn here (no local weights, an unsupported
-  // architecture): say so, as `songe status` does, not "Collecting".
-  const ids = Object.keys(models);
-  const firstId = ids.find(id => inventory[id]?.support !== 'unsupported');
-  if (!firstId && ids.length) return [`${W.not_supported} · ${name(ids[0])}`, W.choose_another];
-  const pending = models[firstId]?.pending;
-  const auto = inventory[firstId]?.auto_dream ?? true;
-  return [fill(L.collecting, {conversations: plural(pending?.conversations || 0, 'conversations')}),
-    auto ? L.press_or_idle : L.auto_off];
-}
-
 // ---- before/after ----
 // Long absolute paths say little; keep the last two parts.
 // What the user would see of an answer: no private reasoning, no tool-call
@@ -905,9 +850,9 @@ function render() {
   }
   const active = selected || pickDefault(shown, models);
   if (active && rest.includes(active)) showAll = true;
-  const [now, next] = statusLines(models, inventory, status?.paused);
-  $('now').textContent = now;
-  $('next').textContent = next;
+  // Now and Next as `songe status` words them (status.lines): one source.
+  $('now').textContent = status?.lines?.now || '';
+  $('next').textContent = status?.lines?.next || '';
   $('paused').textContent = status?.paused ? W.yes : W.no;
   // One line while a Dream trains or measures: how busy the GPU is.
   const gpu = status?.gpu;

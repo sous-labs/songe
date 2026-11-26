@@ -2431,6 +2431,32 @@ def test_a_wish_for_one_project_keeps_the_projects_name():
     assert quick.wording(dict(signal, about=None))[0] == "For <project>: use styled-components."
 
 
+def test_a_wish_keeps_what_the_user_named():
+    """Live (Qwen3.8-27B, simulated users, issue #231): "styled-components +
+    export default. siempre en admin" became the note "Always work in
+    admin."; "just test-unit, not make" became "Use test-unit, not make.",
+    and the move from make to just was lost."""
+    from songe.reading import prompts as P
+
+    admin = {"standing": "yes", "kind": "once", "wish": "Always work in admin."}
+    # Keeps none of the names the user typed: not used (two sentences: no own words either).
+    assert P.turn_verdict(admin, "styled-components + export default. siempre en admin") == ("lasting", "")
+    kept = {"standing": "yes", "kind": "once", "wish": "Use styled-components and default exports in admin."}
+    assert P.turn_verdict(kept, "styled-components + export default. siempre en admin")[1] == kept["wish"]
+    # A command the user typed is kept whole.
+    just = {"standing": "yes", "kind": "once", "wish": "Use test-unit, not make."}
+    said = "just test-unit, not make. there is no makefile anymore, from now on its just"
+    assert P.turn_verdict(just, said) == ("lasting", "Use just test-unit, not make.")
+    assert P.whole_commands("Use make test-unit with ARGS.", "i said make test-unit. ARGS passes") == "Use make test-unit with ARGS."
+    # "just" and "make" as words are not commands.
+    assert P.whole_commands("Keep it short.", "make it short, just the code") == "Keep it short."
+    assert P.whole_commands("Use pnpm add, not npm install.", "pnpm add zod pls not npm") == "Use pnpm add, not npm install."
+    # A plain word after a bare runner is English, not a script.
+    assert P.whole_commands("Switch to yarn.", "i prefer yarn to npm") == "Switch to yarn."
+    assert P.whole_commands("Use bun, not node.", "use bun not node") == "Use bun, not node."
+    assert P.whole_commands("Do not use npm.", "pnpm not npm") == "Do not use npm."
+
+
 class Wishing(FakeReader):
     """Judges each user message as a standing wish worded as given in
     `wishes`; answers which notes a newer note replaces (`replaces`, by note)
