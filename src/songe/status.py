@@ -124,7 +124,7 @@ def experience_wait(config, store, models, first=None):
                 held = heldout_units(scoped)
                 if held < test_minimum(policy):
                     # Checked before measuring (the scheduler waits on it first).
-                    return f"collecting test moments · {held} of {policy.min_heldout} needed to check updates"
+                    return f"collecting test moments · {held} of {test_minimum(policy)} needed to check updates"
             saved = scoped.get("calibration") or {}
             progress = saved.get("progress") or {
                 "measured_sequence": max(
@@ -245,7 +245,7 @@ def practice_wait(config, store, supported):
 
         held = heldout_units(scoped)  # real moments, filled by held-out practice
         if held < test_minimum(config):
-            return f"collecting test moments · {held} of {config.min_heldout} needed to check updates"
+            return f"collecting test moments · {held} of {test_minimum(config)} needed to check updates"
         waiting = len(untrained(scoped, kept))
         if scoped.get("dream_stopped"):
             # The user's Dream gave up: say so, not "ready to learn".
