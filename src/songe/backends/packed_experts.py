@@ -168,14 +168,18 @@ def _classes(family="inkling2_loop"):
                 # layer comes in with one copy, not one per expert and pass.
                 codes, scale = self.resident(name)
                 codes, scale = codes[index], scale[index]
+            elif self.host:
+                # A few experts (decoding): each copied straight from the
+                # page-locked RAM, no gather in host memory and no wait.
+                ids = index.tolist()
+                codes, scale = (
+                    torch.stack([t[i].to(self.device, non_blocking=True) for i in ids])
+                    for t in (getattr(self, f"{name}_codes"), getattr(self, f"{name}_scale"))
+                )
+                index = torch.tensor(ids, device=self.device)
             else:
-                if self.host:
-                    index = index.cpu()  # a few experts gathered in host RAM, one copy in
                 codes = getattr(self, f"{name}_codes")[index]
                 scale = getattr(self, f"{name}_scale")[index]
-                if self.host:
-                    codes = codes.to(self.device, non_blocking=True)
-                    scale = scale.to(self.device, non_blocking=True)
             scale = scale.float()
             if getattr(self, f"{name}_format") == "mxfp8":
                 values = codes.float().view(*scale.shape, 32) * torch.exp2(scale - 127)[..., None]
@@ -344,9 +348,13 @@ def _mapped(found, key):
 
 
 def _repacked_classes():
+    from concurrent.futures import ThreadPoolExecutor
+
     import torch
     import torch.nn as nn
     from transformers.models.qwen4_exp import modeling_qwen4_exp as m
+
+    READERS = ThreadPoolExecutor(16)
 
     class MappedRows(nn.Module):
         """Embedding rows read from the checkpoint's files by token id.
@@ -355,7 +363,7 @@ def _repacked_classes():
         def __init__(self, rows, dim):
             super().__init__()
             self.num_embeddings, self.embedding_dim = rows, dim
-            self.parts = []
+            self.parts, self.recent = [], {}
 
         @property
         def weight(self):
@@ -369,12 +377,30 @@ def _repacked_classes():
             self.starts = self.ends - sizes
 
         def forward(self, ids):
+            # Gradient checkpointing reads the same ids again in backward, and
+            # the teacher and student read the same answer: rows come from
+            # disk, so the last few lookups are kept.
+            key = (ids.shape, ids.reshape(-1).to("cpu").numpy().tobytes())
+            if key in self.recent:
+                return self.recent[key].to(ids.device)
+            values = self._read(ids)
+            self.recent[key] = values
+            while len(self.recent) > 8:
+                self.recent.pop(next(iter(self.recent)))
+            return values.to(ids.device)
+
+        def _read(self, ids):
             flat = ids.reshape(-1).to("cpu")
             part = torch.bucketize(flat, self.ends, right=True)
             rows = torch.empty(flat.numel(), self.parts[0].shape[1], dtype=torch.uint8)
-            for p in part.unique().tolist():
+
+            def gather(p):
                 chosen = part == p
                 rows[chosen] = self.parts[p][flat[chosen] - self.starts[p]]
+
+            # Each row is a random read from disk (hashed n-grams): many at
+            # once, as a disk serves them best.
+            list(READERS.map(gather, part.unique().tolist()))
             values = rows.view(self.stored).to(self.dtype)
             if self.scale is not None:
                 values = values * self.scale
@@ -470,11 +496,13 @@ def _load_repacked(path, device, dtype, experts_on_host):
                 ])
                 w2 = torch.stack([dense(f"{prefix}{e}.down_proj.weight") for e in chosen])
                 for key, weight in (("w13", w13), ("w2", w2)):
-                    packed[key].append([t.to(storage) for t in pack_nvfp4(weight)])
+                    packed[key].append(pack_nvfp4(weight))  # stays on the accelerator (1.4 GB a layer)
                 del w13, w2
             tensors = {}
             for key, parts in packed.items():
-                codes, scales, factors = (torch.cat(t) for t in zip(*parts, strict=True))
+                # One copy out per tensor: joining in host RAM was the slowest
+                # part of loading (page faults on fresh memory, 10 s a layer).
+                codes, scales, factors = (torch.cat(t).to(storage) for t in zip(*parts, strict=True))
                 tensors |= {
                     f"{key}_weight": codes, f"{key}_weight_scale": scales,
                     f"{key}_weight_amax": factors, f"{key}_weight_outer_scale_denominator": torch.ones(()),
