@@ -22,6 +22,7 @@ import glob
 import json
 import os
 import struct
+import weakref
 
 E2M1 = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0)
 MODEL_TYPES = {"inkling2_loop"}
@@ -44,6 +45,22 @@ def experts_on_host(model_config):
     """Where packed experts go when the user did not choose: Flash-Next's
     68 GB leave no room on a workstation card, Inkling-2-Mini's 16 GB do."""
     return model_config.model_type in REPACKED_TYPES
+
+
+def _pinned(tensor):
+    """The tensor's own host memory page-locked in place. pin_memory() copies
+    into torch's pinned cache, which rounds every block up to a power of two:
+    Flash-Next's 68 GB of experts took 87 GB of locked RAM that way."""
+    import torch
+
+    tensor = tensor.contiguous()
+    if tensor.is_pinned():
+        return tensor
+    error = torch.cuda.cudart().cudaHostRegister(tensor.data_ptr(), tensor.numel() * tensor.element_size(), 0)
+    if int(error) != 0:
+        return tensor.pin_memory()
+    weakref.finalize(tensor, torch.cuda.cudart().cudaHostUnregister, tensor.data_ptr())
+    return tensor
 
 
 def _classes(family="inkling2_loop"):
@@ -118,7 +135,7 @@ def _classes(family="inkling2_loop"):
                 setattr(self, f"{name}_format", fmt)
                 codes, scale = weight.contiguous().to(storage), scale.contiguous().to(storage)
                 if host and device.type == "cuda":
-                    codes, scale = codes.pin_memory(), scale.pin_memory()
+                    codes, scale = _pinned(codes), _pinned(scale)
                 self.register_buffer(f"{name}_codes", codes, persistent=False)
                 self.register_buffer(f"{name}_scale", scale, persistent=False)
                 self.register_buffer(f"{name}_factor", factor.to(device), persistent=False)
