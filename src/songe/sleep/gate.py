@@ -222,7 +222,7 @@ def choose_scale(
         evaluations[str(scale)] = verdict.dict() | {
             # The judged moments (sleep/judged.py), for the report.
             "judged": [{k: r.get(k) for k in ("id", "conversation", "outcome", "by")}
-                       | ({"alone": r["alone"]} if "alone" in r else {})
+                       | {k: r[k] for k in ("alone", "alone_by") if k in r}
                        for r in after if r.get("outcome")],
         }
         if verdict.accepted:

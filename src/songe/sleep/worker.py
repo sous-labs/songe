@@ -1177,8 +1177,9 @@ def run(
                     alone_answers = judged.answers(backend, journal, moments, f"alone-{scale}", check)
                     alone = judged.judge(
                         backend, journal, moments, alone_before, alone_answers, f"alone-{scale}", check)
-                alone = {r["id"]: r["outcome"] for r in alone}
-                return {r["id"]: r | {"served": True, "learned": gone, "alone": alone[r["id"]]} for r in rows}
+                alone = {r["id"]: r for r in alone}
+                return {r["id"]: r | {"served": True, "learned": gone, "alone": alone[r["id"]]["outcome"],
+                                      "alone_by": alone[r["id"]]["by"]} for r in rows}
             except (Interrupted, MemoryError):
                 raise
             except Exception as exc:  # noqa: BLE001
@@ -1191,7 +1192,7 @@ def run(
                 backend.scale_delta(baseline, trained, scale)
 
         def with_outcomes(rows, verdicts):
-            keys = ("outcome", "by", "served", "learned", "alone")
+            keys = ("outcome", "by", "served", "learned", "alone", "alone_by")
             return [r | ({k: verdicts[r["id"]][k] for k in keys if k in verdicts[r["id"]]}
                          if r["id"] in verdicts else {}) for r in rows]
 
@@ -1283,7 +1284,7 @@ def run(
             verdicts = judged_outcomes(scale)
             judged_rows = [
                 {"id": s["id"], "conversation": s["conversation"], **{
-                    k: verdicts[s["id"]][k] for k in ("outcome", "by", "served", "learned", "alone")
+                    k: verdicts[s["id"]][k] for k in ("outcome", "by", "served", "learned", "alone", "alone_by")
                     if k in verdicts[s["id"]]}}
                 for s in heldout if s["id"] in verdicts
             ]
@@ -1325,7 +1326,7 @@ def run(
                 journal.phase = "gate"
                 # The fused model is the same candidate: the judged outcomes stand.
                 outcomes = {r["id"]: r for r in adapted if r.get("outcome")}
-                return [r | ({k: outcomes[r["id"]][k] for k in ("outcome", "by", "served", "learned", "alone")
+                return [r | ({k: outcomes[r["id"]][k] for k in ("outcome", "by", "served", "learned", "alone", "alone_by")
                               if k in outcomes[r["id"]]} if r["id"] in outcomes else {})
                         for r in measured(f"fused-evaluation-{scale}", fused)]
             finally:
