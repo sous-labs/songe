@@ -15,7 +15,12 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..sleep.prompts import lesson_tokens, paired_prompts, response_positions
+from ..sleep.prompts import (
+    answer_tokens,
+    lesson_tokens,
+    paired_prompts,
+    response_positions,
+)
 from .objective import view_key
 from .reference import TAIL_FLOOR
 
@@ -837,7 +842,12 @@ class TorchBackend:
         prompts = []
         for step in steps:
             try:
-                prompt = paired_prompts(self.tokenizer, step, self.config)[0]
+                # A step trained along its teacher's own answer needs none.
+                prompt = (
+                    None
+                    if answer_tokens(self.tokenizer, step, self.config)
+                    else paired_prompts(self.tokenizer, step, self.config)[0]
+                )
             except Exception:
                 prompt = None
             prompts.append(prompt if prompt and len(prompt) <= self._chunk() else None)

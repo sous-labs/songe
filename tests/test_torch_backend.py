@@ -786,3 +786,10 @@ def test_a_long_teachers_answer_is_trained_past_response_tokens(backend, step):
     # The whole answer and the template's end of turn.
     assert backend.config.response_tokens < length + 1 == count <= backend.config.forced_tokens
 
+
+def test_a_step_trained_along_its_teachers_answer_gets_no_rollout(backend, step):
+    """Answers made in advance for one optimizer step leave out the samples
+    trained along the teacher's own answer: such an answer was thrown away."""
+    forced = step | {"teacher_answer": {"content": "correct Answer", "finished": True}}
+    out = backend.rollouts([forced, step, step], [1, 2, 3])
+    assert out[0] is None and out[1] is not None and out[2] is not None
