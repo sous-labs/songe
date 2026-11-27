@@ -1408,3 +1408,59 @@ def test_the_judge_s_yes_or_no_is_read_after_a_preamble_and_not_from_a_longer_wo
     assert verdict('{"follows": "not sure"}') is None
     assert verdict('{"follows": "nope"}') is None
     assert verdict("Let me think about the answer") is None
+
+
+def test_a_deep_dreams_report_says_per_habit_before_and_after_and_why_it_was_refused(store):
+    """Live (Qwen3.8-27B, 2026-11-27): a Dream refused on 22 ties, a win and
+    a loss said only "it did not answer better". The report says, per habit
+    at its own judged moments, how many answers followed it before and
+    after, which notes left, and per strength tried why it was refused."""
+    from songe import quick
+    from songe.cycle import dream_report
+    from songe.wording import report_lines
+
+    for sid, session, lesson in (("uv", "c1", "Use uv."), ("pnpm", "c2", "Use pnpm."),
+                                 ("chef", "c3", "Start with Yes, chef.")):
+        payload = {"id": sid, "session": session, "type": "correction", "source": "user",
+                   "lesson": lesson, "text": lesson, "exchanges": {"1": 1}, "revision": 1}
+        with store.connect() as db:
+            db.execute("INSERT INTO signals VALUES (?,?,?,?,?,NULL)",
+                       (sid, store.model_id, session, 1, json.dumps(payload)))
+    store.set(quick.KEY, {"version": 1, "updated_at": None, "removed": [], "lessons": [
+        {"id": "l1", "text": "Use uv.", "signals": ["uv"]},
+        {"id": "l2", "text": "Use pnpm.", "signals": ["pnpm"]},
+        {"id": "l3", "text": "Start with Yes, chef.", "signals": ["chef"]},
+    ]})
+    judged = [
+        {"id": "m1", "conversation": "c1", "outcome": "tie", "by": "both"},
+        {"id": "m2", "conversation": "c1", "outcome": "win", "by": "judge"},
+        {"id": "m3", "conversation": "c2", "outcome": "tie", "by": "same"},  # identical: not counted
+        {"id": "m4", "conversation": "signal:pnpm", "outcome": "loss", "by": "judge"},  # a practice scene
+    ]
+    record = {"wake_scale": None, "scale_evaluations": {
+        "1.0": {"accepted": False, "reason": "General behaviour drift exceeds the limit",
+                "general_drift": 0.0522, "judged": []},
+        "0.5": {"accepted": False, "reason": "Worse than what you have now: better on 1, worse on 6",
+                "general_drift": 0.019, "judged": judged},
+    }}
+    report = dream_report(record, store, 0.05)
+    assert report["strength"] == "0.5" and report["basis"] == "served" and report["retired"] == 0
+    assert [(h["lesson"], h["before"], h["after"], h["of"]) for h in report["habits"]] == [
+        ("Use uv.", 1, 2, 2), ("Use pnpm.", 1, 0, 1), ("Start with Yes, chef.", 0, 0, 0)]
+    assert report_lines(report) == [
+        "1.0 drift 0.052 > 0.05",
+        "0.5 worse as served: better 1, worse 6",
+        "habits as served · before → after",
+        "  1/2 → 2/2   Use uv.",
+        "  1/1 → 0/1   Use pnpm.",
+        f"  {'–':<11} Start with Yes, chef.",
+    ]
+    # Adopted, with each version also judged without notes: counted alone,
+    # and a note that left says so.
+    rows = [r | {"alone": "win", "alone_by": "judge"} for r in judged]
+    record = {"wake_scale": 1.0, "learned": [{"id": "l1", "text": "Use uv.", "signals": ["uv"], "learned": True}],
+              "scale_evaluations": {"1.0": {"accepted": True, "reason": "Held-out improvement passed all checks",
+                                            "general_drift": 0.02, "judged": rows}}}
+    report = dream_report(record, store, 0.05)
+    assert report["basis"] == "alone" and report["refused"] == [] and report["retired"] == 1
+    assert report_lines(report) == ["habits alone · before → after", "  0/2 → 2/2   Use uv. · note retired"]

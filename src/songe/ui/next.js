@@ -516,8 +516,22 @@ function stageBody(c, s) {
       c.checks.length ? el('p', {class: 'muted checks-rule'}, W.checks_rule) : null));
   } else if (s.key === 'result' && c.result) {
     if (c.result.improved?.count != null) body.append(el('p', {}, improvedText(c.result.improved)));
+    if (c.result.report) body.append(dreamReport(c.result.report));
   }
   return body;
+}
+// What a Deep Dream changed, per habit, and why a strength was refused.
+function dreamReport(rep) {
+  const RP = W.report, none = RP.no_moment;
+  const refused = x => fill(RP.refused[x.reason] || RP.refused.other, {...x,
+    drift: x.drift != null ? x.drift.toFixed(3) : none, limit: x.limit ?? none, reason: W.reason[x.reason] || x.reason});
+  return el('div', {class: 'rows report'},
+    (rep.refused || []).map(x => el('p', {class: 'bad'}, refused(x))),
+    el('p', {class: 'muted'}, fill(RP.title, {basis: RP.basis[rep.basis] || rep.basis})),
+    (rep.habits || []).map(h => el('div', {class: 'row'},
+      el('span', {}, h.of ? fill(RP.habit, h) : none),
+      el('span', {class: 'text'}, h.lesson || ''),
+      el('span', {class: 'why'}, h.retired ? RP.retired : ''))));
 }
 function cycleView(c, title) {
   const section = el('section', {class: 'cycle'}, el('h3', {class: 'section-title'}, title));

@@ -491,5 +491,22 @@
   "request_failed": "request failed ({status})",
   "label_in_use": "{version} in use",
   "dream_stopped_early": "it ended early",
-  "idle_of": "{elapsed} of {limit}"
+  "idle_of": "{elapsed} of {limit}",
+  "report": {
+    "title": "habits {basis} · before → after",
+    "basis": {
+      "alone": "alone",
+      "served": "as served"
+    },
+    "habit": "{before}/{of} → {after}/{of}",
+    "no_moment": "–",
+    "retired": "note retired",
+    "refused": {
+      "drift_limit": "{strength} drift {drift} > {limit}",
+      "worse": "{strength} worse as served: better {better}, worse {worse}",
+      "not_learned": "{strength} not learned alone: better {better}, worse {worse}",
+      "not_better": "{strength} not better: better {better}, worse {worse}",
+      "other": "{strength} {reason}"
+    }
+  }
 }

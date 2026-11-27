@@ -156,6 +156,7 @@ mark.after { background: color-mix(in srgb, var(--p) 18%, transparent); }
 .row .why { color: var(--faint); }
 .row[data-kept="false"] .text { color: var(--muted); }
 .checks .row { grid-template-columns: minmax(0, 18rem) minmax(0, 1fr); }
+.report .row { grid-template-columns: 6rem minmax(0, 1fr) auto; font-variant-numeric: tabular-nums; }
 .gate { color: var(--faint); }
 .loss { display: block; margin: .25rem 0 .5rem; }
 .loss polyline { fill: none; stroke: var(--p); stroke-width: 1.5; }

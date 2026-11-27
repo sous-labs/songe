@@ -711,8 +711,21 @@ status lines.
   "in_use": true | false,         // last cycle only: its version is still current
   "improved": {"count": 6, "checked": 10, "available": 38},
   "examples": [Example],          // up to 3, in display order
-  "held_out": {"change": 0.0024, "margin": 0.0017}   // what the gate decided on;
+  "held_out": {"change": 0.0024, "margin": 0.0017},  // what the gate decided on;
                                   // change > margin passes; nulls before the gate
+  "report": Report | null         // Deep Dreams: what changed (cycle.dream_report)
+}
+
+// Report: per habit (each lesson), at its own judged moments of the strength
+// adopted (else the strongest judged), how many answers followed it before
+// and after; alone when the check judged both versions without notes, else
+// as served. Identical answers and unread verdicts are not counted. Shown on
+// the Result stage and by `songe status`.
+{
+  "strength": "1.0", "basis": "alone" | "served", "retired": 1,
+  "habits": [{"lesson": "Use uv.", "before": 0, "after": 2, "of": 2, "retired": true}],
+  "refused": [{"strength": "1.0", "reason": "drift_limit" | "worse" | "not_learned" | "not_better" | Result.reason,
+               "better": 1, "worse": 6, "drift": 0.052, "limit": 0.05}]  // each strength refused
 }
 
 // Example

@@ -882,3 +882,42 @@ def cloud_line(cloud):
         f"Cloud learning on · {cloud.get('model')} via {cloud.get('provider_label')}"
         f" · {spent} of {money(cloud.get('budget_usd'))} tonight"
     )
+
+
+def report_words():
+    """The page's words for a Deep Dream's report (ui/wording.json), so the
+    terminal says it the same way."""
+    import json
+    from pathlib import Path
+
+    path = Path(__file__).parent / "ui" / "wording.json"
+    words = json.loads(path.read_text(encoding="utf-8"))
+    return words["report"] | {"reason": words["reason"]}
+
+
+def refused_line(row, words):
+    template = words["refused"].get(row.get("reason")) or words["refused"]["other"]
+    drift = row.get("drift")
+    return template.format(
+        strength=row.get("strength"), reason=words["reason"].get(row.get("reason"), row.get("reason")),
+        better=row.get("better"), worse=row.get("worse"),
+        drift=f"{drift:.3f}" if measured(drift) else "–", limit=f"{row.get('limit'):g}" if measured(row.get("limit")) else "–",
+    )
+
+
+def report_lines(report):
+    """A Deep Dream's report as terminal lines: why it was refused (one line
+    per strength tried), then per habit the answers that followed it before
+    and after, and the notes that left."""
+    if not report:
+        return []
+    words = report_words()
+    lines = [refused_line(row, words) for row in report.get("refused") or []]
+    lines.append(words["title"].format(basis=words["basis"].get(report.get("basis"), report.get("basis"))))
+    for habit in report.get("habits") or []:
+        counts = words["habit"].format(**habit) if habit.get("of") else words["no_moment"]
+        tail = f" · {words['retired']}" if habit.get("retired") else ""
+        lesson = " ".join(str(habit.get("lesson") or "").split())
+        lesson = lesson if len(lesson) <= 80 else lesson[:79] + "…"
+        lines.append(f"  {counts:<11} {lesson}{tail}")
+    return lines

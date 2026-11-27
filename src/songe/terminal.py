@@ -148,6 +148,30 @@ def status(data):
     output.print()
     # Details per model live in the dashboard (songe open), not here.
     models_table(data.get("models", []), data=data)
+    last_dreams(data)
+
+
+def last_dreams(data):
+    """Each model's last Deep Dream that was judged: per habit before and
+    after, the notes that left, and why it was refused."""
+    from .wording import report_lines, stamp
+
+    names = {m["id"]: m.get("name") or m["id"] for m in data.get("models") or []}
+    for model, learning in ((data.get("cycle") or {}).get("models") or {}).items():
+        last = (learning or {}).get("last") or {}
+        result = last.get("result") or {}
+        lines = report_lines(result.get("report"))
+        if not lines:
+            continue
+        at = last.get("ended_at")
+        head = " · ".join(filter(None, (
+            names.get(model, model), stamp(at) if isinstance(at, (int, float)) else None,
+            result.get("outcome"), result.get("version"))))
+        output = console()
+        output.print()
+        output.print(Text(f"{'dream':<8}{head}"))
+        for line in lines:
+            output.print(Text(f"{'':<8}{line}"))
 
 
 def training_settings(model, rows, ignored):

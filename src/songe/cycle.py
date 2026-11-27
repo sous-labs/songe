@@ -259,6 +259,69 @@ def result(night, finished):
     }
 
 
+# Why a strength was refused, finer than REASONS: which floor or which loss.
+REFUSED = (
+    ("Worse than what you have now", "worse"),
+    ("Nothing learned", "not_learned"),
+    ("Not better than what you have now", "not_better"),
+    ("Not clearly better", "not_better"),
+)
+JUDGED_BY = ("judge", "both", "neither")  # a verdict was read: who followed is known
+COUNTS = re.compile(r"better on (\d+), worse on (\d+)")
+
+
+def dream_report(record, store, drift_limit):
+    """What a finished Deep Dream changed, per habit (each lesson in the
+    prompt): at its own judged moments, how many answers followed it before
+    and after. Alone (both versions without notes) when the check judged
+    that, else as served. Identical answers and unread verdicts are not
+    counted. retired: its note left the prompt. refused: per strength tried,
+    the reason code with its numbers. None when nothing was judged."""
+    from . import quick
+    from .reading.store import signals
+
+    scales = record.get("scale_evaluations") or {}
+    if not scales:
+        return None
+    adopted = record.get("wake_scale")
+    # The strength adopted, else the strongest one whose moments were judged
+    # (one refused for drift first has none).
+    judged = [k for k, ev in scales.items() if ev.get("judged")] or list(scales)
+    strength = str(adopted) if adopted is not None and str(adopted) in scales else max(judged, key=float)
+    rows = scales[strength].get("judged") or []
+    alone = bool(rows) and all("alone_by" in r for r in rows)
+    outcome, by = ("alone", "alone_by") if alone else ("outcome", "by")
+    session = {s["id"]: s.get("session") for s in signals(store)}
+    lessons = record.get("learned") or quick.active(store)
+    habits = []
+    for lesson in lessons:
+        sigs = lesson.get("signals") or []
+        places = {session.get(s) for s in sigs} | {f"signal:{s}" for s in sigs}
+        read = [r for r in rows if r.get("conversation") in places and r.get(by) in JUDGED_BY]
+        habits.append({
+            "lesson": lesson.get("text"),
+            "of": len(read),
+            "before": sum(r[outcome] == "loss" or r[by] == "both" for r in read),
+            "after": sum(r[outcome] == "win" or r[by] == "both" for r in read),
+            "retired": adopted is not None and bool(lesson.get("learned")),
+        })
+    refused = []
+    for scale, ev in sorted(scales.items(), key=lambda kv: -float(kv[0])):
+        if ev.get("accepted"):
+            break
+        text = ev.get("reason") or ""
+        code = next((c for phrase, c in REFUSED + REASONS if phrase in text), "other")
+        found = COUNTS.search(text)
+        refused.append({
+            "strength": scale, "reason": code,
+            "better": int(found.group(1)) if found else None,
+            "worse": int(found.group(2)) if found else None,
+            "drift": ev.get("general_drift"), "limit": drift_limit,
+        })
+    return {"strength": strength, "basis": "alone" if alone else "served", "habits": habits,
+            "retired": sum(h["retired"] for h in habits), "refused": refused}
+
+
 def shown_examples(examples):
     """Contract rule 6: improved only, one per signal, originals from user
     signals first, then from tool signals, then practice; within a group by
@@ -425,6 +488,14 @@ def night_cycle(config, store, night, model, *, every=False):
         "checks": found,
         "result": result(night, finished),
     }
+    if out["result"] is not None and record.get("learning") == "dreams":
+        try:
+            out["result"]["report"] = dream_report(record, store, config.general_drift_limit)
+        except Exception:  # noqa: BLE001 - the report never hides the Dream's record
+            import logging
+
+            logging.getLogger("songe").exception("dream_report_failed")
+            out["result"]["report"] = None
     if every:
         out["signals"] = signal_lines(store) if read is not None else []
         # What this Dream sent to a cloud model, if cloud learning was on.
