@@ -52,6 +52,34 @@ def sample_weights(pool):
     return [len(pool) / (len(scenes) * scenes[unit]) for unit in units]
 
 
+def training_plan(pool, anchors, config):
+    """The samples of one cycle, in order. A Deep Dream makes config.passes
+    passes over sample_plan's pass, each later one in a new order.
+
+    One pass over a few dozen scenes is a handful of steps, and the
+    schedule's warmup and decay spend most of those near zero (live: 28
+    samples, 7 steps, an adapter that answered like the base). Real steps
+    (learning = "hindsight") keep their single pass with a fresh sample;
+    replay across cycles plays that role there."""
+    import random
+
+    once = sample_plan(pool, anchors, config.anchor_fraction)
+    passes = config.passes if config.learning == "dreams" else 1
+    plan = list(once)
+    for n in range(1, max(1, passes)):
+        again = list(once)
+        random.Random(7613 + n).shuffle(again)
+        plan += again
+    return plan
+
+
+def plan_split(plan):
+    """How a plan's samples split, for the cycle record: the passes over the
+    pool are practice, only anchors are rehearsal."""
+    rehearsal = sum(1 for anchor, _ in plan if anchor)
+    return {"practice": len(plan) - rehearsal, "rehearsal": rehearsal}
+
+
 CHECKPOINT_MIN_SECONDS = 30.0
 
 
@@ -81,7 +109,7 @@ def train(backend, pool, anchors, work, progress):
         plan = saved["samples"]
         accumulation = saved.get("accumulation", config.accumulation)
     else:
-        plan = sample_plan(pool, anchors, config.anchor_fraction)
+        plan = training_plan(pool, anchors, config)
         accumulation = config.accumulation
     write_json(plan_path, identity | {"samples": plan, "accumulation": accumulation})
     checkpoint = work / "checkpoint.json"
