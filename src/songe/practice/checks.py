@@ -187,20 +187,22 @@ def placebo_for(practice_id, signal, lessons):
     return others[h % len(others)], h % 2 == 0
 
 
-async def teacher_reply(reader, row, **how):
-    """The served model's answer to the scene with its note shown."""
+async def teacher_reply(reader, row, draft=None, **how):
+    """The served model's answer to the scene with its note shown; with
+    draft (its reply without the note), that reply changed only where the
+    note asks (prompts.edit_aside)."""
     import httpx
 
     from ..sleep.prompts import practice_messages
 
     how = {"max_tokens": ANSWER_TOKENS} | how
     try:
-        return await reader.reply(practice_messages(row["messages"], row["teacher_note"]), **how)
+        return await reader.reply(practice_messages(row["messages"], row["teacher_note"], draft=draft), **how)
     except httpx.HTTPStatusError as exc:
         if not 400 <= exc.response.status_code < 500:
             raise
         # A chat template that takes no second user message in a row.
-        return await reader.reply(practice_messages(row["messages"], row["teacher_note"], merged=True), **how)
+        return await reader.reply(practice_messages(row["messages"], row["teacher_note"], merged=True, draft=draft), **how)
 
 
 def lost_in_reasoning(answer):
@@ -220,10 +222,14 @@ async def two_answers(row, reader):
     again down HOW_ASKED, and the reader remembers what worked for the scenes
     that follow. An answer asked any other way than the first counts as
     reasoned: what its user would see of it is stored to train along."""
+    from ..quick import visible
+
     first = getattr(reader, "reply_how", 0)
     for how in range(first, len(HOW_ASKED)):
         plain = await reader.reply(row["messages"], **({"max_tokens": ANSWER_TOKENS} | HOW_ASKED[how]))
-        taught = await teacher_reply(reader, row, **HOW_ASKED[how])
+        # The answer with the note is the plain one changed only where the
+        # note asks: a format correction must not shorten the content.
+        taught = await teacher_reply(reader, row, draft=visible(plain["content"]) or None, **HOW_ASKED[how])
         if not (lost_in_reasoning(plain) or lost_in_reasoning(taught)):
             break
     reader.reply_how = how
