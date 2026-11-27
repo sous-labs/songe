@@ -25,7 +25,7 @@ EXTRA_HELD_OUT = "extra_heldout"
 # Single scenes kept out of training for a note's test, when its lesson came
 # up in one conversation only (ensure_note_heldout); kept out for good.
 EXTRA_HELD_OUT_SCENES = "extra_heldout_scenes"
-NOTE_SCENES = 3
+NOTE_SCENES = 6  # sleep.judged.LEARNED_SCENES: what a note's test asks
 
 
 def held_out(signal_id, extra=()):
