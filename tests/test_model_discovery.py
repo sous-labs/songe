@@ -271,3 +271,18 @@ def test_mlx_worker_uses_new_child_directory_and_rejects_other_os(
     convert("mlx", tmp_path / "base", destination)
     assert (destination / "model.safetensors").is_file()
     assert not (destination / "model").exists()
+
+
+def test_a_gguf_with_a_tensor_type_newer_than_the_gguf_package_is_read(tmp_path):
+    """Qwen3.8-Flash-Next GGUFs (Unsloth UD-Q2_K_XL, Strata's Q2_0 builds) hold
+    Q2_0 tensors (type 42) and file type 41; gguf 0.19's reader raised
+    ValueError, so llama.cpp and Strata users got "Local weights are not
+    discoverable"."""
+    path = write_gguf(tmp_path / "flash.gguf", architecture="qwen4exp", file_type=41)
+    data = bytearray(path.read_bytes())
+    name = data.index(b"test.weight") + len(b"test.weight")
+    data[name + 4 + 16 : name + 4 + 16 + 4] = (42).to_bytes(4, "little")  # after n_dims and two dims
+    path.write_bytes(bytes(data))
+    info = read_gguf(path)
+    assert (info.architecture, info.parameters, info.file_type) == ("qwen4exp", 1024, 41)
+    assert info.quantization in {"Q2_0", "type 41"}  # named once gguf knows it
