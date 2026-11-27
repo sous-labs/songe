@@ -725,9 +725,12 @@ def test_the_gate_judges_what_each_version_writes(monkeypatch):
 def test_a_note_leaves_only_when_the_candidate_follows_its_lesson_without_it(store, monkeypatch):
     """On held-out practice the candidate answers as it would be served once
     the lesson's note has left: the other lessons' notes are in the prompt,
-    its own is not. A lesson is learned when every scene asked follows the
-    note as well as the teacher's stored answer does; one miss, or no
-    held-out scene to ask, and its note stays in the prompt.
+    its own is not. A lesson is learned when six scenes asked all follow the
+    note as well as the teacher's stored answer does; one miss, or fewer
+    held-out scenes to ask, and its note stays in the prompt.
+
+    Live (Qwen3.8-27B, a persona run): the Spanish note left on three scenes
+    and the answers in Spanish fell from 11 of 12 test requests to 7.
 
     Live (Qwen3.5-4B on a rented card): asked with no notes at all, a version
     passed the pnpm test on three scenes, the note left, and with the three
@@ -754,14 +757,17 @@ def test_a_note_leaves_only_when_the_candidate_follows_its_lesson_without_it(sto
             db.execute('INSERT INTO practice(id,model_id,signal_id,payload,kept,"drop",created)'
                        " VALUES (?,?,?,?,1,NULL,0)", (row["id"], store.model_id, signal, json.dumps(row)))
 
-    for n in range(5):  # learned: every scene asked uses uv, in other words than the teacher's
+    for n in range(7):  # learned: every scene asked uses uv, in other words than the teacher's
         scene("uv", n, f"Run `uv add package{n}` in the project folder.", f"uv add package{n}")
+    for n in range(3):  # followed on all three of its scenes, but three are not enough to show it
+        scene("es", n, f"Usa `uv add package{n}`.", f"uv add package{n}")
     scene("pnpm", 0, "Use `pnpm add zod` here.", "pnpm add zod")  # one of two misses: the note stays
     scene("pnpm", 1, "Use `pnpm add vite` here.", "npm install vite, as usual for JavaScript")
     store.set(quick.KEY, {"version": 1, "updated_at": None, "removed": [], "lessons": [
         {"id": "l1", "text": "Use uv.", "signals": ["uv"]},
         {"id": "l2", "text": "Use pnpm.", "signals": ["pnpm"]},
         {"id": "l3", "text": "Start with Yes, chef.", "signals": ["chef"]},  # never practised
+        {"id": "l4", "text": "Explain in Spanish.", "signals": ["es"]},
     ]})
 
     class Fake:
@@ -785,8 +791,8 @@ def test_a_note_leaves_only_when_the_candidate_follows_its_lesson_without_it(sto
 
     rows = judged.learned_lessons(Fake(), Journal(), store, "scale-1.0", lambda: None)
     assert [(r["id"], r["scenes"], r["follows"], r["learned"]) for r in rows] == [
-        ("l1", 3, 3, True), ("l2", 2, 1, False), ("l3", 0, 0, False)]
-    assert len(asked) == 5  # three of the five uv scenes, both pnpm ones
+        ("l1", 6, 6, True), ("l2", 2, 1, False), ("l3", 0, 0, False), ("l4", 3, 3, False)]
+    assert len(asked) == 11  # six of the seven uv scenes, both pnpm ones, the three Spanish ones
     uv, pnpm = [p for p in asked if ":uv#" in p], [p for p in asked if ":pnpm#" in p]
     assert all("- Use pnpm." in p and "- Start with Yes, chef." in p and "Use uv." not in p for p in uv)
     assert all("- Use uv." in p and "Use pnpm." not in p for p in pnpm)
@@ -797,7 +803,7 @@ def test_a_note_practised_in_two_conversations_keeps_one_for_its_test(store):
     not trained. One lesson in five held out left half the notes with nothing
     to be asked on: they could never leave. A lesson practised in two
     conversations keeps one out; a lesson from a single conversation keeps
-    three of its scenes out and trains on the rest."""
+    up to six of its scenes out and trains on at least half."""
     from songe import quick
     from songe.practice.pool import (
         EXTRA_HELD_OUT,
