@@ -430,12 +430,10 @@ def _repacked_classes():
     return m, MappedNGramEmbedding
 
 
-def _dense_reader(found, device, stack):
+def _dense_reader(found, device, stack, handles):
     """Read a checkpoint weight onto the device as float32; FP8 blocks (128 x
     128 in the official build) are scaled by their one scale each."""
     from safetensors import safe_open
-
-    handles = {}
 
     def read(key):
         file = found[key][0]
@@ -453,6 +451,23 @@ def _dense_reader(found, device, stack):
         return weight * scale.repeat_interleave(-(-columns // scale.shape[1]), 1)[:, :columns]
 
     return dense
+
+
+def _drop_cache(files):
+    """Read once, never again this load: dropping the pages keeps a 185 GB
+    checkpoint from filling a smaller RAM with cache, whose reclaim stalled
+    the load (memory pressure 13.75%, Songe stopped measuring)."""
+    if not hasattr(os, "posix_fadvise"):
+        return
+    for file in files:
+        try:
+            fd = os.open(file, os.O_RDONLY)
+        except OSError:
+            continue
+        try:
+            os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+        finally:
+            os.close(fd)
 
 
 def _load_repacked(path, device, dtype, experts_on_host):
@@ -510,8 +525,9 @@ def _load_repacked(path, device, dtype, experts_on_host):
         # Files are opened per layer: an open handle keeps every page it read
         # mapped, which the memory guard rightly counts as in use (116 GB of
         # 117 by the end of a load that kept them; Songe stopped measuring).
+        opened = {}
         with contextlib.ExitStack() as stack:
-            dense = _dense_reader(found, device, stack)
+            dense = _dense_reader(found, device, stack, opened)
             for first in range(0, module.num_experts, PACK_CHUNK):
                 chosen = range(first, min(first + PACK_CHUNK, module.num_experts))
                 w13 = torch.stack([
@@ -522,6 +538,7 @@ def _load_repacked(path, device, dtype, experts_on_host):
                 for key, weight in (("w13", w13), ("w2", w2)):
                     packed[key].append(pack_nvfp4(weight))  # stays on the accelerator (1.4 GB a layer)
                 del w13, w2
+        _drop_cache(opened)
         tensors = {}
         for key, parts in packed.items():
             # One copy out per tensor: joining in host RAM was the slowest

@@ -904,12 +904,21 @@ def guarded_run(
     pressure_data=None,
     prediction_error_bytes=0,
     device_prediction_error_bytes=0,
+    child_bytes=None,
     **kwargs,
 ):
-    """subprocess.run equivalent, with isolation, bounded cancellation and guard."""
+    """subprocess.run equivalent, with isolation, bounded cancellation and guard.
+
+    child_bytes: the child's own size when the caller knows it. Otherwise the
+    child is assumed as large as this interpreter, which is wrong for one that
+    holds a model in host RAM (Flash-Next's trainer: 69 GB)."""
     platform, policy = platform or current(), policy or GuardPolicy()
     interpreter_bytes = (
-        platform.process_bytes(os.getpid()) if hasattr(platform, "process_bytes") else 0
+        child_bytes
+        if child_bytes is not None
+        else platform.process_bytes(os.getpid())
+        if hasattr(platform, "process_bytes")
+        else 0
     )
     memory = capture_baseline(
         platform,

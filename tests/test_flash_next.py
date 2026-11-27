@@ -169,3 +169,27 @@ def test_decoding_with_experts_in_host_ram_takes_the_batched_path():
         loop = experts(x, index, weights)
     assert calls == [1]
     torch.testing.assert_close(batched, loop, rtol=1e-4, atol=1e-4)  # summed in another order
+
+
+def test_a_conversion_child_is_sized_by_its_caller_not_as_a_copy_of_it(monkeypatch):
+    """Calibration exports the LoRA from the trainer, which holds Flash-Next's
+    experts in host RAM (69 GB): the converter is budgeted at its own size."""
+    import pytest
+
+    from songe import memory
+
+    seen = {}
+
+    class Stop(Exception):
+        pass
+
+    def baseline(platform, **kwargs):
+        seen.update(kwargs)
+        raise Stop
+
+    monkeypatch.setattr(memory, "capture_baseline", baseline)
+    parent = SimpleNamespace(process_bytes=lambda pid: 69 * 10**9)
+    for child, expected in ((None, 69 * 10**9), (3 * 10**9, 3 * 10**9)):
+        with pytest.raises(Stop):
+            memory.guarded_run(["true"], platform=parent, child_bytes=child)
+        assert seen["required_bytes"] == expected

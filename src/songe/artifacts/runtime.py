@@ -14,7 +14,9 @@ class RunPolicy:
     timeout: float | None = 3600.0  # Conversion deadline, not a capacity threshold.
 
 
-def guarded_run(argv, *, platform=None, check=lambda: None, policy=None, env=None):
+def guarded_run(
+    argv, *, platform=None, check=lambda: None, policy=None, env=None, child_bytes=None
+):
     from .. import memory
     from ..telemetry import configure, failure_hint, log_child_stderr
 
@@ -37,6 +39,7 @@ def guarded_run(argv, *, platform=None, check=lambda: None, policy=None, env=Non
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             env=child_env,
+            child_bytes=child_bytes,
         )
     except memory.MemoryPressure as exc:
         raise MemoryError(f"Conversion stopped: {exc}") from exc

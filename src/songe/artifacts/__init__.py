@@ -10,6 +10,10 @@ from ..models.gguf import read_gguf
 from .runtime import guarded_run, publish
 from .tools import fetch
 
+# The LoRA converter's own size before the adapter: Python with torch and
+# gguf (1.0 GB peak on Linux converting a 145 MB Flash-Next adapter).
+LORA_CONVERTER_BYTES = 2_000_000_000
+
 
 def _validate_adapter(adapter):
     adapter = Path(adapter)
@@ -158,6 +162,8 @@ def export(
             result = staging / "model.gguf"
             env = tools.env()
             if kind == "gguf-lora":
+                from .storage import mlx_gguf_lora_bytes as lora_bytes
+
                 runner(
                     [
                         interpreter_for(platform, runner),
@@ -172,6 +178,9 @@ def export(
                     ],
                     platform=platform,
                     env=env,
+                    # A fresh interpreter reading the adapter, not a copy of
+                    # the caller (calibration exports from the trainer).
+                    child_bytes=LORA_CONVERTER_BYTES + lora_bytes(adapter),
                 )
             else:
                 merged = (
