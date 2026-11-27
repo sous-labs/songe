@@ -518,7 +518,8 @@ def test_a_server_whose_reasoning_takes_the_whole_room_still_gets_plain_scenes(s
     writer = Reasoner(switch=True)
     rows = chat_written(store, monkeypatch, writer)
     assert all(r["drop"] is None and r["teacher_answer"]["content"] == "uv add it" for r in rows)
-    assert writer.how == [(None, 384)] * 2 + [(False, 384)] * 6
+    assert writer.how[:8] == [(None, 384)] * 2 + [(False, 384)] * 6
+    assert writer.how[8:] == [(False, 500)] * 3  # the ordinary rows beside them, reasoning off
 
 
 def test_a_server_that_ignores_the_reasoning_switches_is_given_more_room(store, monkeypatch):

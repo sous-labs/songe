@@ -398,7 +398,10 @@ async def write_ordinary(store, reader):
         system = [m for m in scene["messages"] if m.get("role") == "system"][:1]
         messages = system + [{"role": "user", "content": request}]
         try:
-            answer = await reader.reply(messages, max_tokens=ORDINARY_TOKENS)
+            # Reasoning off, as a plain scene's answer is once a reasoning
+            # server's thinking took the room: the answer trained along is
+            # the visible reply.
+            answer = await reader.reply(messages, max_tokens=ORDINARY_TOKENS, think=False)
         except Stopped:
             break
         whole = answer["finished"] and not answer["reasoned"] and bool(answer["content"].strip())
