@@ -509,10 +509,13 @@ class Backend:
             cache = self.frozen(state) if state is not None else None
             return self._text_model().model(ids, cache=cache)[:, positions]
 
-        def head_divergence(hidden, teacher):
-            return divergence(
+        targeted = forced and config.forced_target_loss
+
+        def head_divergence(hidden, teacher, target):
+            student = self.head(hidden)
+            value = divergence(
                 mx,
-                self.head(hidden),
+                student,
                 teacher,
                 config.loss,
                 config.beta,
@@ -521,6 +524,12 @@ class Backend:
                 # teacher's own answer the largest terms are the lesson itself.
                 clip=0.0 if forced else config.vocab_clip,
             )
+            if not targeted:
+                return value
+            # Along the teacher's own answer the answer itself is a target too
+            # (forced_target_loss).
+            logits = student.reshape(-1, student.shape[-1]).astype(mx.float32)
+            return value + self.nn.losses.cross_entropy(logits, target, reduction="mean")
 
         checkpointed = mx.checkpoint(head_divergence)
 
@@ -528,7 +537,7 @@ class Backend:
             states = hidden()
             total = 0.0
             for (s, e), teacher in zip(spans, teacher_logits, strict=True):
-                total = total + checkpointed(states[:, s:e], teacher) * (
+                total = total + checkpointed(states[:, s:e], teacher, mx.array(y[s:e])) * (
                     (e - s) / len(y)
                 )
             return total

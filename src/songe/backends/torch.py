@@ -991,12 +991,13 @@ class TorchBackend:
             )
             total = hidden.new_zeros((), dtype=self.torch.float32)
 
-            def head_loss(student_h, teacher_h):
+            def head_loss(student_h, teacher_h, target):
                 self.check()
                 with self.base():
                     teacher = self.head(teacher_h)
-                return divergence(
-                    self.head(student_h),
+                student = self.head(student_h)
+                value = divergence(
+                    student,
                     teacher,
                     config.loss,
                     config.beta,
@@ -1005,13 +1006,26 @@ class TorchBackend:
                     # teacher's own answer the largest terms are the lesson itself.
                     clip=0.0 if forced else config.vocab_clip,
                 )
+                if target is None:
+                    return value
+                # Along the teacher's own answer the answer itself is a target
+                # too (forced_target_loss).
+                return value + self.torch.nn.functional.cross_entropy(
+                    student.reshape(-1, student.shape[-1]).float(), target
+                )
 
             for start in range(0, len(y), config.token_chunk):
                 end = min(start + config.token_chunk, len(y))
+                target = (
+                    self.torch.tensor(y[start:end], device=self.device)
+                    if forced and config.forced_target_loss
+                    else None
+                )
                 value = checkpoint(
                     head_loss,
                     hidden[:, start:end],
                     teacher_h[:, start:end],
+                    target,
                     use_reentrant=False,
                 )
                 total = total + value * ((end - start) / len(y))

@@ -139,6 +139,13 @@ class Config:
     )
     loss: str = "forward_kl"  # OPSD/SDFT: forward KL, full vocabulary
     vocab_clip: float = 1.0  # OPSD per-vocabulary clip; provisional until measured
+    # Along a practice scene's own teacher answer (practice.checks stores it,
+    # its reply without the note changed only where the note asks) the answer
+    # is also a cross-entropy target beside the divergence. Qwen3.8-27B, eight
+    # habits, 24 scenes each: divergence alone followed 101 of 128 held-out
+    # prompts and lost content against the base model on 75 (base against
+    # itself: 27 to 37); with the target 106 and 54, drift 0.025.
+    forced_target_loss: bool = True
     beta: float = 0.5
     teacher_top_k: int = 0
     token_chunk: int = 32
@@ -424,6 +431,7 @@ TRAINING_KEYS = (
     "model", "model_ref", "base_identifier", "public_model", "artifact_kind",
     "backend", "torch_options", "force_cpu_training", "learning",
     "rank", "lora_scale", "learning_rate", "accumulation", "passes", "loss", "vocab_clip",
+    "forced_target_loss",
     "beta", "teacher_top_k", "max_sequence", "response_tokens",
     "hindsight_tokens", "teacher_chunk", "token_chunk",
     "anchor_fraction", "replay_fraction",

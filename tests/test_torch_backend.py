@@ -752,3 +752,27 @@ def test_a_step_with_the_teachers_answer_is_trained_along_it(backend, step):
     # Without one, the rollout as before.
     backend.sample = rollout
     assert backend.train_step(step, seed=1)[2] >= 1
+
+
+def test_the_teachers_answer_is_also_a_target_beside_the_divergence(backend, step):
+    """Along the teacher's own answer the loss is the divergence plus the
+    answer's cross-entropy: the divergence alone follows a teacher that,
+    shown the note, also writes less."""
+    import math
+
+    answer = {"content": "correct Answer", "finished": True}
+    forced = step | {"teacher_answer": answer}
+    backend.config.forced_target_loss = False
+    divergence_only = backend.train_step(forced)[0]
+    backend.config.forced_target_loss = True
+    both = backend.train_step(forced)[0]
+    assert both > divergence_only
+    # The difference is the student's mean negative log-likelihood of the
+    # answer: positive and finite.
+    assert math.isfinite(both - divergence_only)
+    # A rollout has no target: the setting changes nothing there.
+    backend.config.forced_target_loss = False
+    plain = backend.train_step(step, seed=3)[0]
+    backend.config.forced_target_loss = True
+    assert backend.train_step(step, seed=3)[0] == pytest.approx(plain)
+
