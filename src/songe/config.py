@@ -112,6 +112,10 @@ class Config:
     max_sequence: int = 0
     config_schema: int = 7
     response_tokens: int = 128
+    # Most tokens of a practice scene's own teacher answer a Deep Dream trains
+    # along (practice asks the teacher for at most 384). At response_tokens
+    # an email's sign-off and a reasoning model's answer were cut off.
+    forced_tokens: int = 384
     hindsight_tokens: int = 512
     teacher_chunk: int = 512  # Frozen forward prefill; never a context truncation.
     min_train: int = 32  # initial pool support; user policy, not a significance test
@@ -431,7 +435,7 @@ TRAINING_KEYS = (
     "model", "model_ref", "base_identifier", "public_model", "artifact_kind",
     "backend", "torch_options", "force_cpu_training", "learning",
     "rank", "lora_scale", "learning_rate", "accumulation", "passes", "loss", "vocab_clip",
-    "forced_target_loss",
+    "forced_target_loss", "forced_tokens",
     "beta", "teacher_top_k", "max_sequence", "response_tokens",
     "hindsight_tokens", "teacher_chunk", "token_chunk",
     "anchor_fraction", "replay_fraction",

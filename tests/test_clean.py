@@ -161,7 +161,7 @@ def test_a_scene_with_the_teachers_answer_is_trained_along_it(config):
 
     from songe.sleep.prompts import answer_tokens, lesson_tokens
 
-    tokenizer, config = Tokenizer(), replace(config, response_tokens=8)
+    tokenizer, config = Tokenizer(), replace(config, forced_tokens=8)
     scene = make("practice:s#v1", hindsight=[{"role": "user", "content": "Lesson: say Yes, chef."}])
     backend = SimpleNamespace(
         tokenizer=tokenizer, config=config, sample=lambda prompt, seed=None: ([7, 8, 9], "own", None)

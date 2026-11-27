@@ -370,8 +370,8 @@ def answer_tokens(tokenizer, step, config):
     ids = answer_header(tokenizer, step) + list(
         tokenizer.encode(text, add_special_tokens=False)
     )
-    if len(ids) >= config.response_tokens or not answer.get("finished"):
-        return ids[: config.response_tokens] or None
+    if len(ids) >= config.forced_tokens or not answer.get("finished"):
+        return ids[: config.forced_tokens] or None
     end = turn_end(tokenizer, step)
     return ids + ([end] if end is not None else [])
 

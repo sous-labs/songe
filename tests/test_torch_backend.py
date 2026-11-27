@@ -745,7 +745,7 @@ def test_a_step_with_the_teachers_answer_is_trained_along_it(backend, step):
     unclipped = backend.train_step(step | {"teacher_answer": answer})[0]
     backend.config.vocab_clip = 1e-12  # would cut every term of a rollout
     value, grads, count = backend.train_step(step | {"teacher_answer": answer})
-    limit = backend.config.response_tokens  # a longer answer is cut there
+    limit = backend.config.forced_tokens  # a longer answer is cut there
     assert count == (limit if len(tokens) >= limit else len(tokens) + 1)
     assert value == pytest.approx(unclipped) and value > 1e-9
     assert any(g.abs().sum() > 0 for g in grads.values())
@@ -775,4 +775,14 @@ def test_the_teachers_answer_is_also_a_target_beside_the_divergence(backend, ste
     plain = backend.train_step(step, seed=3)[0]
     backend.config.forced_target_loss = True
     assert backend.train_step(step, seed=3)[0] == pytest.approx(plain)
+
+
+def test_a_long_teachers_answer_is_trained_past_response_tokens(backend, step):
+    """An answer longer than a rollout (an email's sign-off, an answer after
+    reasoning) is trained up to forced_tokens, not cut at response_tokens."""
+    words = " ".join(["word"] * 60)
+    count = backend.train_step(step | {"teacher_answer": {"content": words, "finished": True}})[2]
+    length = len(backend.tokenizer.encode(words, add_special_tokens=False))
+    # The whole answer and the template's end of turn.
+    assert backend.config.response_tokens < length + 1 == count <= backend.config.forced_tokens
 
