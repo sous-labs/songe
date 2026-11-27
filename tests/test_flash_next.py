@@ -133,3 +133,31 @@ def test_flash_next_needs_no_fp8_kernels_and_keeps_peft_names(tmp_path):
         {"model_type": "qwen4_exp", "quantization_config": {"quant_method": "fp8"}}))
     assert missing_packages(tmp_path) == []
     assert not packed_experts.is_packed_base(tmp_path)  # adapters are not renamed for vLLM's Inkling loader
+
+
+def test_decoding_with_experts_in_host_ram_takes_the_batched_path():
+    """A decoded token's experts are copied in as one batch (0.65 tokens/s
+    with one copy per expert, live on Qwen3.8-Flash-Next); same output as the
+    per-expert loop."""
+    generator = torch.Generator().manual_seed(3)
+    config = SimpleNamespace(num_experts=6, hidden_size=32, moe_intermediate_size=16, hidden_act="silu")
+    _, PackedExperts = packed_experts._classes("qwen4_exp")
+    experts = PackedExperts(config)
+    tensors = {}
+    for name, rows, columns in (("w13", 32, 32), ("w2", 32, 16)):
+        codes, scale, factor = packed_experts.pack_nvfp4(torch.randn(6, rows, columns, generator=generator))
+        tensors |= {f"{name}_weight": codes, f"{name}_weight_scale": scale, f"{name}_weight_amax": factor,
+                    f"{name}_weight_outer_scale_denominator": torch.ones(())}
+    experts.load_packed(tensors, torch.device("cpu"), host=True, interleaved=False)
+    index = torch.tensor([[1, 4, 6]])  # 6: no expert (masked)
+    weights = torch.rand(1, 3, generator=generator)
+    x = torch.randn(1, 32, generator=generator)
+    calls = []
+    small = experts._small
+    experts._small = lambda *a: calls.append(1) or small(*a)
+    with torch.no_grad():
+        batched = experts(x, index, weights)
+        experts.SMALL = 0
+        loop = experts(x, index, weights)
+    assert calls == [1]
+    torch.testing.assert_close(batched, loop, rtol=1e-4, atol=1e-4)  # summed in another order

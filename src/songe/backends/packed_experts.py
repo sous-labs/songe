@@ -148,6 +148,8 @@ def _classes(family="inkling2_loop"):
 
         def weight(self, name, index, dtype):
             """One expert's bf16 weight, or several stacked (index a tensor)."""
+            if self.host and torch.is_tensor(index):
+                index = index.cpu()  # gathered in host RAM, one copy in
             codes = getattr(self, f"{name}_codes")[index]
             scale = getattr(self, f"{name}_scale")[index]
             if self.host:
@@ -166,7 +168,7 @@ def _classes(family="inkling2_loop"):
         SMALL = 32
 
         def forward(self, hidden_states, top_k_index, top_k_weights):
-            if top_k_index.numel() <= self.SMALL and not torch.is_grad_enabled() and not self.host:
+            if top_k_index.numel() <= self.SMALL and not torch.is_grad_enabled():
                 return self._small(hidden_states, top_k_index, top_k_weights)
             # As Inkling2LoopExperts.forward, with packed weights.
             # Tokens grouped by expert with one device sync per layer (the
@@ -182,8 +184,10 @@ def _classes(family="inkling2_loop"):
                 counts = torch.bincount(flat, minlength=self.num_experts + 1).tolist()
             start = 0
             for e, count in enumerate(counts):
+                if not count:
+                    continue
                 chosen, start = order[start : start + count], start + count
-                if not count or e >= self.num_experts:
+                if e >= self.num_experts:
                     continue
                 token_idx, top_k_pos = chosen // k, chosen % k
                 state = hidden_states[token_idx]
