@@ -169,9 +169,11 @@ def export_candidate(
         raise RuntimeError("Candidate destination belongs to another run")
 
     mlx_adapter = (adapter / "adapters.safetensors").is_file()
+    # A GGUF LoRA is the adapter converted, whichever trainer wrote it; only
+    # merges need room for the base (173 GB asked for Flash-Next's 145 MB LoRA).
     required = (
         mlx_gguf_lora_bytes(adapter)
-        if kind == "gguf-lora" and mlx_adapter
+        if kind == "gguf-lora"
         else weight_bytes(config.model) + weight_bytes(adapter)
     )
     require_disk(scratch, required)

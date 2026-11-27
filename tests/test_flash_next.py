@@ -193,3 +193,34 @@ def test_a_conversion_child_is_sized_by_its_caller_not_as_a_copy_of_it(monkeypat
         with pytest.raises(Stop):
             memory.guarded_run(["true"], platform=parent, child_bytes=child)
         assert seen["required_bytes"] == expected
+
+
+def test_a_gguf_lora_export_asks_disk_for_the_lora_not_the_base(tmp_path, monkeypatch):
+    """Flash-Next's 145 MB LoRA waited for 173 GB of free disk (its base)."""
+    import pytest
+
+    from songe.artifacts import storage
+    from songe.models import convert
+    from songe.sleep import fuse
+
+    base, adapter = tmp_path / "base", tmp_path / "adapter"
+    base.mkdir()
+    adapter.mkdir()
+    (base / "model.safetensors").write_bytes(b"\0" * 10_000)
+    (adapter / "adapter_model.safetensors").write_bytes(b"\0" * 100)
+    asked = []
+
+    class Stop(Exception):
+        pass
+
+    def disk(directory, required):
+        asked.append(required)
+        raise Stop
+
+    monkeypatch.setattr(convert, "require_disk", disk)
+    monkeypatch.setattr(storage, "artifact_root", lambda config, store: tmp_path)
+    platform = SimpleNamespace(data_dir=lambda: tmp_path)
+    with pytest.raises(Stop):
+        fuse.export_candidate(SimpleNamespace(model=str(base)), "gguf-lora", adapter,
+                              tmp_path / "lora.gguf", platform, lambda: None)
+    assert asked == [300]
