@@ -82,6 +82,8 @@ def _classes(family="inkling2_loop"):
         def activation(config):
             return m.Inkling2LoopSoftcappedSwiGLU(config)
 
+    STAGED = {}  # the host-RAM layer whose experts are on the accelerator now
+
     class PackedLinear(torch.autograd.Function):
         """y = x @ W.T for a frozen packed expert weight; W is rebuilt in backward."""
 
@@ -146,15 +148,34 @@ def _classes(family="inkling2_loop"):
             )
             self.packed = True
 
+        def resident(self, name):
+            """This layer's packed bytes on the accelerator; one layer at a
+            time is kept there (1.4 GB on Qwen3.8-Flash-Next)."""
+            if STAGED.get("layer") is not self:
+                STAGED.clear()
+                STAGED["layer"] = self
+                for part in ("w13", "w2"):
+                    for kind in ("codes", "scale"):
+                        tensor = getattr(self, f"{part}_{kind}")
+                        STAGED[f"{part}_{kind}"] = tensor.to(self.device, non_blocking=True)
+            return STAGED[f"{name}_codes"], STAGED[f"{name}_scale"]
+
         def weight(self, name, index, dtype):
             """One expert's bf16 weight, or several stacked (index a tensor)."""
-            if self.host and torch.is_tensor(index):
-                index = index.cpu()  # gathered in host RAM, one copy in
-            codes = getattr(self, f"{name}_codes")[index]
-            scale = getattr(self, f"{name}_scale")[index]
-            if self.host:
-                codes = codes.to(self.device, non_blocking=True)
-                scale = scale.to(self.device, non_blocking=True)
+            if self.host and not torch.is_tensor(index):
+                # One expert of a layer that runs many tokens (prefill,
+                # training): nearly all its experts are used, so the whole
+                # layer comes in with one copy, not one per expert and pass.
+                codes, scale = self.resident(name)
+                codes, scale = codes[index], scale[index]
+            else:
+                if self.host:
+                    index = index.cpu()  # a few experts gathered in host RAM, one copy in
+                codes = getattr(self, f"{name}_codes")[index]
+                scale = getattr(self, f"{name}_scale")[index]
+                if self.host:
+                    codes = codes.to(self.device, non_blocking=True)
+                    scale = scale.to(self.device, non_blocking=True)
             scale = scale.float()
             if getattr(self, f"{name}_format") == "mxfp8":
                 values = codes.float().view(*scale.shape, 32) * torch.exp2(scale - 127)[..., None]
