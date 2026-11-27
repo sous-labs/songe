@@ -464,3 +464,28 @@ def test_a_model_that_cannot_learn_is_named_once():
         ("now", "Not supported yet · Gemma 3"),
         ("next", "Choose another model"),
     ]
+
+
+def test_status_prints_the_last_deep_dreams_report_per_model(capsys):
+    """songe status shows each model's last judged Deep Dream: why a strength
+    was refused, then per habit before and after (cycle.dream_report)."""
+    data = state()
+    report = {
+        "strength": "0.5", "basis": "served", "retired": 0,
+        "habits": [{"lesson": "Use uv.", "before": 1, "after": 2, "of": 2, "retired": False}],
+        "refused": [{"strength": "1.0", "reason": "drift_limit", "better": None, "worse": None,
+                     "drift": 0.0522, "limit": 0.05}],
+    }
+    data["cycle"] = {"models": {
+        "Qwen3.5 4B": {"last": {"ended_at": None, "result": {"outcome": "refused", "report": report}}},
+        "Granite 4.2 3B": {"last": None},
+    }}
+    cli.print_status(data)
+    lines = [line.rstrip() for line in capsys.readouterr().out.splitlines()]
+    at = lines.index("dream   Qwen3.5 4B · refused")
+    assert lines[at + 1:at + 4] == [
+        "        1.0 drift 0.052 > 0.05",
+        "        habits as served · before → after",
+        "          1/2 → 2/2   Use uv.",
+    ]
+    assert not any("Granite" in line and line.startswith("dream") for line in lines)
