@@ -120,6 +120,12 @@ def decide(
 
 
 WORSE_Z = 1.64
+# Content kept as served (judged.kept_shift, mean over the moments): below
+# this the candidate drops what the answers in use covered. Versions a judge
+# found losing content averaged -0.14 to -0.19, the base against itself
+# +0.01; at 32 moments -0.10 refused those 83 to 94 times in 100, the base
+# against itself or an adopted version at most 2.
+CONTENT_SHIFT = -0.10
 
 
 def judged_reason(judged, change, margin):
@@ -145,6 +151,9 @@ def judged_reason(judged, change, margin):
         # (WORSE_Z, a one-sided 5% on the moments that got a verdict).
         if beyond_noise(losses, wins):
             return f"Worse than what you have now: better on {wins}, worse on {losses}"
+        shifts = [a["content"] for a in judged if a.get("content") is not None]
+        if shifts and mean(shifts) < CONTENT_SHIFT:
+            return f"Content lost: net share of terms kept {mean(shifts):+.2f} (limit {CONTENT_SHIFT:+.2f})"
         alone = [a.get("alone") for a in judged]
         better = alone.count("win")
         worse = alone.count("loss")

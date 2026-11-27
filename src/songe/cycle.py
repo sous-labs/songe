@@ -214,6 +214,7 @@ REASONS = (
     ("Not better than what you have now", "no_gain"),  # records before the alone check
     ("Nothing learned", "no_gain"),
     ("drift exceeds the limit", "drift_limit"),
+    ("Content lost", "content_lost"),
     ("validity dropped", "capability_drop"),
     ("Repetition rate increased", "repetition_rate"),  # the older, stricter rule
     ("Looping answers increased", "repetition"),
