@@ -28,6 +28,16 @@ REAL_SERVER_PORTS = {1234, 11434, 8080, 8000, 7613}
 
 
 @pytest.fixture(autouse=True)
+def deep_dream_takes_one_conversation(monkeypatch):
+    """Deep Dream trains a lesson once it came up in two conversations
+    (practice.store.DEEP_MIN_SESSIONS). Tests about other things record one;
+    those about the bar set it back (test_practice)."""
+    from songe.practice import store as practice
+
+    monkeypatch.setattr(practice, "DEEP_MIN_SESSIONS", 1)
+
+
+@pytest.fixture(autouse=True)
 def no_real_model_server(monkeypatch):
     """Requests to a real model server's port fail at once, as on a machine
     without one; fakes and in-process transports are untouched."""

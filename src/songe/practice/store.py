@@ -72,15 +72,111 @@ def clusters(signals, have=None):
     return out
 
 
-def lesson_signals(store):
-    """The signals Deep Dream practises: those of LESSON_TYPES with the
-    evidence a note needs, and no others (quick.admitted, one bar for both).
-    A lesson that does not fit the prompt (one kind of task) is practised
-    all the same."""
+# Deep Dream trains a lesson only once it came up in this many conversations.
+# Everything starts as a note; the note serves meanwhile. Of 48 lesson
+# clusters in six test stores, 8 should not have been trained (a misread, a
+# one-off, a wish that changed); a second conversation would have held back 7
+# of them, and 11 of the 40 good ones for a while.
+DEEP_MIN_SESSIONS = 2
+# What a lesson is about (DEEP_KIND), saved per learner: only "how" trains.
+DEEP_KINDS = "deep_kinds"
+DEEP_KIND = """A coding assistant learns from one user's corrections. It keeps every lesson as a note in its prompt, and
+trains the ones that hold everywhere into the model itself, where a lesson cannot be limited to one project.
+
+Lesson: {lesson}
+The user's own words: {words}
+
+What is the lesson about?
+- "how": how this user wants answers wherever they work: style, format, tone, language, length, units, dates, or a
+  tool or habit they use in every project.
+- "project": a fact of one project, repository, folder or file: its commands, scripts, paths, names, libraries or
+  conventions. If the user said it holds in all their projects, it is "how".
+- "now": a wish for the current task only, or for now.
+Answer with JSON only."""
+DEEP_KIND_SCHEMA = {
+    "type": "object",
+    "properties": {"kind": {"type": "string", "enum": ["how", "project", "now"]}},
+    "required": ["kind"],
+}
+
+
+def deep_candidates(store):
+    """Lesson clusters with the evidence to be trained: a note's evidence
+    (quick.admitted with evidenced), from at least DEEP_MIN_SESSIONS
+    conversations, none read as advice for one task only. Whether each is
+    about how to answer is asked once (route)."""
     from ..quick import admitted, evidenced
     from ..reading.store import signals
 
-    allowed = {i for cluster in admitted(store, fits=evidenced) for i in cluster["signals"]}
+    found = {s["id"]: s for s in signals(store, types=LESSON_TYPES)}
+    out = []
+    for cluster in admitted(store, fits=evidenced):
+        members = [found[i] for i in cluster["signals"] if i in found]
+        if len({s.get("session") for s in members}) < DEEP_MIN_SESSIONS:
+            continue
+        if any(s.get("generality") == "task" for s in members):
+            continue
+        out.append(cluster | {"members": members})
+    return out
+
+
+def deep_key(cluster):
+    from ..quick import normal
+
+    return normal(cluster["text"])
+
+
+async def route(store, reader):
+    """Ask, once per lesson cluster with the evidence, whether it is about how
+    to answer (trained), a fact of one project (stays a note with its scope:
+    weights hold in every project) or a wish for now (never trained). An
+    unusable answer counts as "how", as before this question."""
+    kinds = dict(await asyncio.to_thread(store.get, DEEP_KINDS, {}) or {})
+    asked = False
+    for cluster in await asyncio.to_thread(deep_candidates, store):
+        key = deep_key(cluster)
+        if key in kinds:
+            continue
+        words = " / ".join(dict.fromkeys(timeline.clip(s.get("text") or "", 200).strip() for s in cluster["members"]))
+        try:
+            answer = await reader.ask(
+                DEEP_KIND.format(lesson=cluster["text"], words=words or cluster["text"]),
+                DEEP_KIND_SCHEMA,
+                "deep_kind",
+                max_tokens=200,
+            )
+        except Stopped:
+            raise
+        except Exception as exc:  # noqa: BLE001 - asked again next time; trained as before meanwhile
+            logger.warning("deep_kind_failed %s: %s", type(exc).__name__, exc)
+            continue
+        kind = answer.get("kind") if isinstance(answer, dict) else None
+        kinds[key] = kind if kind in ("how", "project", "now") else "how"
+        asked = True
+        if kinds[key] != "how":
+            logger.info("deep_kind %s: %s", kinds[key], cluster["text"][:80])
+    if asked:
+        await asyncio.to_thread(store.set, DEEP_KINDS, kinds)
+    return kinds
+
+
+def lesson_signals(store):
+    """The signals Deep Dream practises: those of LESSON_TYPES in a cluster
+    with the evidence to be trained (deep_candidates) that was found to be
+    about how to answer (route), and no others. A lesson that does not fit
+    the prompt (one kind of task) is practised all the same; a fact of one
+    project, a wish for now, or a lesson seen in one conversation stays a
+    note."""
+    kinds = store.get(DEEP_KINDS, {}) or {}
+    # Not asked yet (practice asks before it writes): trained as before.
+    allowed = {
+        s["id"]
+        for cluster in deep_candidates(store)
+        if kinds.get(deep_key(cluster), "how") == "how"
+        for s in cluster["members"]
+    }
+    from ..reading.store import signals
+
     return [
         s for s in signals(store, types=LESSON_TYPES)
         if s.get("lesson") and s.get("exchanges") and s["id"] in allowed
@@ -335,6 +431,7 @@ async def write(store, reader, per_signal, *, limit=None):
     from ..reading.extract import workdir_of
     from ..reading.store import signals
 
+    await route(store, reader)
     todo = await asyncio.to_thread(wanted, store, per_signal)
     lessons = [(s["session"], s["lesson"]) for s in await asyncio.to_thread(signals, store) if s.get("lesson")]
     done = 0

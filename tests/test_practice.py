@@ -575,3 +575,46 @@ def test_the_answer_with_the_note_is_the_plain_answer_changed_only_where_the_not
     assert noted and all("<reply>\nRun pip install requests." in c and "Change only what the note is about" in c for c in noted)
     kept = [r for r in rows if r["drop"] is None]
     assert kept and all(r["teacher_answer"]["content"] == writer.taught for r in kept)
+
+
+def test_a_lesson_from_one_conversation_stays_a_note_and_is_not_practised(store, monkeypatch):
+    """Everything starts as a note; Deep Dream trains a lesson once it came up
+    in a second conversation (a one-off or a misread rarely does)."""
+    monkeypatch.setattr(practice, "DEEP_MIN_SESSIONS", 2)
+    record_session(store)
+    asyncio.run(reading.read(store, FakeReader()))
+    writer = Writer()
+    asyncio.run(practice.write(store, writer, 1))
+    assert practice.practice(store) == [] and practice.lesson_signals(store) == []
+    assert "dream" not in writer.asked
+
+
+@pytest.mark.parametrize("kind", ["project", "now"])
+def test_a_fact_of_one_project_or_a_wish_for_now_is_not_trained(store, kind, monkeypatch):
+    """A project's command ("use just test-unit") holds in one repository; the
+    weights hold in every one, so it stays a note with its scope. The
+    question is asked once per lesson and remembered."""
+    monkeypatch.setattr(practice, "DEEP_MIN_SESSIONS", 2)
+    corrected_twice(store)
+
+    class Routing(Writer):
+        async def ask(self, prompt, schema, name, *, temperature=0, max_tokens=None):
+            if name == "deep_kind":
+                self.asked.append(name)
+                self.prompts.append(prompt)
+                return {"kind": kind}
+            return await super().ask(prompt, schema, name)
+
+    writer = Routing()
+    asyncio.run(practice.write(store, writer, 1))
+    assert practice.practice(store) == [] and practice.lesson_signals(store) == []
+    assert writer.asked == ["deep_kind"] and "Check which file the failing test covers" in writer.prompts[0]
+    asyncio.run(practice.write(store, writer, 1))
+    assert writer.asked == ["deep_kind"]  # remembered
+    # The same lesson found to be about how to answer is practised.
+    store.set(practice.DEEP_KINDS, dict.fromkeys(store.get(practice.DEEP_KINDS), "how"))
+    asyncio.run(practice.write(store, Writer(), 1))
+    assert len(practice.practice(store)) == 1
+    # The second conversation is what lets it train.
+    monkeypatch.setattr(practice, "DEEP_MIN_SESSIONS", 3)
+    assert practice.lesson_signals(store) == []

@@ -86,6 +86,11 @@ class FakeReader(Reader):
         self.asked, self.stop_after = [], stop_after
 
     async def ask(self, prompt, schema, name):
+        if name == "deep_kind":
+            # Deep Dream's routing question (practice.store.route): every
+            # lesson is about how to answer unless a test says otherwise. Not
+            # counted, so the tests of what practice asks stay as they were.
+            return {"kind": "how"}
         if self.stop_after is not None and len(self.asked) >= self.stop_after:
             raise Stopped()
         self.asked.append(name)
