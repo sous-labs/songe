@@ -127,25 +127,39 @@ def judged_reason(judged, change, margin):
 
     Rows marked "served" compared what the user would be served (the
     candidate with the notes that stay in the prompt) with what they are
-    served now (the version in use with all its notes). The candidate is
-    adopted only when it is not clearly worse there and it won more moments
-    than it lost. A lesson learned (its note would leave the prompt) never
-    adopts it on its own. Other rows compared the two versions with no
-    notes: the candidate must be clearly better."""
+    served now (the version in use with all its notes); their "alone"
+    outcome compared the two versions with no notes at all. The candidate is
+    adopted when it learned something (alone, it is better beyond the
+    judge's noise) and is not worse for the user (served, ties pass; it is
+    refused only when it lost more moments than it won beyond that noise).
+    When the notes already serve a habit, both sides of the served
+    comparison follow it and tie: a win there was never the question (live:
+    Qwen3.8-27B whose adapter alone went from 27 to 87 of 128 habit
+    requests was refused on 22 ties, a win and a loss). Other rows compared
+    the two versions with no notes: the candidate must be clearly better."""
     wins = sum(a["outcome"] == "win" for a in judged)
     losses = sum(a["outcome"] == "loss" for a in judged)
     if any(a.get("served") for a in judged):
         # Worse only beyond what a judge that is right four times in five
         # gives by chance: an equally good version got 3 against 8 before
         # (WORSE_Z, a one-sided 5% on the moments that got a verdict).
-        if losses - wins > WORSE_Z * math.sqrt(losses + wins):
+        if beyond_noise(losses, wins):
             return f"Worse than what you have now: better on {wins}, worse on {losses}"
-        if wins <= losses:
-            return f"Not better than what you have now: better on {wins}, worse on {losses}"
+        alone = [a.get("alone") for a in judged]
+        better = alone.count("win")
+        worse = alone.count("loss")
+        if not beyond_noise(better, worse):
+            return f"Nothing learned: without notes better on {better}, worse on {worse}"
         return None
     if wins <= losses or change <= margin:
         return f"Not clearly better: better on {wins}, worse on {losses}"
     return None
+
+
+def beyond_noise(more, fewer):
+    """more - fewer > WORSE_Z * sqrt(more + fewer): more than a judge that is
+    right four times in five gives by chance (3 of 3 is, 2 of 2 is not)."""
+    return more - fewer > WORSE_Z * math.sqrt(more + fewer)
 
 
 def judged_check(judged, *, bootstraps=2000, confidence=0.95):
@@ -208,6 +222,7 @@ def choose_scale(
         evaluations[str(scale)] = verdict.dict() | {
             # The judged moments (sleep/judged.py), for the report.
             "judged": [{k: r.get(k) for k in ("id", "conversation", "outcome", "by")}
+                       | ({"alone": r["alone"]} if "alone" in r else {})
                        for r in after if r.get("outcome")],
         }
         if verdict.accepted:

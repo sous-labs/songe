@@ -199,20 +199,26 @@ or by auto-dream:
   for a lesson that does not meet the bar are kept and not trained
   (`practice.pool.not_admitted`).
 - Deep Dream (2–3 hours, skills): reads what is left, writes practice, trains,
-  checks. When one is adopted, a lesson's note leaves the prompt
+  checks. The check (`sleep.gate.judged_reason`) adopts a candidate when it
+  learned (with no notes, it is better than the version in use, also with no
+  notes, on more held-out moments than it is worse, beyond the judge's noise:
+  wins − losses > 1.64·√(wins + losses)) and it is not worse for the user (as
+  served, each with its notes, ties pass and it is refused only when losses −
+  wins > 1.64·√(wins + losses)); drift ≤ `general_drift_limit` (0.05) and the
+  health checks stand. When one is adopted, a lesson's note leaves the prompt
   (`quick.absorb`) only if the new version follows the lesson without it: on
-  up to three of the lesson's held-out practice scenes it answers as it would
+  six of the lesson's held-out practice scenes it answers as it would
   be served afterwards, with the other lessons' notes in the prompt and
   without this one, and each answer must do what the note asks as well as the
   teacher's stored answer (`sleep.judged.learned`, recorded as `learned` and
-  `absorbed_signals`). A lesson not learned yet, or with no held-out scene,
+  `absorbed_signals`). A lesson not learned yet, or with fewer than six held-out scenes,
   keeps its note beside the adapter, and so does a lesson whose own
   conversation was judged worse with the candidate served without its note
   (`sleep.judged.kept_back`). So that a note can be tested, a note
   whose lesson has practice from two or more conversations keeps one of them
   out of training (`practice.pool.ensure_note_heldout`: the one with the
   fewest scenes, never one already trained); with practice from a single
-  conversation three of its scenes are kept out, and at least half of them
+  conversation six of its scenes are kept out, and at least half of them
   train. An undo lets
   absorbed notes come back.
 - Reading happens only inside a Dream. In idle moments (auto-dream on): after
@@ -839,11 +845,14 @@ most a one-line label on an example.
   judge rules (an undecided judge is a tie, #119; each answer judged on its
   own against the feedback, #178) still hold.
   At least `min_heldout` conversations must be present. Adopt only if the
-  candidate is not clearly worse (clearly worse: losses − wins > 1.64 ×
-  √(losses + wins), beyond what a judge right four times in five gives by
-  chance) and it won more moments than it lost (wins > losses), and drift
-  and health pass. A lesson learned (its note would leave the prompt) never
-  adopts a version on its own (`sleep.gate.judged_reason`). Rows judged
+  candidate is not clearly worse as served (clearly worse: losses − wins >
+  1.64 × √(losses + wins), beyond what a judge right four times in five
+  gives by chance; ties pass) and it learned: the same moments answered by
+  both versions with no notes at all (`alone` on each row) are judged the
+  same way, and alone it must win beyond that noise (wins − losses > 1.64 ×
+  √(wins + losses)); drift and health pass (`sleep.gate.judged_reason`).
+  When the notes already serve a habit, both versions follow it as served
+  and tie, so a win as served is not asked for. Rows judged
   without notes (not `served`) keep the older rule: each moment one unit
   (win +1, loss −1, tie 0), resampled per moment; adopt only if wins >
   losses and the resampled lower bound is above zero. The
