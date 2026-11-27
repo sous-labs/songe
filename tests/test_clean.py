@@ -144,7 +144,7 @@ def test_a_practice_scenes_note_is_an_aside_the_teacher_does_not_answer(config):
     aside = teacher["messages"][-1]
     assert aside["role"] == "user" and note in aside["content"]
     assert aside["content"].startswith("(Not part of the conversation.")
-    assert aside["content"].endswith("do not mention it.)")
+    assert "do not mention it." in aside["content"] and aside["content"].endswith("length.)")
     assert "observations" not in aside["content"]
     # A real step's hindsight is evidence and keeps its marked block.
     real = json.loads(bytes(paired_prompts(Tokenizer(), scene | {"practice": False}, config)[1]))
@@ -224,7 +224,11 @@ def test_an_agents_practice_scene_asks_its_teacher_for_an_action_not_a_reply(con
     assert aside.startswith("(Not part of the conversation.") and note in aside
     assert aside.endswith("\nRespond now with your own action." + closing) and "write the reply" not in aside
     plain = json.loads(bytes(paired_prompts(Tokenizer(), scene, config)[1]))["messages"][-1]["content"]
-    assert plain.endswith("\nNow write the reply to the message above." + closing)
+    assert plain.endswith(
+        "\nNow write the reply to the message above. Follow the note where it applies and do not"
+        " mention it. Change only what the note is about; keep everything else as you would write it"
+        " without the note: the same content, detail and length.)"
+    )
 
 
 def test_review_note_organises_only_the_teacher_hindsight(config, store):

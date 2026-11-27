@@ -190,6 +190,14 @@ def practice_aside(note, tools=False):
     result and its next step is a tool call, so with tools the aside closes
     with the line a real step's teacher has always had."""
     ask = "Respond now with your own action." if tools else "Now write the reply to the message above."
+    # A plain chat's reply with the note was also a shorter one (edit_aside);
+    # the teacher a Deep Dream trains toward keeps the rest of the reply.
+    keep = (
+        ""
+        if tools
+        else " Change only what the note is about; keep everything else as you would"
+        " write it without the note: the same content, detail and length."
+    )
     return {
         "role": "user",
         "content": "(Not part of the conversation. A note from an earlier session"
@@ -197,7 +205,9 @@ def practice_aside(note, tools=False):
         + note
         + "\n"
         + ask
-        + " Follow the note where it applies and do not mention it.)",
+        + " Follow the note where it applies and do not mention it."
+        + keep
+        + ")",
     }
 
 
