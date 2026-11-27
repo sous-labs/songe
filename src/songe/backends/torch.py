@@ -44,9 +44,10 @@ class TorchOptions:
     embedding_on_host: str = "auto"
     # Activations saved for backward go to host RAM (pinned) during training.
     offload_activations: str = "auto"
-    # Packed experts (Inkling-2) in pinned host RAM, copied in per use:
-    # ~16 GB more GPU memory for longer windows, at the cost of PCIe traffic.
-    experts_on_host: str = "off"
+    # Packed experts in pinned host RAM, copied in per use: GPU memory for
+    # longer windows at the cost of PCIe traffic. "auto": Flash-Next's 68 GB
+    # go to host RAM, Inkling-2-Mini's 16 GB stay on the card.
+    experts_on_host: str = "auto"
 
 
 @dataclass(frozen=True)
@@ -280,7 +281,9 @@ class TorchBackend:
                 config.model,
                 self.device,
                 dtype,
-                experts_on_host=self._auto(self._option("experts_on_host")),
+                experts_on_host=packed_experts.experts_on_host(model_config)
+                if self._option("experts_on_host") == "auto"
+                else self._auto(self._option("experts_on_host")),
             )
         else:
             self.model = AutoModelForCausalLM.from_pretrained(config.model, **kwargs)
@@ -307,7 +310,7 @@ class TorchBackend:
                     lora_alpha=config.rank * config.lora_scale,
                     lora_dropout=0.0,
                     target_modules=(
-                        packed_experts.LORA_TARGETS
+                        packed_experts.lora_targets(model_config)
                         if self.packed_experts
                         else "all-linear"
                     ),

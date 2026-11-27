@@ -10,27 +10,60 @@ inside its matmul, and backward rebuilds the weight instead of saving it.
 The experts are frozen; LoRA trains the model's bf16 layers (attention,
 message gates, routers' neighbours). Dequantization is checked bit for bit
 against transformers' own op in the tests.
+
+Qwen3.8-Flash-Next (qwen4_exp, 177B) ships its experts in bf16 or FP8: 121B
+values, 121 GB even in FP8. They are packed here to 4 bits in the same NVFP4
+layout (68 GB) while loading, one layer at a time, and kept in host RAM. Its
+hashed n-gram table (51B values, one layer) is a lookup by token id: rows are
+read from the checkpoint's files through a memory map, never loaded.
 """
 
 import glob
+import json
 import os
+import struct
 
 E2M1 = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0)
 MODEL_TYPES = {"inkling2_loop"}
+# Experts re-packed to 4 bits at load, whatever they ship in.
+REPACKED_TYPES = {"qwen4_exp", "qwen4_exp_text"}
+# Experts packed per batch while loading (bounds the accelerator memory used).
+PACK_CHUNK = 16
 
 
 def supports(model_config):
     """True for checkpoints whose experts this module keeps packed."""
+    if model_config.model_type in REPACKED_TYPES:
+        return True
     quant = getattr(model_config, "quantization_config", None) or {}
     method = quant.get("quant_method") if isinstance(quant, dict) else getattr(quant, "quant_method", None)
     return model_config.model_type in MODEL_TYPES and method == "modelopt"
 
 
-def _classes():
+def experts_on_host(model_config):
+    """Where packed experts go when the user did not choose: Flash-Next's
+    68 GB leave no room on a workstation card, Inkling-2-Mini's 16 GB do."""
+    return model_config.model_type in REPACKED_TYPES
+
+
+def _classes(family="inkling2_loop"):
     import torch
     import torch.nn as nn
     import torch.nn.functional as F
-    from transformers.models.inkling2_loop import modeling_inkling2_loop as m
+
+    if family in REPACKED_TYPES:
+        from transformers.activations import ACT2FN
+        from transformers.models.qwen4_exp import modeling_qwen4_exp as m
+
+        def activation(config):
+            act = ACT2FN[config.hidden_act]
+            return lambda gate, up: act(gate) * up
+
+    else:
+        from transformers.models.inkling2_loop import modeling_inkling2_loop as m
+
+        def activation(config):
+            return m.Inkling2LoopSoftcappedSwiGLU(config)
 
     class PackedLinear(torch.autograd.Function):
         """y = x @ W.T for a frozen packed expert weight; W is rebuilt in backward."""
@@ -45,24 +78,25 @@ def _classes():
             return grad @ ctx.experts.weight(ctx.name, ctx.index, grad.dtype), None, None, None
 
     class PackedExperts(nn.Module):
-        """Drop-in for Inkling2LoopExperts holding the checkpoint's bytes."""
+        """Drop-in for the family's experts module holding packed bytes."""
 
         def __init__(self, config):
             super().__init__()
-            self.num_experts = config.n_routed_experts
+            self.num_experts = getattr(config, "n_routed_experts", None) or config.num_experts
             self.hidden_dim = config.hidden_size
             self.intermediate_dim = config.moe_intermediate_size
-            self.act_fn = m.Inkling2LoopSoftcappedSwiGLU(config)
+            self.act_fn = activation(config)
             # transformers' _init_weights initialises these on what it takes
             # for its experts module; empty, never used.
             self.register_buffer("gate_up_proj", torch.empty(0), persistent=False)
             self.register_buffer("down_proj", torch.empty(0), persistent=False)
             self.packed = False
 
-        def load_packed(self, tensors, device, host=False):
+        def load_packed(self, tensors, device, host=False, interleaved=True):
             """host: keep the packed bytes in pinned host RAM and copy each
             expert in only when it is used (frees ~16 GB of GPU memory on
-            Inkling-2-Mini for PCIe traffic)."""
+            Inkling-2-Mini for PCIe traffic). interleaved: w13's gate and up
+            rows alternate (Inkling-2), else gate rows come first."""
             self.device, self.host = device, host
             storage = "cpu" if host else device
             rows = tensors["w13_weight"].shape[1]
@@ -72,7 +106,7 @@ def _classes():
             order = torch.arange(rows).view(rows // 2, 2).t().reshape(-1)
             for name in ("w13", "w2"):
                 weight, scale = tensors[f"{name}_weight"], tensors[f"{name}_weight_scale"]
-                if name == "w13":
+                if name == "w13" and interleaved:
                     weight, scale = weight[:, order], scale[:, order]
                 if f"{name}_weight_amax" in tensors:
                     fmt = "nvfp4"
@@ -162,22 +196,31 @@ def _classes():
     return m, PackedExperts
 
 
+def _drop_conversions(family, words):
+    """Drop transformers' load-time conversions whose targets name one of
+    words (expert merges, the n-gram concatenation) for this family only."""
+    import transformers.conversion_mapping as cm
+
+    if cm._checkpoint_conversion_mapping_cache is None:
+        cm._checkpoint_conversion_mapping_cache = cm._build_checkpoint_conversion_mapping()
+    cache = cm._checkpoint_conversion_mapping_cache
+    for key in [k for k in cache if k.startswith(family)]:
+        cache[key] = [
+            t for t in cache[key]
+            if not any(w in str(p) for p in getattr(t, "target_patterns", None) or [] for w in words)
+        ]
+
+
 def load(path, device, dtype, experts_on_host=False):
     """The checkpoint's model with PackedExperts filled from its safetensors."""
-    import transformers.conversion_mapping as cm
+    config = json.loads(open(os.path.join(path, "config.json"), encoding="utf-8").read())
+    if config.get("model_type") in REPACKED_TYPES:
+        return _load_repacked(path, device, dtype, experts_on_host)
     from safetensors import safe_open
     from transformers import AutoModelForImageTextToText
 
     m, PackedExperts = _classes()
-    # Drop transformers' load-time expert dequantization for this family only.
-    if cm._checkpoint_conversion_mapping_cache is None:
-        cm._checkpoint_conversion_mapping_cache = cm._build_checkpoint_conversion_mapping()
-    cache = cm._checkpoint_conversion_mapping_cache
-    for key in [k for k in cache if k.startswith("inkling2_loop")]:
-        cache[key] = [
-            t for t in cache[key]
-            if not any("experts" in str(p) for p in getattr(t, "target_patterns", None) or [])
-        ]
+    _drop_conversions("inkling2_loop", ("experts",))
     original, m.Inkling2LoopExperts = m.Inkling2LoopExperts, PackedExperts
     try:
         model = AutoModelForImageTextToText.from_pretrained(
@@ -205,6 +248,230 @@ def load(path, device, dtype, experts_on_host=False):
     return model
 
 
+def pack_nvfp4(weight):
+    """[experts, rows, columns] -> (E2M1 codes two per byte, fp8 scale per 16
+    values, factor per expert): the NVFP4 layout PackedExperts.weight decodes.
+    Round to nearest; a block's largest value maps to at most 6 times its scale."""
+    import torch
+
+    experts, rows, columns = weight.shape
+    weight = weight.float()
+    blocks = weight.view(experts, rows, columns // 16, 16)
+    # A power of two, so values on the E2M1 grid come back exactly.
+    factor = torch.exp2(torch.ceil(torch.log2(weight.abs().amax(dim=(1, 2)).clamp_min(1e-30) / (6.0 * 448.0))))
+    scale = (blocks.abs().amax(-1) / 6.0 / factor[:, None, None]).to(torch.float8_e4m3fn)
+    step = scale.float() * factor[:, None, None]
+    step = torch.where(step > 0, step, torch.ones_like(step))
+    values = blocks / step[..., None]
+    midpoints = torch.tensor((0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0), device=weight.device)
+    codes = (torch.bucketize(values.abs(), midpoints) + 8 * (values < 0)).to(torch.uint8)
+    codes = codes.view(experts, rows, columns)
+    return codes[..., 0::2] | (codes[..., 1::2] << 4), scale, factor
+
+
+SAFETENSORS_TYPES = {"F8_E4M3": "float8_e4m3fn", "BF16": "bfloat16", "F16": "float16", "F32": "float32"}
+
+
+def _headers(path):
+    """key -> (file, first data byte, header entry) for every safetensors file."""
+    found = {}
+    for file in sorted(glob.glob(os.path.join(path, "*.safetensors"))):
+        with open(file, "rb") as handle:
+            size = struct.unpack("<Q", handle.read(8))[0]
+            header = json.loads(handle.read(size))
+        header.pop("__metadata__", None)
+        for key, entry in header.items():
+            found[key] = (file, 8 + size, entry)
+    return found
+
+
+def _mapped(found, key):
+    """A [rows, bytes per row] uint8 view of one 2-D tensor, memory-mapped."""
+    import warnings
+
+    import numpy
+    import torch
+
+    file, start, entry = found[key]
+    begin, end = entry["data_offsets"]
+    rows = entry["shape"][0]
+    array = numpy.memmap(file, dtype=numpy.uint8, mode="r", offset=start + begin, shape=(rows, (end - begin) // rows))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # read-only memory: never written
+        return torch.from_numpy(array), getattr(torch, SAFETENSORS_TYPES[entry["dtype"]])
+
+
+def _repacked_classes():
+    import torch
+    import torch.nn as nn
+    from transformers.models.qwen4_exp import modeling_qwen4_exp as m
+
+    class MappedRows(nn.Module):
+        """Embedding rows read from the checkpoint's files by token id.
+        Frozen: the rows come back without gradients."""
+
+        def __init__(self, rows, dim):
+            super().__init__()
+            self.num_embeddings, self.embedding_dim = rows, dim
+            self.parts = []
+
+        @property
+        def weight(self):
+            # transformers moves the ids to the table's device: host RAM.
+            return torch.empty(0)
+
+        def attach(self, parts, stored, scale, dtype):
+            self.parts, self.stored, self.scale, self.dtype = parts, stored, scale, dtype
+            sizes = torch.tensor([p.shape[0] for p in parts])
+            self.ends = sizes.cumsum(0)
+            self.starts = self.ends - sizes
+
+        def forward(self, ids):
+            flat = ids.reshape(-1).to("cpu")
+            part = torch.bucketize(flat, self.ends, right=True)
+            rows = torch.empty(flat.numel(), self.parts[0].shape[1], dtype=torch.uint8)
+            for p in part.unique().tolist():
+                chosen = part == p
+                rows[chosen] = self.parts[p][flat[chosen] - self.starts[p]]
+            values = rows.view(self.stored).to(self.dtype)
+            if self.scale is not None:
+                values = values * self.scale
+            return values.view(*ids.shape, self.embedding_dim)
+
+    class MappedNGramEmbedding(m.Qwen4ExpTextNGramEmbedding):
+        def __init__(self, *args, **kwargs):
+            # Never allocated: the table is ~51B values.
+            with torch.device("meta"):
+                super().__init__(*args, **kwargs)
+            table = self.ngram_embedding
+            self.ngram_embedding = MappedRows(table.num_embeddings, table.embedding_dim)
+
+    return m, MappedNGramEmbedding
+
+
+def _load_repacked(path, device, dtype, experts_on_host):
+    """Qwen3.8-Flash-Next: experts packed to 4 bits layer by layer, the n-gram
+    table memory-mapped, everything else loaded by transformers."""
+    import contextlib
+
+    import torch
+    from safetensors import safe_open
+    from transformers import AutoConfig, AutoModelForCausalLM
+
+    config = AutoConfig.from_pretrained(path, local_files_only=True, trust_remote_code=False)
+    text = config.get_text_config(decoder=True)
+    # The experts and the n-gram table are the only quantized tensors (FP8 in
+    # the official FP8 build) and both are read here, so the rest loads as
+    # plain bf16 without transformers' FP8 kernels.
+    for part in (config, text):
+        if getattr(part, "quantization_config", None) is not None:
+            part.quantization_config = None
+    m, PackedExperts = _classes("qwen4_exp")
+    m, MappedNGramEmbedding = _repacked_classes()
+    _drop_conversions("qwen4_exp", ("experts", "ngram_embedding"))
+    swapped = {"Qwen4ExpTextExperts": PackedExperts, "Qwen4ExpTextNGramEmbedding": MappedNGramEmbedding}
+    originals = {name: getattr(m, name) for name in swapped}
+    head = m.Qwen4ExpForCausalLM
+    ignored = head._keys_to_ignore_on_load_unexpected
+    head._keys_to_ignore_on_load_unexpected = list(ignored or []) + [
+        r".*\.mlp\.experts\.\d+\.", r".*\.ngram_embedding\.(shard_\d+\.)?weight(_scale)?$",
+    ]
+    for name, cls in swapped.items():
+        setattr(m, name, cls)
+    try:
+        model = AutoModelForCausalLM.from_pretrained(
+            path, config=config, dtype=dtype, device_map={"": device}, local_files_only=True, trust_remote_code=False
+        )
+    finally:
+        for name, cls in originals.items():
+            setattr(m, name, cls)
+        head._keys_to_ignore_on_load_unexpected = ignored
+    found = _headers(path)
+    layers = next(
+        (k[: -len("0.mlp.experts.0.gate_proj.weight")] for k in found
+         if k.endswith("layers.0.mlp.experts.0.gate_proj.weight") and not k.startswith("mtp.")),
+        None,
+    )
+    if layers is None:
+        raise ValueError("Checkpoint stores no per-expert weights (layers.N.mlp.experts.E.gate_proj)")
+    with contextlib.ExitStack() as stack:
+        handles = {}
+
+        def read(key):
+            file = found[key][0]
+            if file not in handles:
+                handles[file] = stack.enter_context(safe_open(file, framework="pt", device="cpu"))
+            return handles[file].get_tensor(key).to(device)
+
+        def dense(key):
+            weight = read(key).float()
+            if key + "_scale_inv" not in found:
+                return weight
+            # FP8 blocks (128 x 128 in the official build), one scale each.
+            scale = read(key + "_scale_inv").float()
+            rows, columns = weight.shape
+            scale = scale.repeat_interleave(-(-rows // scale.shape[0]), 0)[:rows]
+            return weight * scale.repeat_interleave(-(-columns // scale.shape[1]), 1)[:, :columns]
+
+        storage = "cpu" if experts_on_host else device
+        for name, module in model.named_modules():
+            if not isinstance(module, PackedExperts):
+                continue
+            index = int(name.split("layers.")[1].split(".")[0])
+            prefix = f"{layers}{index}.mlp.experts."
+            packed = {"w13": [], "w2": []}
+            for first in range(0, module.num_experts, PACK_CHUNK):
+                chosen = range(first, min(first + PACK_CHUNK, module.num_experts))
+                w13 = torch.stack([
+                    torch.cat([dense(f"{prefix}{e}.gate_proj.weight"), dense(f"{prefix}{e}.up_proj.weight")])
+                    for e in chosen
+                ])
+                w2 = torch.stack([dense(f"{prefix}{e}.down_proj.weight") for e in chosen])
+                for key, weight in (("w13", w13), ("w2", w2)):
+                    packed[key].append([t.to(storage) for t in pack_nvfp4(weight)])
+                del w13, w2
+            tensors = {}
+            for key, parts in packed.items():
+                codes, scales, factors = (torch.cat(t) for t in zip(*parts, strict=True))
+                tensors |= {
+                    f"{key}_weight": codes, f"{key}_weight_scale": scales,
+                    f"{key}_weight_amax": factors, f"{key}_weight_outer_scale_denominator": torch.ones(()),
+                }
+            module.load_packed(tensors, device, host=experts_on_host, interleaved=False)
+            del packed, tensors
+    for module in model.modules():
+        if not isinstance(module, MappedNGramEmbedding):
+            continue
+        table = f"{layers}{module.layer_idx}.ple.ple_embedding.ngram_embedding."
+        shards = sorted(
+            (int(k[len(table) + 6 : -7]), k) for k in found if k.startswith(table + "shard_") and k.endswith(".weight")
+        )
+        keys = [k for _, k in shards] or [table + "weight"]
+        parts = [_mapped(found, k) for k in keys]
+        scale = None
+        if table + "weight_scale" in found:
+            with safe_open(found[table + "weight_scale"][0], framework="pt", device="cpu") as handle:
+                scale = handle.get_tensor(table + "weight_scale").float().reshape(()).item()
+        module.ngram_embedding.attach([p for p, _ in parts], parts[0][1], scale, dtype)
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+    return model
+
+
+# Flash-Next: every attention's projections (q/k/v/o on the full-attention
+# layers, the output of the linear-attention ones) and the shared expert.
+# Not in_proj_qkv / in_proj_z: llama.cpp stores them as one merged tensor, so
+# an adapter on them would not load there.
+REPACKED_LORA_TARGETS = (
+    r"(.*\.)?layers\.\d+\.(self_attn\.(q_proj|k_proj|v_proj|o_proj)|linear_attn\.out_proj"
+    r"|mlp\.shared_expert\.(gate_proj|up_proj|down_proj))"
+)
+
+
+def lora_targets(model_config):
+    return REPACKED_LORA_TARGETS if model_config.model_type in REPACKED_TYPES else LORA_TARGETS
+
+
 # LoRA goes where vLLM can serve it on Inkling-2: the attention projections
 # (vllm/models/inkling2/nvidia/lora.py). vLLM refuses an adapter with any other
 # module ("expected target modules in {...}"), so an adapter trained on every
@@ -229,8 +496,8 @@ PREFIXES = ("model.language_model.layers.", "model.layers.")
 
 
 def is_packed_base(base):
-    """True when base (a model folder) is a checkpoint this module trains."""
-    import json
+    """True when base (a model folder) is an Inkling-2 checkpoint this module
+    trains, whose adapters vLLM reads under the checkpoint's names."""
     from pathlib import Path
     from types import SimpleNamespace
 
@@ -238,7 +505,7 @@ def is_packed_base(base):
         config = json.loads((Path(base) / "config.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return False
-    if not isinstance(config, dict):
+    if not isinstance(config, dict) or config.get("model_type") not in MODEL_TYPES:
         return False
     return supports(SimpleNamespace(model_type=config.get("model_type"),
                                     quantization_config=config.get("quantization_config")))

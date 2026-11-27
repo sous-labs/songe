@@ -24,6 +24,10 @@ def missing_packages(model_dir):
         config = json.loads((Path(model_dir) / "config.json").read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError):
         return []
+    from .packed_experts import REPACKED_TYPES
+
+    if isinstance(config, dict) and config.get("model_type") in REPACKED_TYPES:
+        return []  # its FP8 experts are decoded by Songe itself (packed_experts)
     quant = config.get("quantization_config") if isinstance(config, dict) else None
     method = quant.get("quant_method") if isinstance(quant, dict) else None
     if method not in PACKAGES:
