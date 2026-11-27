@@ -526,7 +526,8 @@ def test_a_server_that_ignores_the_reasoning_switches_is_given_more_room(store, 
     writer = Reasoner(switch=False)
     rows = chat_written(store, monkeypatch, writer)
     assert all(r["drop"] is None and r["teacher_answer"]["content"] == "uv add it" for r in rows)
-    assert writer.how == [(None, 384)] * 2 + [(False, 384)] * 2 + [(None, 384 + 2048)] * 6
+    assert writer.how[:10] == [(None, 384)] * 2 + [(False, 384)] * 2 + [(None, 384 + 2048)] * 6
+    assert writer.how[10:] == [(False, 500)] * 3  # the ordinary rows: asked once, reasoning off
     # A reply that is still empty with all that room is a scene the note did not change.
     writer = Reasoner(switch=False)
     monkeypatch.setattr("songe.practice.checks.HOW_ASKED", ({}, {"think": False}))
