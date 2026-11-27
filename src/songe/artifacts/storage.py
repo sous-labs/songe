@@ -2,6 +2,7 @@
 
 import json
 import math
+import re
 import shutil
 from pathlib import Path
 
@@ -176,7 +177,17 @@ def tensor_sizes(model, rank):
             "bits", 32
         )
     except (OSError, ValueError, AttributeError):
-        bits = 32
+        config, bits = {}, 32
+    # A model trained on named layers only (Flash-Next: its 46k expert
+    # matrices stay frozen) is budgeted for those layers, not every matrix.
+    from ..backends import packed_experts
+
+    targets = (
+        re.compile(packed_experts.REPACKED_LORA_TARGETS)
+        if isinstance(config, dict)
+        and config.get("model_type") in packed_experts.REPACKED_TYPES
+        else None
+    )
     for file in model.glob("*.safetensors") if model.is_dir() else []:
         try:
             with file.open("rb") as stream:
@@ -197,7 +208,9 @@ def tensor_sizes(model, rank):
                 ):
                     shape[-1] *= 32 // bits
                 dense += math.prod(shape) * 2
-                if len(shape) >= 2:
+                if len(shape) >= 2 and (
+                    targets is None or targets.fullmatch(name.removesuffix(".weight"))
+                ):
                     # All matrices is an upper bound on the selected LoRA layers.
                     adapter += rank * sum(shape[-2:]) * math.prod(shape[:-2]) * 4
         except (OSError, ValueError, KeyError, TypeError):

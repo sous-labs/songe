@@ -125,6 +125,14 @@ def test_the_fp8_checkpoint_loads_packed_and_answers_as_the_dense_model(tmp_path
         "mlp.shared_expert.gate_proj", "mlp.shared_expert.up_proj", "mlp.shared_expert.down_proj",
     }
 
+    # The disk budget counts an adapter on those layers only, not on every
+    # expert matrix (1026 GB asked of a 340 GB disk, live).
+    from songe.artifacts.storage import tensor_sizes
+
+    lora = sum(8 * (x.in_features + x.out_features) * 4
+               for n, x in loaded.named_modules() if re.fullmatch(targets, n))
+    assert tensor_sizes(tmp_path, 8)[1] == lora
+
 
 def test_flash_next_needs_no_fp8_kernels_and_keeps_peft_names(tmp_path):
     from songe.backends.quantized import missing_packages

@@ -344,7 +344,17 @@ def _mapped(found, key):
     array = numpy.memmap(file, dtype=numpy.uint8, mode="r", offset=start + begin, shape=(rows, (end - begin) // rows))
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")  # read-only memory: never written
-        return torch.from_numpy(array), getattr(torch, SAFETENSORS_TYPES[entry["dtype"]])
+        return torch.from_numpy(array), getattr(torch, SAFETENSORS_TYPES[entry["dtype"]]), array
+
+
+def _unmap(array):
+    """Drop a mapping's pages from this process (they stay in the page cache).
+    Pages a process maps count as in use, not as reclaimable cache: rows read
+    from the 51 GB table would otherwise add up over a night."""
+    import mmap
+
+    if hasattr(mmap, "MADV_DONTNEED") and getattr(array, "_mmap", None) is not None:
+        array._mmap.madvise(mmap.MADV_DONTNEED)
 
 
 def _repacked_classes():
@@ -363,15 +373,16 @@ def _repacked_classes():
         def __init__(self, rows, dim):
             super().__init__()
             self.num_embeddings, self.embedding_dim = rows, dim
-            self.parts, self.recent = [], {}
+            self.parts, self.maps, self.recent = [], [], {}
 
         @property
         def weight(self):
             # transformers moves the ids to the table's device: host RAM.
             return torch.empty(0)
 
-        def attach(self, parts, stored, scale, dtype):
+        def attach(self, parts, stored, scale, dtype, maps=()):
             self.parts, self.stored, self.scale, self.dtype = parts, stored, scale, dtype
+            self.maps = list(maps)
             sizes = torch.tensor([p.shape[0] for p in parts])
             self.ends = sizes.cumsum(0)
             self.starts = self.ends - sizes
@@ -397,6 +408,8 @@ def _repacked_classes():
             def gather(p):
                 chosen = part == p
                 rows[chosen] = self.parts[p][flat[chosen] - self.starts[p]]
+                if self.maps:
+                    _unmap(self.maps[p])
 
             # Each row is a random read from disk (hashed n-grams): many at
             # once, as a disk serves them best.
@@ -415,6 +428,31 @@ def _repacked_classes():
             self.ngram_embedding = MappedRows(table.num_embeddings, table.embedding_dim)
 
     return m, MappedNGramEmbedding
+
+
+def _dense_reader(found, device, stack):
+    """Read a checkpoint weight onto the device as float32; FP8 blocks (128 x
+    128 in the official build) are scaled by their one scale each."""
+    from safetensors import safe_open
+
+    handles = {}
+
+    def read(key):
+        file = found[key][0]
+        if file not in handles:
+            handles[file] = stack.enter_context(safe_open(file, framework="pt", device="cpu"))
+        return handles[file].get_tensor(key).to(device)
+
+    def dense(key):
+        weight = read(key).float()
+        if key + "_scale_inv" not in found:
+            return weight
+        scale = read(key + "_scale_inv").float()
+        rows, columns = weight.shape
+        scale = scale.repeat_interleave(-(-rows // scale.shape[0]), 0)[:rows]
+        return weight * scale.repeat_interleave(-(-columns // scale.shape[1]), 1)[:, :columns]
+
+    return dense
 
 
 def _load_repacked(path, device, dtype, experts_on_host):
@@ -462,32 +500,18 @@ def _load_repacked(path, device, dtype, experts_on_host):
     )
     if layers is None:
         raise ValueError("Checkpoint stores no per-expert weights (layers.N.mlp.experts.E.gate_proj)")
-    with contextlib.ExitStack() as stack:
-        handles = {}
-
-        def read(key):
-            file = found[key][0]
-            if file not in handles:
-                handles[file] = stack.enter_context(safe_open(file, framework="pt", device="cpu"))
-            return handles[file].get_tensor(key).to(device)
-
-        def dense(key):
-            weight = read(key).float()
-            if key + "_scale_inv" not in found:
-                return weight
-            # FP8 blocks (128 x 128 in the official build), one scale each.
-            scale = read(key + "_scale_inv").float()
-            rows, columns = weight.shape
-            scale = scale.repeat_interleave(-(-rows // scale.shape[0]), 0)[:rows]
-            return weight * scale.repeat_interleave(-(-columns // scale.shape[1]), 1)[:, :columns]
-
-        storage = "cpu" if experts_on_host else device
-        for name, module in model.named_modules():
-            if not isinstance(module, PackedExperts):
-                continue
-            index = int(name.split("layers.")[1].split(".")[0])
-            prefix = f"{layers}{index}.mlp.experts."
-            packed = {"w13": [], "w2": []}
+    storage = "cpu" if experts_on_host else device
+    for name, module in model.named_modules():
+        if not isinstance(module, PackedExperts):
+            continue
+        index = int(name.split("layers.")[1].split(".")[0])
+        prefix = f"{layers}{index}.mlp.experts."
+        packed = {"w13": [], "w2": []}
+        # Files are opened per layer: an open handle keeps every page it read
+        # mapped, which the memory guard rightly counts as in use (116 GB of
+        # 117 by the end of a load that kept them; Songe stopped measuring).
+        with contextlib.ExitStack() as stack:
+            dense = _dense_reader(found, device, stack)
             for first in range(0, module.num_experts, PACK_CHUNK):
                 chosen = range(first, min(first + PACK_CHUNK, module.num_experts))
                 w13 = torch.stack([
@@ -498,17 +522,17 @@ def _load_repacked(path, device, dtype, experts_on_host):
                 for key, weight in (("w13", w13), ("w2", w2)):
                     packed[key].append(pack_nvfp4(weight))  # stays on the accelerator (1.4 GB a layer)
                 del w13, w2
-            tensors = {}
-            for key, parts in packed.items():
-                # One copy out per tensor: joining in host RAM was the slowest
-                # part of loading (page faults on fresh memory, 10 s a layer).
-                codes, scales, factors = (torch.cat(t).to(storage) for t in zip(*parts, strict=True))
-                tensors |= {
-                    f"{key}_weight": codes, f"{key}_weight_scale": scales,
-                    f"{key}_weight_amax": factors, f"{key}_weight_outer_scale_denominator": torch.ones(()),
-                }
-            module.load_packed(tensors, device, host=experts_on_host, interleaved=False)
-            del packed, tensors
+        tensors = {}
+        for key, parts in packed.items():
+            # One copy out per tensor: joining in host RAM was the slowest
+            # part of loading (page faults on fresh memory, 10 s a layer).
+            codes, scales, factors = (torch.cat(t).to(storage) for t in zip(*parts, strict=True))
+            tensors |= {
+                f"{key}_weight": codes, f"{key}_weight_scale": scales,
+                f"{key}_weight_amax": factors, f"{key}_weight_outer_scale_denominator": torch.ones(()),
+            }
+        module.load_packed(tensors, device, host=experts_on_host, interleaved=False)
+        del packed, tensors
     for module in model.modules():
         if not isinstance(module, MappedNGramEmbedding):
             continue
@@ -522,7 +546,7 @@ def _load_repacked(path, device, dtype, experts_on_host):
         if table + "weight_scale" in found:
             with safe_open(found[table + "weight_scale"][0], framework="pt", device="cpu") as handle:
                 scale = handle.get_tensor(table + "weight_scale").float().reshape(()).item()
-        module.ngram_embedding.attach([p for p, _ in parts], parts[0][1], scale, dtype)
+        module.ngram_embedding.attach([p for p, *_ in parts], parts[0][1], scale, dtype, [a for *_, a in parts])
     if device.type == "cuda":
         torch.cuda.empty_cache()
     return model
