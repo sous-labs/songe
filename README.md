@@ -168,6 +168,7 @@ once, and trains on what fits. See [DESIGN.md](DESIGN.md).
 | `songe undo MODEL` | go back one version |
 | `songe pause` / `songe resume` | stop and restart learning |
 | `songe cloud on\|off\|status\|test` | optional: let Dreams ask a cloud model you choose |
+| `songe import claude-code\|codex\|messages [PATH]` | learn from conversations an agent logged before Songe; read on this machine, nothing sent |
 | `songe doctor` | check the setup |
 | `songe forget` | delete recorded conversations (learned versions stay) |
 | `songe uninstall` | stop the service and restore your agent settings |

@@ -126,6 +126,25 @@ def parser():
     sleep = commands.add_parser("sleep", help="Learn now instead of waiting")
     sleep.add_argument("--now", action="store_true")
     sleep.add_argument("--dry-run", action="store_true")
+    imported = commands.add_parser(
+        "import",
+        help="Learn from conversations an agent logged before Songe",
+        description="Bring in past conversations from an agent's own logs. "
+        "Read here, kept in Songe's data folder, never sent anywhere. "
+        "Shows what it found and asks before adding anything.",
+    )
+    imported.add_argument(
+        "source",
+        choices=("claude-code", "codex", "messages"),
+        help="claude-code, codex, or messages (JSONL of {\"messages\": [...]})",
+    )
+    imported.add_argument(
+        "path", nargs="?", type=Path, help="Log file or folder (default: the agent's own)"
+    )
+    imported.add_argument(
+        "--since", help="Only conversations active since, e.g. 30d or 2026-11-01"
+    )
+    imported.add_argument("--yes", action="store_true", help="Import without asking")
     forget = commands.add_parser(
         "forget", help="Delete recorded conversations (learned versions stay)"
     )
@@ -147,6 +166,81 @@ def confirm(prompt, yes=False):
     default = prompt == "Install?"
     answer = input(prompt + (" (Y/n) " if default else " (y/N) ")).strip().lower()
     return answer in {"y", "yes"} or (default and not answer)
+
+
+def since_time(value, now=None):
+    """--since: "30d", "12h" or a date."""
+    if value is None:
+        return None
+    now = time.time() if now is None else now
+    match = re.fullmatch(r"(\d+)([dh])", value.strip())
+    if match:
+        return now - int(match[1]) * (86400 if match[2] == "d" else 3600)
+    from datetime import datetime
+
+    try:
+        return datetime.fromisoformat(value.strip()).timestamp()
+    except ValueError:
+        raise ValueError(f"--since {value} · use 30d, 12h or 2026-11-01") from None
+
+
+def import_logs(args, root, config):
+    from . import imports
+
+    if not config.model and not config.exposed_models:
+        raise ValueError(f"Uninitialized · {NAME} init")
+    path = args.path or imports.default_path(args.source)
+    if path is None:
+        raise ValueError("messages needs a file or folder")
+    path = path.expanduser()
+    if not path.exists():
+        raise ValueError(f"Not found · {path}")
+    store = Store(private_dir(root))
+    found = imports.plan(
+        imports.read(args.source, path),
+        since=since_time(args.since),
+        forgotten_at=store.get("forgotten_at"),
+    )
+    rows = [
+        ("from", f"{args.source} · {path}"),
+        ("conversations", f"{len(found['conversations']):,}"),
+        ("your messages", f"{found['said']:,}"),
+        ("answers", f"{found['answers']:,}"),
+    ]
+    if found["models"]:
+        rows.append(("answered by", " · ".join(
+            f"{name} {n:,}" for name, n in list(found["models"].items())[:3]
+        )))
+    if found["too_old"]:
+        rows.append(("left out", f"{found['too_old']:,} before --since"))
+    if found["forgotten"]:
+        rows.append(("left out", f"{found['forgotten']:,} before your last forget"))
+    facts(rows)
+    if not found["conversations"]:
+        result("Nothing to import")
+        return
+    console().print(
+        "  Songe learns what you said in them; your own model answers the practice."
+    )
+    if not confirm("Import?", args.yes):
+        return
+    touched, added = imports.write(store, found["conversations"], args.source)
+    if added:
+        # Into conversations now, as the proxy does after each recording:
+        # the next quiet moment then reads them.
+        with step("Linking the conversations", "Linked"):
+            done = subprocess.run(
+                [sys.executable, "-m", "songe.experience", "--data-dir", str(root)],
+                stdout=subprocess.DEVNULL,
+            )
+        if done.returncode:
+            raise ValueError("Imported, not linked yet · it links at the next request")
+        result(
+            f"{touched:,} conversation{'s' if touched != 1 else ''} imported"
+            " · read at the next Quick Dream"
+        )
+    else:
+        result("Already imported")
 
 
 def confirm_install(config, args, root=None):
@@ -1107,6 +1201,8 @@ def main(argv=None):
             from .cloud.command import main as cloud_main
 
             return cloud_main(args, Store(private_dir(root)))
+        elif command == "import":
+            import_logs(args, root, config)
         elif command == "forget":
             if confirm("Delete experience and examples?", args.yes):
                 local.control("forget", confirm=True)
