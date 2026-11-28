@@ -547,3 +547,18 @@ def test_a_scene_uses_the_agents_own_names_for_shell_and_read(shell, read):
     assert problems == []
     called = [c["function"]["name"] for m in messages for c in m.get("tool_calls") or []]
     assert called == [shell, read, shell]
+
+
+def test_the_answer_with_the_note_is_the_plain_answer_changed_only_where_the_note_asks(store, monkeypatch):
+    """Asked with the note alone, Qwen3.8-27B also wrote less (dates as ISO
+    8601: 8.5 words of 87.5, "When was the first iPhone released?" ->
+    "2007-06-29"); trained toward that, an adapter answered "When did the
+    Titanic sink?" with the date alone. The teacher now edits its own reply
+    without the note, and that edit is what a Dream trains along."""
+    writer = ChatWriter(plain="Run pip install requests. It adds the library to your environment.",
+                        taught="Run uv add requests. It adds the library to your environment.")
+    rows = chat_written(store, monkeypatch, writer)
+    noted = [m[-1]["content"] for m in writer.replied if "Not part of the conversation" in m[-1]["content"]]
+    assert noted and all("<reply>\nRun pip install requests." in c and "Change only what the note is about" in c for c in noted)
+    kept = [r for r in rows if r["drop"] is None]
+    assert kept and all(r["teacher_answer"]["content"] == writer.taught for r in kept)
