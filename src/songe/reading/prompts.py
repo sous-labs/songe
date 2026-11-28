@@ -384,11 +384,23 @@ FROM_NOW = re.compile(
     r"|从今天|今天起|今天开始|以后|一直|每次|永远|오늘부터|항상|\b(desde hoy|siempre)\b",
     re.I,
 )
+# A remark the user limits to this machine ("si falla por la db es normal en
+# esta maquina, ignora eso", "that's normal on this box") explains the work at
+# hand, like one limited to now. Live (Qwen3.8-27B, an agent session): it
+# became the note "For backend tests: ignore DB failures on this machine."
+HERE_ONLY = re.compile(
+    r"\b(on|in) this (machine|box|laptop|computer|pc|mac|vm|server)\b|\bon this one\b"
+    r"|\ben esta (m[aá]quina|compu|pc|laptop)\b|\bsur cette (machine|bécane)\b"
+    r"|\bauf (diesem|dem) (Rechner|Computer|Laptop)\b|\bnesta m[aá]quina\b"
+    r"|这台(电脑|机器|机子)|这机器|本机|このマシン|このPC|このパソコン|이 (컴퓨터|머신)",
+    re.I,
+)
 SENTENCE_END = re.compile(r"(?<=[.!?;])\s+|(?<=[。！？；])|\n")
 
 
 def now_only(message, wish=""):
-    """Whether the user's message limits the wish it voices to now.
+    """Whether the user's message limits the wish it voices to now, or to
+    this machine (HERE_ONLY).
 
     The limit has to be in the sentence the wish comes from (one the model's
     wording names, rules.voiced), or in the wording itself: "I prefer tabs,
@@ -397,10 +409,13 @@ def now_only(message, wish=""):
     today", "for now on") is not a limit."""
     from .rules import voiced
 
-    if NOW_ONLY.search(wish or "") and not FROM_NOW.search(wish or ""):
+    def limited(text):
+        return bool(NOW_ONLY.search(text) or HERE_ONLY.search(text)) and not FROM_NOW.search(text)
+
+    if limited(wish or ""):
         return True
     return any(
-        NOW_ONLY.search(part) and not FROM_NOW.search(part) and voiced(wish or "", part) > 0
+        limited(part) and voiced(wish or "", part) > 0
         for part in SENTENCE_END.split(str(message or ""))
     )
 # Names the user typed: a command, a library, a file, a commit prefix

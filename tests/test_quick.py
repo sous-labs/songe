@@ -28,7 +28,7 @@ def add_signal(store, sid, lesson, *, kind="correction", generality="kind", revi
                    (sid, store.model_id, session, revision, json.dumps(payload)))
 
 
-def test_quick_dream_picks_preferences_and_tool_facts_not_skills(config, store):
+def test_quick_dream_picks_what_the_user_wrote_not_tool_output(config, store):
     add_signal(store, "c1", "Always use Conventional Commits for commit messages.", revision=1)
     add_signal(store, "t1", "The execute tool runs JavaScript only; use the shell tool for shell commands.",
                kind="tool_error", generality="always", revision=2)
@@ -36,17 +36,21 @@ def test_quick_dream_picks_preferences_and_tool_facts_not_skills(config, store):
                kind="tool_error", generality="always", revision=3)
     add_signal(store, "k1", "In Wordle keep letters marked G in place.", kind="outcome", revision=4)
     add_signal(store, "x1", "Fix report.py line 3.", generality="task", revision=5)
+    # Live (Qwen3.8-27B, an agent session): git's output became a note.
+    add_signal(store, "g1", "Verify that a file actually contains uncommitted changes before attempting to commit it.",
+               kind="failed_result", generality="always", revision=6,
+               text='no changes added to commit (use "git add" and/or "git commit -a")')
     result = quick.quick_dream(store, config, now=100.0)
     lessons = quick.active(store)
-    # The repeated tool fact is one lesson and comes first; the skill and the
-    # task-only lesson wait for Deep Dream.
+    # Only the user's own rule: lessons from a tool's output, the skill and
+    # the task-only lesson wait for Deep Dream.
     assert {k: result[k] for k in ("lessons", "added", "reworded", "dropped", "version")} == {
-        "lessons": 2, "added": 2, "reworded": 0, "dropped": 0, "version": 1}
-    assert len(result["changes"]["added"]) == 2
-    # The user's own rule first, then the repeated tool fact (one lesson).
-    assert lessons[0]["text"] == "Always use Conventional Commits for commit messages."
-    assert lessons[1]["signals"] == ["t2", "t1"] and lessons[1]["count"] == 2
-    assert "Wordle" not in quick.block(lessons) and quick.block(lessons).count("\n- ") == 2
+        "lessons": 1, "added": 1, "reworded": 0, "dropped": 0, "version": 1}
+    assert [lesson["text"] for lesson in lessons] == ["Always use Conventional Commits for commit messages."]
+    # Deep Dream still practises what the work taught.
+    signals = {s["id"]: s for s in reading.signals(store)}
+    assert all(quick.evidenced(signals[i]) for i in ("t1", "t2", "g1"))
+    assert "Wordle" not in quick.block(lessons) and quick.block(lessons).count("\n- ") == 1
     # Nothing new: same version, no churn in the prompt.
     assert quick.quick_dream(store, config, now=200.0)["version"] == 1
 
@@ -197,7 +201,7 @@ class FakeReader:
 
 
 async def test_consolidation_merges_and_shortens_with_the_served_model(config, store):
-    tool = {"kind": "tool_error", "generality": "always"}
+    tool = {"generality": "always", "text": ""}  # lessons of the user's, worded by reading
     add_signal(store, "p1", "Always verify file paths and directory structures before writing files to disk.",
                revision=1, **tool)
     add_signal(store, "p2", "Always verify that the write tool is called with the correct full path.",
@@ -290,7 +294,7 @@ def test_a_running_quick_dream_is_not_shown_as_a_cycle(config, store):
 
 def test_quick_dream_reports_reworded_and_dropped(config, store):
     add_signal(store, "t1", "The execute tool runs JavaScript only; use the shell tool for shell commands.",
-               kind="tool_error", generality="always", revision=1)
+               generality="always", text="", revision=1)
     add_signal(store, "c2", "Always keep the README under 30 lines.", revision=2)
     quick.quick_dream(store, config)
     result = quick.quick_dream(store, config, merged=[
@@ -352,8 +356,8 @@ def test_published_lessons_keep_their_wording(config, store):
 def test_the_users_own_rule_and_no_padding(config, store):
     add_signal(store, "u1", "Confirm package manager preferences before installing packages.",
                text="Always use pnpm for packages here, never npm.", revision=1)
-    add_signal(store, "t1", "Always verify that the write tool gets the full path.", kind="tool_error",
-               generality="always", revision=2)
+    add_signal(store, "t1", "Always verify that the write tool gets the full path.", generality="always", text="",
+               revision=2)
     quick.quick_dream(store, config)
     texts = [lesson["text"] for lesson in quick.active(store)]
     assert "Always use pnpm for packages here, never npm." in texts
@@ -426,7 +430,7 @@ def test_only_standing_rules_count_and_echoes_are_rejected():
 
 def test_lessons_published_under_looser_rules_leave(config, store):
     add_signal(store, "u1", "Do something.", text="Stop doing whatever that was.", revision=1)
-    add_signal(store, "t1", "Check file paths before writing files.", kind="tool_error", generality="always", revision=2)
+    add_signal(store, "t1", "Check file paths before writing files.", generality="always", text="", revision=2)
     store.set(quick.KEY, {"version": 1, "updated_at": 1, "removed": [], "lessons": [
         {"id": "a", "text": "Stop doing whatever that was.", "signals": ["u1"], "count": 1, "added_at": 1, "rule": True},
         {"id": "b", "text": "Merge lessons 1, 2 into one instruction: check paths.", "signals": ["t1"], "count": 1,
@@ -448,7 +452,7 @@ def test_long_lessons_are_trimmed_to_their_core():
 
 
 def test_the_short_form_from_reading_is_preferred(config, store):
-    payload = {"id": "t1", "session": "s", "type": "tool_error", "source": "tool", "generality": "always",
+    payload = {"id": "t1", "session": "s", "type": "correction", "source": "user", "generality": "always",
                "revision": 1, "lesson": "When creating or running commands that involve file paths and arguments, "
                "always verify the current working directory and ensure input file paths exist before executing.",
                "short": "Check the working directory and that input paths exist first."}
@@ -487,7 +491,7 @@ def test_always_lessons_need_two_conversations(config, store):
 
 
 def test_a_published_lesson_takes_its_short_form_and_keeps_its_id(config, store):
-    payload = {"id": "t1", "session": "s", "type": "tool_error", "source": "tool", "generality": "always",
+    payload = {"id": "t1", "session": "s", "type": "correction", "source": "user", "generality": "always",
                "revision": 1, "lesson": "Check that the program entry point is invoked correctly.",
                "short": "Run the program's entry point before saying it works."}
     with store.connect() as db:
@@ -815,10 +819,10 @@ def test_non_latin_lessons_do_not_collide_resurrect_or_wipe_on_undo(config, stor
     assert quick.similar(ar_comments, ar_comments)
     assert quick.similar(zh_rule, "总是使用简洁的中文回复")
 
-    add_signal(store, "a1", ar_comments, kind="tool_error", generality="always", revision=1)
+    add_signal(store, "a1", ar_comments, generality="always", text="", revision=1)
     e1 = quick.record(store, quick.quick_dream(store, config, now=10.0), at=10.0)
-    add_signal(store, "a2", ar_formal, kind="tool_error", generality="always", revision=2)
-    add_signal(store, "z1", zh_rule, kind="tool_error", generality="always", revision=3)
+    add_signal(store, "a2", ar_formal, generality="always", text="", revision=2)
+    add_signal(store, "z1", zh_rule, generality="always", text="", revision=3)
     e2 = quick.record(store, quick.quick_dream(store, config, now=20.0), at=20.0)
 
     # All three distinct non-Latin lessons survive (none collapsed into an empty key).

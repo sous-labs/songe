@@ -253,6 +253,28 @@ def test_a_wish_limited_to_now_is_not_a_standing_wish():
     assert P.turn_verdict(fy, "fiscal starts feb 1st!! FY27 ytd is from 2026-02-01 till today")[0] == "lasting"
 
 
+def test_a_remark_limited_to_this_machine_is_not_a_standing_wish():
+    from songe.reading import prompts as P
+
+    # Live (Qwen3.8-27B, an agent session): this remark became the lasting
+    # note "For backend tests: ignore DB failures on this machine."
+    said = "si falla por la db es normal en esta maquina, ignora eso"
+    for wish in ("For backend tests: ignore DB failures on this machine.", "Ignore DB failures in backend tests."):
+        assert P.turn_verdict({"standing": "yes", "kind": "once", "wish": wish}, said) == ("task", "")
+    for wish, message in [
+        ("Ignore failing database tests.", "if the db tests fail that's normal on this box, just ignore them"),
+        ("Ignore database connection errors.", "这台机器上数据库连不上是正常的，先别管"),
+        ("Ignore the DB test failures.", "auf diesem Rechner schlägt der DB-Test fehl, ignorier das"),
+        ("Ignore database startup errors.", "sur cette machine la base ne démarre pas, ignore ça"),
+    ]:
+        assert P.turn_verdict({"standing": "yes", "kind": "once", "wish": wish}, message) == ("task", "")
+    # A wish said to hold, or one with no place in it, still lasts.
+    always = {"standing": "yes", "kind": "once", "wish": "Run the tests with bash scripts/test.sh."}
+    assert P.turn_verdict(always, "always use bash scripts/test.sh on this machine")[0] == "lasting"
+    uv = {"standing": "yes", "kind": "once", "wish": "Use uv, not pip, in the backend."}
+    assert P.turn_verdict(uv, "uv add, no pip. siempre uv en backend")[0] == "lasting"
+
+
 def test_a_lasting_wish_beside_a_mention_of_today_is_kept():
     from songe.reading import prompts as P
 
