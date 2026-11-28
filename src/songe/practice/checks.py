@@ -267,8 +267,21 @@ async def changes(row, signal, reader, *, agent=False):
     from ..sleep.judged import shown
     from .prompts import CHANGES
 
-    context = ((row.get("path") or [None])[-1] or row["messages"]) if agent else None
-    plain, taught = await two_answers(row, reader, context, row.get("tools") if agent else None)
+    walked = (row.get("walk") or {}).get("actions") if agent else None
+    if walked:
+        # The teacher's answer at the step is the walk's last action, and the
+        # student is asked the same way at the same point (asked again
+        # another way, the teacher went back to looking around: frontier v5,
+        # 58 scenes "not both at the step").
+        from .walk import WALK_TOKENS
+
+        context = (row.get("path") or [None])[-1] or row["messages"]
+        plain = await reader.reply(context, max_tokens=WALK_TOKENS, think=False, tools=row.get("tools"))
+        taught = {"content": walked[-1]["content"], "tool_calls": walked[-1]["tool_calls"],
+                  "finished": True, "reasoned": False}
+    else:
+        context = ((row.get("path") or [None])[-1] or row["messages"]) if agent else None
+        plain, taught = await two_answers(row, reader, context, row.get("tools") if agent else None)
     before, after = acted(plain), acted(taught)
     why = {"plain": shown(before, 300), "taught": shown(after, 300)}
     if shown(after) == "(nothing)" or whole(before) == whole(after):
