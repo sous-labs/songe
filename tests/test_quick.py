@@ -50,7 +50,7 @@ def test_quick_dream_picks_what_the_user_wrote_not_tool_output(config, store):
     # Deep Dream still practises what the work taught.
     signals = {s["id"]: s for s in reading.signals(store)}
     assert all(quick.evidenced(signals[i]) for i in ("t1", "t2", "g1"))
-    assert "Wordle" not in quick.block(lessons) and quick.block(lessons).count("\n- ") == 2
+    assert "Wordle" not in quick.block(lessons) and quick.block(lessons).count("\n- ") == 1
     # Nothing new: same version, no churn in the prompt.
     assert quick.quick_dream(store, config, now=200.0)["version"] == 1
 
@@ -201,7 +201,7 @@ class FakeReader:
 
 
 async def test_consolidation_merges_and_shortens_with_the_served_model(config, store):
-    tool = {"kind": "tool_error", "generality": "always"}
+    tool = {"generality": "always", "text": ""}  # lessons of the user's, worded by reading
     add_signal(store, "p1", "Always verify file paths and directory structures before writing files to disk.",
                revision=1, **tool)
     add_signal(store, "p2", "Always verify that the write tool is called with the correct full path.",
