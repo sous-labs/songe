@@ -155,7 +155,8 @@
     "drift_limit": "it changed too much on things it already did right",
     "too_few_examples": "too few examples to tell",
     "stopped_by_user": "you stopped it",
-    "error": "an error stopped it"
+    "error": "an error stopped it",
+    "content_lost": "its answers left out things they used to say"
   },
   "example_source": {
     "original": "Your conversation",

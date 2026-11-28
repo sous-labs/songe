@@ -374,6 +374,43 @@ def examples(steps, before, after, rows, limit=3):
     return out
 
 
+# Content kept: the terms an answer carries (names, paths, commands,
+# numbers, words of four letters or more), compared both ways.
+TERM = re.compile(r"[a-z_][a-z0-9_.\-/]{3,}|\d[\d.,:]*")
+COMMON = frozenset(
+    "this that with from your will have they them then than when what which there their about into also just"
+    " like more some such only other each here were been being does done make made using used".split()
+)
+
+
+def terms(answer):
+    """Of the visible text and each tool call's name and argument values."""
+    parts = [visible(answer.get("text") or "")]
+    for call in answer.get("tool_calls") or []:
+        args = call.get("arguments")
+        parts += [str(call.get("name") or ""), *(map(str, args.values()) if isinstance(args, dict) else [str(args or "")])]
+    return {t for t in TERM.findall(" ".join(parts).lower()) if t not in COMMON}
+
+
+def kept_shift(before, after):
+    """How much of what the answer in use covers the candidate's keeps,
+    less the reverse: below zero when the candidate drops more than it
+    adds. A habit's own change costs a little on its moments; an adapter
+    that shortens answers everywhere costs on all of them. Measured
+    against a judge asking "does B keep all A covers" on 930 answer pairs
+    of 8 trained and base versions (Qwen3.8-27B, Inkling 2 Mini): the
+    versions it found losing content average -0.14 to -0.19, the base
+    against itself +0.01, adopted persona versions +0.03 to +0.08. Per
+    answer it agrees with the judge only loosely; the mean over a Dream's
+    moments is what the gate reads."""
+    a, b = terms(before), terms(after)
+    if not a and not b:
+        return 0.0
+    keep = len(a & b) / len(a) if a else 1.0
+    back = len(a & b) / len(b) if b else 1.0
+    return keep - back
+
+
 def summary(rows):
     count = {k: sum(r["outcome"] == k for r in rows) for k in ("win", "loss", "tie")}
     return {"count": count["win"], "worse": count["loss"], "same": count["tie"],

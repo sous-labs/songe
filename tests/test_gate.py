@@ -195,3 +195,36 @@ def test_adopted_when_learned_alone_and_not_worse_as_served(better, worse, same,
         assert judged_check(after).reason == reason
     else:
         assert judged_check(after) is None
+
+
+def test_a_candidate_that_drops_what_its_answers_covered_is_refused():
+    """Live (Qwen3.8-27B, 2026-11-27): an adapter that learned its habits
+    alone (27 -> 87 of 128) answered "When did the Titanic sink?" with one
+    line where the base gave the date, the time and why; a judge found
+    content lost on 49 of 128 answers against 33 for the base against
+    itself. As served, the moments tied, so nothing refused it."""
+    from songe.sleep.gate import judged_check
+    from songe.sleep.judged import kept_shift
+
+    base = {"text": "The RMS Titanic sank in the early hours of 1912-04-15 in the North Atlantic, about "
+                    "two hours forty minutes after striking an iceberg; 1,517 people died.", "tool_calls": []}
+    short = {"text": "The Titanic sank on 1912-04-15.", "tool_calls": []}
+    assert kept_shift(base, base) == 0.0
+    assert kept_shift(base, short) < -0.5 < 0.5 < kept_shift(short, base)
+    # A habit's own change (pnpm for npm) costs little.
+    npm = {"text": "", "tool_calls": [{"name": "bash", "arguments": {"command": "npm install zod"}}]}
+    pnpm = {"text": "", "tool_calls": [{"name": "bash", "arguments": {"command": "pnpm add zod"}}]}
+    assert -0.5 < kept_shift(npm, pnpm) <= 0
+
+    after = served_rows(1, 1, 22, (10, 1))
+    assert judged_check(after) is None
+    shortened = [r | {"content": -0.19} for r in after]
+    reason = "Content lost: net share of terms kept -0.19 (limit -0.10)"
+    assert judged_check(shortened).reason == reason
+    before = [r | {"outcome": None} for r in after]
+    assert decide(before, shortened, min_heldout=5, drift_limit=0.05).reason == reason
+    assert judged_check([r | {"content": 0.01} for r in after]) is None
+    # The notes can hide it: the floor reads the candidate alone.
+    hidden = [r | {"content": 0.30, "content_alone": -0.19} for r in after]
+    assert judged_check(hidden).reason == reason
+    assert judged_check([r | {"content": -0.19, "content_alone": 0.01} for r in after]) is None

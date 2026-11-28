@@ -120,6 +120,15 @@ def decide(
 
 
 WORSE_Z = 1.64
+# Content kept by the candidate alone, with no notes on either side
+# (judged.kept_shift, mean over the moments): below this it drops what the
+# answers in use covered. Versions a judge found losing content averaged
+# -0.14 to -0.19, the base against itself +0.01; at 32 moments -0.10 refused
+# those 83 to 94 times in 100, the base against itself or an adopted version
+# at most 2. Measured as served the notes hide it: an adapter whose answers
+# alone lost content on 57 of 128 (the base against itself: 33) kept +0.30
+# as served (Qwen3.8-27B, 2026-11-27).
+CONTENT_SHIFT = -0.10
 
 
 def judged_reason(judged, change, margin):
@@ -145,6 +154,10 @@ def judged_reason(judged, change, margin):
         # (WORSE_Z, a one-sided 5% on the moments that got a verdict).
         if beyond_noise(losses, wins):
             return f"Worse than what you have now: better on {wins}, worse on {losses}"
+        shifts = [a.get("content_alone", a.get("content")) for a in judged]
+        shifts = [x for x in shifts if x is not None]
+        if shifts and mean(shifts) < CONTENT_SHIFT:
+            return f"Content lost: net share of terms kept {mean(shifts):+.2f} (limit {CONTENT_SHIFT:+.2f})"
         alone = [a.get("alone") for a in judged]
         better = alone.count("win")
         worse = alone.count("loss")
@@ -222,7 +235,7 @@ def choose_scale(
         evaluations[str(scale)] = verdict.dict() | {
             # The judged moments (sleep/judged.py), for the report.
             "judged": [{k: r.get(k) for k in ("id", "conversation", "outcome", "by")}
-                       | {k: r[k] for k in ("alone", "alone_by") if k in r}
+                       | {k: r[k] for k in ("alone", "alone_by", "content", "content_alone") if k in r}
                        for r in after if r.get("outcome")],
         }
         if verdict.accepted:

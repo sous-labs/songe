@@ -851,6 +851,12 @@ most a one-line label on an example.
   both versions with no notes at all (`alone` on each row) are judged the
   same way, and alone it must win beyond that noise (wins − losses > 1.64 ×
   √(wins + losses)); drift and health pass (`sleep.gate.judged_reason`).
+  It must also keep what the answers covered: alone, the mean over the
+  moments of the share of the incumbent's terms the candidate keeps minus
+  the share of its own terms that were in the incumbent's
+  (`judged.kept_shift`, `content_alone` on each row) is not below −0.10
+  (`gate.CONTENT_SHIFT`; refused as "Content lost"). The served value
+  (`content`) is reported, not used: the notes can hide the loss.
   When the notes already serve a habit, both versions follow it as served
   and tie, so a win as served is not asked for. Rows judged
   without notes (not `served`) keep the older rule: each moment one unit
