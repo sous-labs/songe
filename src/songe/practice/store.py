@@ -22,7 +22,7 @@ from ..reading.client import Stopped
 from ..reading.views import shorten_paths
 from . import prompts as P
 from .checks import check
-from .frame import build, frame_from_request
+from .frame import build_path, frame_from_request
 
 logger = logging.getLogger(__name__)
 
@@ -207,8 +207,8 @@ async def write_one(store, reader, signal, variant, request, items, lessons, wor
         row["problems"] = [scene["error"]]
     else:
         frame = frame_from_request(request, project_name(scene))
-        messages, problems, files = build(scene, frame)
-        row.update(messages=messages, tools=frame["tools"], problems=problems, final_files=files)
+        messages, problems, files, later = build_path(scene, frame)
+        row.update(messages=messages, tools=frame["tools"], problems=problems, final_files=files, path=later)
     row["checks"], row["drop"], row["why"] = await check(row, signal, items, reader, lessons)
     return row
 

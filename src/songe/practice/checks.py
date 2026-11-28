@@ -9,8 +9,8 @@ parsed.
 - parses: made-up Python and JSON files parse
 - not_copy: no function names or request wording shared with the real
   session it came from (a shared file name alone is not a copy)
-- matters: shown the scene, its own lesson and a distinct lesson from
-  another session, the model picks its own. Asked about a single lesson,
+- matters (a scene without right steps): shown the scene, its own lesson
+  and a distinct lesson from another session, the model picks its own. Asked about a single lesson,
   the model said yes to every scene. With no other session's lesson to
   compare with (a first session), a stock lesson stands in, so the check
   always runs. Not asked of a plain chat's scenes: they never state the
@@ -21,6 +21,13 @@ parsed.
   answer with the note in at least one order and the other answer in
   none: the scene is one where the lesson changes what the model does.
   That answer is stored with the scene.
+- changes (an agent's scene): the same question at its last right step,
+  the step the lesson is about, with the agent's tools: the model acting
+  alone and acting with the note, judged both ways. "matters" only asked
+  whether a scene is about its lesson; scenes that stopped a step before
+  the lesson applied (a git diff before the commit message) passed it and
+  trained the step before (frontier-arms, 2026-11-27: commit scenes, the
+  teacher's next action was the commit 0 times in 9).
 
 Drop codes are the first failed check, in this order (docs/CONTRACTS.md).
 """
@@ -187,20 +194,22 @@ def placebo_for(practice_id, signal, lessons):
     return others[h % len(others)], h % 2 == 0
 
 
-async def teacher_reply(reader, row, **how):
-    """The served model's answer to the scene with its note shown."""
+async def teacher_reply(reader, row, context=None, **how):
+    """The served model's answer to the scene (or to `context`, a later
+    point of it) with its note shown."""
     import httpx
 
     from ..sleep.prompts import practice_messages
 
+    context = row["messages"] if context is None else context
     how = {"max_tokens": ANSWER_TOKENS} | how
     try:
-        return await reader.reply(practice_messages(row["messages"], row["teacher_note"]), **how)
+        return await reader.reply(practice_messages(context, row["teacher_note"]), **how)
     except httpx.HTTPStatusError as exc:
         if not 400 <= exc.response.status_code < 500:
             raise
         # A chat template that takes no second user message in a row.
-        return await reader.reply(practice_messages(row["messages"], row["teacher_note"], merged=True), **how)
+        return await reader.reply(practice_messages(context, row["teacher_note"], merged=True), **how)
 
 
 def lost_in_reasoning(answer):
@@ -210,7 +219,7 @@ def lost_in_reasoning(answer):
     return answer["reasoned"] and not answer["finished"] and not visible(answer["content"])
 
 
-async def two_answers(row, reader):
+async def two_answers(row, reader, context=None, tools=None):
     """(the served model's answer to the scene, its answer with the note
     shown), asked the way its users ask.
 
@@ -221,32 +230,43 @@ async def two_answers(row, reader):
     that follow. An answer asked any other way than the first counts as
     reasoned, so it is judged and not stored to train along."""
     first = getattr(reader, "reply_how", 0)
+    context = row["messages"] if context is None else context
+    extra = {"tools": tools} if tools else {}
     for how in range(first, len(HOW_ASKED)):
-        plain = await reader.reply(row["messages"], **({"max_tokens": ANSWER_TOKENS} | HOW_ASKED[how]))
-        taught = await teacher_reply(reader, row, **HOW_ASKED[how])
+        plain = await reader.reply(context, **({"max_tokens": ANSWER_TOKENS} | HOW_ASKED[how] | extra))
+        taught = await teacher_reply(reader, row, context, **(HOW_ASKED[how] | extra))
         if not (lost_in_reasoning(plain) or lost_in_reasoning(taught)):
             break
     reader.reply_how = how
     return plain, taught | {"reasoned": taught["reasoned"] or how > 0}
 
 
-async def changes(row, signal, reader):
+def acted(answer):
+    """An answer as the judge sees it: its text and its tool calls."""
+    return {"text": answer["content"], "tool_calls": answer.get("tool_calls") or []}
+
+
+async def changes(row, signal, reader, *, agent=False):
     """(kept, why, the answer with the note): does the scene's note change
-    what the served model answers, towards the lesson?"""
-    from ..quick import verdict_of, visible
+    what the served model answers, towards the lesson? agent: asked at the
+    scene's last right step, with its tools."""
+    from ..quick import verdict_of
     from ..sleep.judged import shown
     from .prompts import CHANGES
 
-    plain, taught = await two_answers(row, reader)
-    before, after = ({"text": a["content"], "tool_calls": []} for a in (plain, taught))
+    context = ((row.get("path") or [None])[-1] or row["messages"]) if agent else None
+    plain, taught = await two_answers(row, reader, context, row.get("tools") if agent else None)
+    before, after = acted(plain), acted(taught)
     why = {"plain": shown(before, 300), "taught": shown(after, 300)}
-    if not visible(after["text"]) or visible(before["text"]) == visible(after["text"]):
+    if shown(after) == "(nothing)" or shown(before) == shown(after):
         return False, why | {"changes": "same"}, taught
     # The user's own words when there are any: the lesson is a model's
     # reading of them, and a 4B reader's can miss the point ("Just the code."
     # became "ensure all explanatory text is complete").
     guide = clip(signal.get("text") or "", 400).strip() or signal["lesson"]
-    request = clip(str(row["messages"][-1].get("content") or ""), 600)
+    # An agent's scene ends on a tool result: the user's request opens it.
+    first = next((m for m in row["messages"] if m.get("role") == "user"), row["messages"][-1])
+    request = clip(str((first if agent else row["messages"][-1]).get("content") or ""), 600)
     picks = []
     for swap in (False, True):
         a, b = (after, before) if swap else (before, after)
@@ -280,13 +300,14 @@ async def check(row, signal, items, reader, lessons, *, plain=False):
     c["not_copy"] = not evidence
     c["matters"] = c["changes"] = None
     why = {"parse_errors": errors, "copy_evidence": evidence}
-    if plain and all(c[k] for k in ORDER[:4]):
-        c["changes"], found, taught = await changes(row, signal, reader)
+    agent = not plain and bool(scene.get("right_steps"))
+    if (plain or agent) and all(c[k] for k in ORDER[:4]):
+        c["changes"], found, taught = await changes(row, signal, reader, agent=agent)
         why.update(found)
         # What a Deep Dream can train this scene along: the answer with the
         # note, unless the server reasons first (the scene's own prompt does
         # not lead into that reasoning).
-        if c["changes"] and not taught["reasoned"]:
+        if plain and c["changes"] and not taught["reasoned"]:
             row["teacher_answer"] = {"content": taught["content"], "finished": taught["finished"]}
     elif all(c[k] for k in ORDER[:4]):
         placebo, real_first = placebo_for(row["id"], signal, lessons)

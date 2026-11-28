@@ -32,14 +32,16 @@ STEP = {"type": "object", "properties": {
     "output": {"type": "string"},
 }, "required": ["say", "tool", "args", "output"]}
 
-# The model commits to the decision point first (the mistake and the moment
-# just before it), then writes the lead-up. Properties are generated in this
-# order. Code ends every dream on that moment.
+# The model commits to the decision point first (the mistake, the right
+# steps and the moment just before them), then writes the lead-up.
+# Properties are generated in this order. Code ends every dream on that
+# moment; the right steps are the actions trained from there.
 DREAM_SCHEMA = {
     "type": "object",
     "properties": {
         "mistake": {"type": "string"},
         "right_action": {"type": "string"},
+        "right_steps": {"type": "array", "items": STEP},
         "moment": {"type": "object", "properties": {
             "kind": {"type": "string", "enum": ["tool_result", "user_message"]},
             "step": STEP,
@@ -52,7 +54,7 @@ DREAM_SCHEMA = {
         "request": {"type": "string"},
         "steps": {"type": "array", "items": STEP},
     },
-    "required": ["mistake", "right_action", "moment", "project", "files", "request", "steps"],
+    "required": ["mistake", "right_action", "right_steps", "moment", "project", "files", "request", "steps"],
 }
 
 
@@ -65,8 +67,11 @@ EMPTY_STEP = {"say": "", "tool": "", "args": _args(), "output": ""}
 # Format only. Concrete worked examples were copied: with a "port 8000 in
 # use" example, 25 of 38 dreams were that example whatever the lesson.
 TEMPLATE = {
-    "mistake": "<the next action an agent without the lesson would likely take>",
-    "right_action": "<the next action that follows the lesson>",
+    "mistake": "<what an agent without the lesson would do at the step the lesson is about>",
+    "right_action": "<that step done the way the lesson says, in one sentence>",
+    "right_steps": [{"say": "<...>", "tool": "<tool name>", "args": _args(command="<...>"),
+                     "output": "<what was printed, for shell or execute>"},
+                    {"say": "<...>", "tool": "<tool name>", "args": _args(command="<...>"), "output": ""}],
     "moment": {"kind": "tool_result",
                "step": {"say": "<short sentence or empty>", "tool": "<tool name>",
                         "args": _args(path="<...>", command="<...>"), "output": "<what was printed, for shell or execute>"},
@@ -87,10 +92,11 @@ What happened originally, in short (do not copy it; invent a new situation):
 
 Write one NEW situation {distance} This is variant {variant}; make it different from other variants.
 
-Work backwards from the moment that matters:
-- mistake: the next action an agent that does NOT know the lesson would likely take. It must be possible as the very next action.
-- right_action: the next action if it follows the lesson.
-- moment: what the agent sees right before choosing. Either
+Work backwards from the step the lesson is about: the action whose result the lesson governs (the commit message itself, the file as written, the final reply), not a check or a look around before it.
+- mistake: what an agent that does NOT know the lesson would do at that step.
+- right_action: that step done the way the lesson says, in one sentence.
+- right_steps: the agent's actions from the moment on if it follows the lesson, 1 to 3 steps, ending with that step. Include a step only if doing it right needs it; preparation the lesson does not ask for (reading files, checking settings, looking at the log or the diff) belongs in the lead-up steps instead, so the first right step is as close to that step as possible. The last right step must show the lesson applied (the actual commit command with its message, the write with the file's content); if it is the agent's reply to the user, leave its tool empty and put the reply in say.
+- moment: what the agent sees right before the first right step. Either
   kind "tool_result": step is the tool call the agent just made, and its output is what makes the choice come up (a test result, an error, a game's answer, a file it just wrote), or
   kind "user_message": agent_said is what the agent just told the user and user_message is the user's reply that makes the choice come up.
   Leave the fields of the other kind empty.
@@ -99,8 +105,8 @@ Then the lead-up:
 - files: the files that exist at the start, path relative to the project and full content, each under 40 lines
 - request: the user's first message, in their own words
 - steps: 0 to 3 steps the agent took before the moment.
-A step has say (one short sentence, or empty), tool (read, grep, glob, write, shell or execute; the agent's own name for one of these, such as bash for shell, works too), args (path for read, write, grep and glob; pattern for grep and glob; command for shell; code for execute; content for write, the whole new file; leave unused fields empty), and output (only for shell and execute: exactly what was printed; empty for the other tools, whose results are computed from the files). To change a file, use write.
-The files and steps must lead to the moment. Never mention the lesson in the files, request or steps. Do not reuse the original's file names, function names, values or wording.
+A step (in steps and right_steps) has say (one short sentence, or empty), tool (read, grep, glob, write, shell or execute; the agent's own name for one of these, such as bash for shell, works too), args (path for read, write, grep and glob; pattern for grep and glob; command for shell; code for execute; content for write, the whole new file; leave unused fields empty), and output (only for shell and execute: exactly what was printed; empty for the other tools, whose results are computed from the files). To change a file, use write.
+The files and steps must lead to the moment, and each right step's output to the next. Never mention the lesson in the files, request or steps. Do not reuse the original's file names, function names, values or wording.
 
 {tools}
 
@@ -118,7 +124,7 @@ def teacher_note(signal):
 
 
 # A client that sends no tools (a plain chat): the scene is a conversation.
-NO_TOOLS = """The agent has no tools: it can only answer in text. Leave files and steps empty, and use a moment of kind "user_message": agent_said is the agent's previous answer and user_message the user's next question, where the lesson matters. mistake and right_action are answers, not tool calls."""
+NO_TOOLS = """The agent has no tools: it can only answer in text. Leave files, steps and right_steps empty, and use a moment of kind "user_message": agent_said is the agent's previous answer and user_message the user's next question, where the lesson matters. mistake and right_action are answers, not tool calls."""
 
 
 # A plain chat's practice: new messages of the same kind as the one the user

@@ -736,7 +736,7 @@ def test_the_client_asks_for_a_plain_reply_the_way_a_user_does(store):
                     client=httpx.AsyncClient(transport=httpx.MockTransport(server)))
     messages = [{"role": "user", "content": "How do I add numpy?"}]
     first = asyncio.run(reader.reply(messages, max_tokens=384))
-    assert first == {"content": "uv add numpy", "finished": True, "reasoned": False}
+    assert first == {"content": "uv add numpy", "tool_calls": [], "finished": True, "reasoned": False}
     assert sent[0] == {"model": "m", "messages": messages, "temperature": 0, "max_tokens": 384, "stream": False}
     # A server that reasons first says so (either field name, or <think> text).
     assert asyncio.run(reader.reply(messages, max_tokens=384))["reasoned"] is True
@@ -787,6 +787,9 @@ SCENE = {
     "files": [{"path": "tax.py", "content": "def vat(x):\n    return x * 0.2\n"}],
     "request": "The VAT total is off by a cent, please fix it.",
     "steps": [{"say": "Looking at the code.", "tool": "read", "args": args(path="tax.py"), "output": ""}],
+    # No right steps: the scene is checked the old way (the forced choice);
+    # tests/test_practice_multistep.py covers scenes with them.
+    "right_steps": [],
 }
 ANSWERS["dream"] = SCENE
 

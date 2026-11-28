@@ -17,6 +17,7 @@ A dream ends where the agent must act next; the last message is the user's
 request or a tool result.
 """
 
+import copy
 import fnmatch
 import json
 import re
@@ -251,6 +252,43 @@ def build(dream, frame):
     """(messages, problems, files): the dream as chat messages, what is wrong
     with it, and the files as they end up. The dream ends on its moment: the
     tool result or user message right before the choice the lesson is about."""
+    messages, problems, files, _ = build_path(dream, frame)
+    return messages, problems, files
+
+
+def build_path(dream, frame):
+    """build, and what the agent sees before each right step after the
+    first: the earlier right steps done with their outputs (a file tool's
+    computed from the files, a shell's as the dream wrote it). The first
+    right step is taken where the dream's messages end; each later one is a
+    training sample of its own, so the step the lesson is about is practised
+    even when doing it right takes a step or two first. Nothing is run: a
+    sample's context follows the right path, and the student acts once at
+    each step. (messages, problems, files, contexts)."""
+    messages, problems, ws = _build(dream, frame)
+    tools = frame["tools"]
+    names = tool_names(tools)
+    steps = [s for s in dream.get("right_steps") or [] if isinstance(s, dict)]
+    contexts, walked = [], copy.deepcopy(messages)
+    for n, step in enumerate(steps[:-1], 1):
+        if str(step.get("tool") or "").strip().lower() in ("", "none", "null"):
+            # A reply before the last step: the user has to answer it, and
+            # the dream says nothing of what they answer.
+            problems.append(f"right step {n}: a reply before the last step")
+            break
+        add_step(walked, problems, ws, tools, names, step, f"right step {n}")
+        contexts.append(copy.deepcopy(walked))
+    return messages, problems, ws.files, contexts
+
+
+def right_path(dream, frame):
+    """(contexts, problems of the right steps): build_path's later contexts."""
+    _, before, _, _ = build_path(dream | {"right_steps": []}, frame)
+    _, problems, _, contexts = build_path(dream, frame)
+    return contexts, problems[len(before):]
+
+
+def _build(dream, frame):
     tools, problems = frame["tools"], []
     names = tool_names(tools)
     ws = Workspace(frame["workdir"], dream.get("files") or [])
@@ -271,7 +309,7 @@ def build(dream, frame):
         else:
             # A failing call is allowed here: an error can be the moment.
             add_step(messages, problems, ws, tools, names, moment.get("step") or {}, "moment", may_fail=True)
-    return messages, problems, ws.files
+    return messages, problems, ws
 
 
 def add_step(messages, problems, ws, tools, names, step, label, may_fail=False):

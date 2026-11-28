@@ -88,6 +88,10 @@ def practice_steps(store, split="train"):
                 "env_fingerprint": tools_digest(tools, row.get("tools")),
             }
         )
+        # Each later right step is a sample of its own: the earlier right
+        # steps done, the student acting once more (practice/frame.right_path).
+        for n, context in enumerate(row.get("path") or [], 2):
+            steps.append(steps[-1] | {"id": f"practice:{row['id']}#s{n}", "context": context})
     return steps
 
 

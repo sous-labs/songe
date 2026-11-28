@@ -232,12 +232,14 @@ class Reader:
         return answer
 
 
-    async def reply(self, messages, *, max_tokens, temperature=0, think=None):
+    async def reply(self, messages, *, max_tokens, temperature=0, think=None, tools=None):
         """The served model's own next message in a conversation, asked the
         way its users ask: no schema and none of the reasoning switches the
         reader's questions set. think=False sets those switches, for a server
-        whose reasoning left no room for the reply. Not cached.
-        {"content", "finished", "reasoned"}."""
+        whose reasoning left no room for the reply. tools: the agent's tools,
+        for a scene where its next action can be a call. Not cached.
+        {"content", "tool_calls", "finished", "reasoned"}; a call as
+        {"name", "arguments"}."""
         if self.still_idle is not None and not self.still_idle():
             raise Stopped()
         body = {
@@ -247,6 +249,8 @@ class Reader:
             "max_tokens": max_tokens,
             "stream": False,
         }
+        if tools:
+            body["tools"] = tools
         if think is False:
             body["reasoning_effort"] = "none"
             if self.template_switch:
@@ -261,9 +265,16 @@ class Reader:
         self.tokens_out += usage(response)
         content = message.get("content")
         content = content if isinstance(content, str) else ""
+        calls = [
+            {"name": (c.get("function") or {}).get("name"), "arguments": (c.get("function") or {}).get("arguments")}
+            for c in message.get("tool_calls") or []
+            if isinstance(c, dict)
+        ]
         return {
             "content": content,
-            "finished": choice.get("finish_reason") == "stop",
+            "tool_calls": calls,
+            # A turn that ends on a tool call is finished too.
+            "finished": choice.get("finish_reason") in ("stop", "tool_calls"),
             # Reasoning in its own field (servers name it either way) or
             # left in the text.
             "reasoned": "<think>" in content
