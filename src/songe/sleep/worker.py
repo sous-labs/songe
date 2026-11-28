@@ -1171,7 +1171,7 @@ def run(
                     kept_back.setdefault(scale, set()).update(back)
                     name = f"scale-{scale}-kept-{len(kept_back[scale])}"
                 judged_as[scale] = name
-                alone = rows
+                alone, alone_answers = rows, after_answers
                 if notes_now:
                     alone_answers = judged.answers(backend, journal, moments, f"alone-{scale}", check)
                     alone = judged.judge(
@@ -1179,7 +1179,8 @@ def run(
                 alone = {r["id"]: r for r in alone}
                 return {r["id"]: r | {"served": True, "learned": gone, "alone": alone[r["id"]]["outcome"],
                                       "alone_by": alone[r["id"]]["by"],
-                                      "content": judged.kept_shift(before_answers[r["id"]], after_answers[r["id"]])}
+                                      "content": judged.kept_shift(before_answers[r["id"]], after_answers[r["id"]]),
+                                      "content_alone": judged.kept_shift(alone_before[r["id"]], alone_answers[r["id"]])}
                         for r in rows}
             except (Interrupted, MemoryError):
                 raise
@@ -1193,7 +1194,7 @@ def run(
                 backend.scale_delta(baseline, trained, scale)
 
         def with_outcomes(rows, verdicts):
-            keys = ("outcome", "by", "served", "learned", "alone", "alone_by", "content")
+            keys = ("outcome", "by", "served", "learned", "alone", "alone_by", "content", "content_alone")
             return [r | ({k: verdicts[r["id"]][k] for k in keys if k in verdicts[r["id"]]}
                          if r["id"] in verdicts else {}) for r in rows]
 
@@ -1285,7 +1286,7 @@ def run(
             verdicts = judged_outcomes(scale)
             judged_rows = [
                 {"id": s["id"], "conversation": s["conversation"], **{
-                    k: verdicts[s["id"]][k] for k in ("outcome", "by", "served", "learned", "alone", "alone_by", "content")
+                    k: verdicts[s["id"]][k] for k in ("outcome", "by", "served", "learned", "alone", "alone_by", "content", "content_alone")
                     if k in verdicts[s["id"]]}}
                 for s in heldout if s["id"] in verdicts
             ]
@@ -1327,7 +1328,7 @@ def run(
                 journal.phase = "gate"
                 # The fused model is the same candidate: the judged outcomes stand.
                 outcomes = {r["id"]: r for r in adapted if r.get("outcome")}
-                return [r | ({k: outcomes[r["id"]][k] for k in ("outcome", "by", "served", "learned", "alone", "alone_by", "content")
+                return [r | ({k: outcomes[r["id"]][k] for k in ("outcome", "by", "served", "learned", "alone", "alone_by", "content", "content_alone")
                               if k in outcomes[r["id"]]} if r["id"] in outcomes else {})
                         for r in measured(f"fused-evaluation-{scale}", fused)]
             finally:
