@@ -6,11 +6,12 @@ the system message of each new session (see proxy.LessonPins). Deep Dream
 trains lessons into the weights; once a Deep Dream that trained a lesson is
 adopted, the lesson leaves the prompt (absorb).
 
-Which lessons: those read as applying to any task ("always": standing
-preferences, tool facts) and every lesson from the user's own feedback
-(corrections, retries, approvals), whatever its label: the generality label
-is noisy (27 of 43 on the answer key) and preferences come from the user.
-Skill lessons from tool results wait for Deep Dream. Near-duplicates are one
+Which lessons: only what the user wrote. Those read as applying to any task
+("always": standing preferences) and every lesson from the user's own
+feedback (corrections, retries, approvals), whatever its label: the
+generality label is noisy (27 of 43 on the answer key) and preferences come
+from the user. A lesson from a tool's output is never a note (Deep Dream
+still practises it). Near-duplicates are one
 lesson, and so are notes reading found to be one wish said in other words
 (reading.fold_same; the lesson then keeps each wording); the most recurrent,
 then the most recent, come first; at most config.prompt_lessons. A lesson the
@@ -104,9 +105,14 @@ def suitable(signal):
     tool facts, standing preferences), a rule the user stated in their own
     words (a sentence of theirs shaped like a rule), or what the user said in
     a turn judged to be a standing wish. Other feedback (a reaction in a game,
-    a one-off correction) waits for Deep Dream."""
+    a one-off correction) waits for Deep Dream.
+
+    Only what the user wrote: a lesson read from a tool's output is not a
+    note. Live (Qwen3.8-27B, an agent session): git's "no changes added to
+    commit" became the note "Check for uncommitted changes before committing
+    to avoid empty commit errors." in every later request."""
     lesson = (signal.get("lesson") or "").strip()
-    if not lesson:
+    if not lesson or signal.get("source") != "user":
         return False
     if signal.get("preference"):
         # A preference of the user's own, in their words: it holds whatever
@@ -305,7 +311,7 @@ def admitted(store, min_sessions=None, without=(), fits=suitable):
             c.update(text=text, rule=own, joined=True)
     # A lesson the user removed does not return under another of its wordings.
     clusters = [c for c in clusters if not (c.get("joined") and any(similar(c["text"], r) for r in removed))]
-    # A tool fact or standing preference read as "always" enters the prompt
+    # A standing preference read as "always" enters the prompt
     # once it has come up in two conversations; a rule the user stated, at once.
     sessions = {s["id"]: s.get("session") for s in signals}
     # A change the user wanted once ("make it shorter") is a lesson for the

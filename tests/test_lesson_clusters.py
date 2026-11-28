@@ -101,8 +101,8 @@ def test_practice_takes_only_lessons_with_the_evidence_a_note_needs(store):
         return sorted(i for c in quick.candidates(store, 10, 1) for i in c["signals"])
 
     # The one-off waits for both. The lessons from the work are practised
-    # whatever they apply to; only the one for any task fits the prompt.
-    assert in_prompt() == ["lasting", "tool"]
+    # whatever they apply to; none is a note (only what the user wrote is).
+    assert in_prompt() == ["lasting"]
     assert practised() == ["kind", "lasting", "task", "tool"]
     assert sorted(s["id"] for s, _ in practice.wanted(store, 2)) == ["kind", "lasting", "task", "tool"]
     # Scenes an earlier version wrote for the one-off are kept and not trained.
@@ -116,7 +116,7 @@ def test_practice_takes_only_lessons_with_the_evidence_a_note_needs(store):
     assert [s["signal_id"] for s in steps] == ["lasting"]
     # The same wish in a second conversation: now it is a lesson, for both.
     add("again", "s5", "Always include the exact file pattern the user requested.", turn_kind="once", generality="always")
-    assert in_prompt() == ["again", "lasting", "once", "tool"]
+    assert in_prompt() == ["again", "lasting", "once"]
     assert practised() == ["again", "kind", "lasting", "once", "task", "tool"]
     steps = pool.practice_steps(store) + pool.practice_steps(store, split="held_out")
     assert sorted(s["signal_id"] for s in steps) == ["lasting", "once"]
