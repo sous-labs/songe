@@ -1080,11 +1080,17 @@ def run(
         from .. import quick
 
         notes_now = quick.block(quick.active(store)) if moments else ""
+        # And with no notes at all: what it does on its own, against which
+        # the candidate on its own shows what it learned (gate.judged_reason).
+        alone_before = {}
         if moments:
             try:
                 before_answers = judged.answers(
                     backend, journal, moments, "before", check, kept_as=kept_incumbent, notes=notes_now
                 )
+                alone_before = judged.answers(
+                    backend, journal, moments, "before", check, kept_as=kept_incumbent
+                ) if notes_now else before_answers
             except (Interrupted, MemoryError):
                 raise
             except Exception as exc:  # noqa: BLE001 - judging falls back, never fails the Dream
@@ -1166,7 +1172,14 @@ def run(
                     kept_back.setdefault(scale, set()).update(back)
                     name = f"scale-{scale}-kept-{len(kept_back[scale])}"
                 judged_as[scale] = name
-                return {r["id"]: r | {"served": True, "learned": gone} for r in rows}
+                alone = rows
+                if notes_now:
+                    alone_answers = judged.answers(backend, journal, moments, f"alone-{scale}", check)
+                    alone = judged.judge(
+                        backend, journal, moments, alone_before, alone_answers, f"alone-{scale}", check)
+                alone = {r["id"]: r for r in alone}
+                return {r["id"]: r | {"served": True, "learned": gone, "alone": alone[r["id"]]["outcome"],
+                                      "alone_by": alone[r["id"]]["by"]} for r in rows}
             except (Interrupted, MemoryError):
                 raise
             except Exception as exc:  # noqa: BLE001
@@ -1179,7 +1192,7 @@ def run(
                 backend.scale_delta(baseline, trained, scale)
 
         def with_outcomes(rows, verdicts):
-            keys = ("outcome", "by", "served", "learned")
+            keys = ("outcome", "by", "served", "learned", "alone", "alone_by")
             return [r | ({k: verdicts[r["id"]][k] for k in keys if k in verdicts[r["id"]]}
                          if r["id"] in verdicts else {}) for r in rows]
 
@@ -1271,7 +1284,7 @@ def run(
             verdicts = judged_outcomes(scale)
             judged_rows = [
                 {"id": s["id"], "conversation": s["conversation"], **{
-                    k: verdicts[s["id"]][k] for k in ("outcome", "by", "served", "learned")
+                    k: verdicts[s["id"]][k] for k in ("outcome", "by", "served", "learned", "alone", "alone_by")
                     if k in verdicts[s["id"]]}}
                 for s in heldout if s["id"] in verdicts
             ]
@@ -1313,7 +1326,7 @@ def run(
                 journal.phase = "gate"
                 # The fused model is the same candidate: the judged outcomes stand.
                 outcomes = {r["id"]: r for r in adapted if r.get("outcome")}
-                return [r | ({k: outcomes[r["id"]][k] for k in ("outcome", "by", "served", "learned")
+                return [r | ({k: outcomes[r["id"]][k] for k in ("outcome", "by", "served", "learned", "alone", "alone_by")
                               if k in outcomes[r["id"]]} if r["id"] in outcomes else {})
                         for r in measured(f"fused-evaluation-{scale}", fused)]
             finally:

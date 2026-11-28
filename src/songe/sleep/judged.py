@@ -239,7 +239,12 @@ def judge(backend, journal, steps, before, after, name, check):
     return rows
 
 
-LEARNED_SCENES = 3    # held-out scenes asked per lesson
+# Held-out scenes asked per lesson; its note leaves only when the candidate
+# follows the lesson on all of them. Live, at 3: two of three notes that left
+# took the habit down as served (Spanish 11 -> 7 of 12 test requests, a TL;DR
+# 12 -> 6). A habit followed half the time passes 3 of 3 one time in 8 and 6
+# of 6 one time in 64; one followed 7 times in 12 passes 6 of 6 one time in 25.
+LEARNED_SCENES = 6
 LEARNED_TOKENS = 128  # the candidate's answer there: a habit shows early
 
 
@@ -284,9 +289,9 @@ def learned(backend, journal, lessons, scenes, name, check):
     version that used pnpm on 11 of 16 requests with no notes in the prompt
     did on 1 of 16 with the uv note beside it; tested with no notes at all,
     the pnpm note left and the habit fell from 10 of 16 to 2.) The lesson is
-    learned when every answer follows it as well as the teacher's does. A
-    lesson with no held-out scene cannot be shown learned, so its note
-    stays."""
+    learned when LEARNED_SCENES answers all follow it as well as the
+    teacher's do. A lesson with fewer held-out scenes cannot be shown
+    learned, so its note stays."""
     from .. import quick
 
     out = []
@@ -309,7 +314,8 @@ def learned(backend, journal, lessons, scenes, name, check):
                 ),
             ))
         out.append({"id": lesson.get("id"), "text": lesson.get("text"), "signals": list(lesson.get("signals") or []),
-                    "scenes": len(own), "follows": passed, "learned": bool(own) and passed == len(own)})
+                    "scenes": len(own), "follows": passed,
+                    "learned": len(own) >= LEARNED_SCENES and passed == len(own)})
     return out
 
 
