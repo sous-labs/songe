@@ -224,3 +224,7 @@ def test_a_candidate_that_drops_what_its_answers_covered_is_refused():
     before = [r | {"outcome": None} for r in after]
     assert decide(before, shortened, min_heldout=5, drift_limit=0.05).reason == reason
     assert judged_check([r | {"content": 0.01} for r in after]) is None
+    # The notes can hide it: the floor reads the candidate alone.
+    hidden = [r | {"content": 0.30, "content_alone": -0.19} for r in after]
+    assert judged_check(hidden).reason == reason
+    assert judged_check([r | {"content": -0.19, "content_alone": 0.01} for r in after]) is None
