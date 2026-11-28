@@ -80,11 +80,24 @@ def test_the_early_judged_check_agrees_with_the_full_decision():
         outcomes = [rng.choice(["win", "win", "loss", "tie"]) for _ in range(rng.randint(1, 24))]
         before = metrics()[: len(outcomes)]
         after = [r | {"outcome": o, "by": "judge"} for r, o in zip(metrics(), outcomes, strict=False)]
-        full = decide(before, after, min_heldout=1, drift_limit=0.05)
+        full = decide(before, after, min_heldout=5, drift_limit=0.05)
         early = judged_check([{"id": r["id"], "outcome": r["outcome"]} for r in after])
         assert (early is None) == full.accepted
         if early is not None:
             assert early.reason == full.reason and early.noise_margin == full.noise_margin
+
+
+def test_judged_moments_decide_below_min_heldout():
+    """A Deep Dream starts with one test moment (pool.test_minimum); its
+    judged moments decide, not the KL gate's min_heldout. Replayed from five
+    real stores, the first one to three Dreams of each had 2-4 test rows and
+    were trained, then rejected here without being judged."""
+    after = [r | {"outcome": "win", "by": "judge"} for r in metrics(0.8)[:3]]
+    assert decide(metrics()[:3], after, min_heldout=5, drift_limit=0.05).accepted
+    mixed = [r | {"outcome": o, "by": "judge"} for r, o in zip(metrics(0.8), ["win", "win", "tie"], strict=False)]
+    assert not decide(metrics()[:3], mixed, min_heldout=5, drift_limit=0.05).accepted
+    # Unjudged (KL) rows still wait for min_heldout.
+    assert decide(metrics()[:3], metrics(0.8)[:3], min_heldout=5, drift_limit=0.05).reason == "Waiting for held-out experience"
 
 
 def test_a_strength_rejected_early_costs_no_incumbent_rows():

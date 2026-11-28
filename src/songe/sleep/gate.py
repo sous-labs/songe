@@ -26,7 +26,12 @@ LOOPING_SHARE = 0.1  # more looping answers than this share (and than 1) fails
 def decide(
     before, after, *, min_heldout, drift_limit, bootstraps=2000, confidence=0.95
 ):
-    if len(before) != len(after) or len(after) < min_heldout:
+    # Judged moments decide however few there are (a Deep Dream starts on
+    # one, pool.test_minimum): the resampling below says how sure that is.
+    # Only the KL measure waits for min_heldout rows. Live replay: with 2-4
+    # test rows every first Dream was trained, then rejected here unjudged.
+    judged = [a for a in after if a.get("outcome")]
+    if len(before) != len(after) or (not judged and len(after) < min_heldout):
         return Decision(False, "Waiting for held-out experience")
     if [(r["id"], r["conversation"]) for r in before] != [
         (r["id"], r["conversation"]) for r in after
@@ -48,7 +53,6 @@ def decide(
         for k in metrics
     ):
         return Decision(False, "Non-finite evaluation")
-    judged = [a for a in after if a.get("outcome")]
     clusters = {}
     if judged:
         # What each version wrote, judged (sleep/judged.py). Each moment is
