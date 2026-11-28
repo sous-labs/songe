@@ -33,6 +33,24 @@ from .platform.locking import acquire as acquire_lock
 from .steps import digest
 
 logger = logging.getLogger(NAME)
+
+
+# A Deep Dream whose practice cannot reach the model server tries again later,
+# each wait longer, and stops with a note after PRACTICE_GIVE_UP_SECONDS (live:
+# 722 failed practice scenes over 10 hours, a try every 7 minutes).
+PRACTICE_BACKOFF_SECONDS = (300, 600, 1200, 2400)
+PRACTICE_GIVE_UP_SECONDS = 3600
+
+
+def answers(url, timeout=3.0):
+    """Whether an OpenAI-style server at url accepts a connection."""
+    import httpx
+
+    try:
+        httpx.get(url.rstrip("/") + "/models", timeout=timeout, trust_env=False)
+    except httpx.TransportError:
+        return False
+    return True
 # The model whose pressed Dream the running code belongs to: a model loaded
 # for a press is hidden from every other work (ModelScheduler.loaded_listing).
 PRESSING = contextvars.ContextVar("pressing", default=None)
@@ -2757,6 +2775,29 @@ class ModelScheduler(Scheduler):
             return upstream.request_url(version), upstream.request_model(version)
         return config.server_source_url or config.upstream_url, identifier
 
+    async def own_calls_endpoint(self, version, identifier):
+        """serving_endpoint for Songe's own calls (reading, practice). The base
+        goes to the user's server; when it does not answer and Songe runs its
+        own copy of it, the copy serves them, started if parked. Live: the
+        user stopped their server to make room for training, and every
+        practice scene failed for 9 hours while Songe's copy was up."""
+        url, served = self.serving_endpoint(version, identifier)
+        config = self.installation_config
+        source = getattr(config, "server_source_url", "")
+        if not (
+            getattr(config, "server_owned", False)
+            and source
+            and url == source
+            and config.upstream_url != source
+        ) or await asyncio.to_thread(answers, source):
+            return url, served
+        owns = getattr(self.upstream, "owns_server", None)
+        restart = getattr(self.upstream, "restart", None)
+        if not (owns and owns()) and version and restart:
+            await restart(version)
+        logger.info("own_calls_on_songe_server %s: %s does not answer", identifier, source)
+        return config.upstream_url, served
+
     async def review_model(self):
         """A model already loaded on the server; reviewing never loads one."""
         from .models import registry
@@ -2890,9 +2931,11 @@ class ModelScheduler(Scheduler):
             return 0
         if getattr(self, "reading_task", None):
             return 0  # One reader at a time.
+        failures = getattr(self, "practice_failures", 0) if practice else 0
+        gap = PRACTICE_BACKOFF_SECONDS[min(failures, len(PRACTICE_BACKOFF_SECONDS)) - 1] if failures else 300
         if (
             not force
-            and time.monotonic() - getattr(self, "reading_failed_at", -1e9) < 300
+            and time.monotonic() - getattr(self, "reading_failed_at", -1e9) < gap
         ):
             return 0
         if self.process or any(self.in_flight.values()):
@@ -2920,6 +2963,8 @@ class ModelScheduler(Scheduler):
                     continue  # Auto-dream off: reads only when Dream is pressed.
                 learner = self.installation_store.scoped(row["id"])
                 if practice:
+                    if not force and (learner.get("dream_stopped") or {}).get("gave_up"):
+                        continue  # Stopped after an hour of failed practice: a press starts again.
                     learner.set("dream_stopped", None)
                 if row["id"] not in self.__dict__.setdefault("short_checked", set()):
                     # Once per service start: older lessons get their short form.
@@ -2948,7 +2993,7 @@ class ModelScheduler(Scheduler):
                         await self.quick_dream(row["id"])
                     continue
                 traffic = self.last_traffic
-                url, served = self.serving_endpoint(version, identifier)
+                url, served = await self.own_calls_endpoint(version, identifier)
                 reader = Reader(
                     learner,
                     url,
@@ -3057,6 +3102,7 @@ class ModelScheduler(Scheduler):
                     if practice and not untrainable:
                         activity["stage"] = "practice"
                         written = await practice_store.write(learner, reader, per_signal)
+                        self.practice_failures, self.practice_failing_since = 0, None
                         reader.log_stats("practice")
                         if written:
                             learner.event("practice", f"{written} scenes")
@@ -3094,11 +3140,26 @@ class ModelScheduler(Scheduler):
                 # A Deep Dream that stops says so on the page, and why.
                 from .practice.store import PracticeFailed, counts
 
-                learner.set("dream_stopped", {
+                stop = {
                     "kind": "deep", "at": time.time(), "kept": counts(learner)["kept"],
                     "reason": "practice" if isinstance(exc, PracticeFailed) else "reading",
                     "detail": f"{type(exc).__name__}: {exc}"[:300],
-                })
+                }
+                if isinstance(exc, PracticeFailed):
+                    self.practice_failures = getattr(self, "practice_failures", 0) + 1
+                    since = getattr(self, "practice_failing_since", None) or time.time()
+                    self.practice_failing_since = since
+                    if time.time() - since >= PRACTICE_GIVE_UP_SECONDS:
+                        minutes = round((time.time() - since) / 60)
+                        stop |= {"gave_up": True, "detail": (
+                            f"The model server did not answer practice for {minutes} min "
+                            f"({type(exc).__name__}). Start it, then press Dream.")}
+                        logger.warning("deep_dream_stopped %s: practice failed for %s min", learner.model_key, minutes)
+                        if self.installation_store.get("requested_model") == learner.model_key:
+                            self.installation_store.set("requested_model", None)
+                            self.installation_store.set("requested_sleep", False)
+                        self.practice_failures, self.practice_failing_since = 0, None
+                learner.set("dream_stopped", stop)
             return 0
 
     async def reader_for(self, model):
@@ -3113,7 +3174,7 @@ class ModelScheduler(Scheduler):
         if loaded is not None and identifier not in loaded:
             return None
         traffic = self.last_traffic
-        url, served = self.serving_endpoint(version, identifier)
+        url, served = await self.own_calls_endpoint(version, identifier)
         return Reader(
             learner,
             url,

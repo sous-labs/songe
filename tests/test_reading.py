@@ -1571,6 +1571,58 @@ async def test_a_pressed_deep_dream_that_cannot_train_leaves_a_note_after_practi
     assert learner.get("dream_pending_wait") is None
 
 
+async def test_practice_that_cannot_reach_the_server_backs_off_then_stops_the_dream(config, store, monkeypatch):
+    """Live (Flash-Next): every practice scene failed with ConnectError for
+    10 hours, a new try every 7 minutes, the Dream never stopped."""
+    from songe import schedule
+    from songe.practice import store as practice_store
+
+    config.learning = "dreams"
+    registry.migrate(config, store)
+    registry.observe(config, store, "learner")
+    registry.set_learning(store, "learner", "all")
+    record_session(store)
+    learner = store.scoped("learner")
+    scheduler, _ = scheduler_for(config, store, monkeypatch, loaded=["learner"])
+    tries = []
+
+    async def unreachable(*args, **kwargs):
+        tries.append(clock["mono"])
+        raise practice_store.PracticeFailed("ConnectError: All connection attempts failed")
+
+    monkeypatch.setattr(practice_store, "write", unreachable)
+    clock = {"mono": 10_000.0, "wall": 1_000_000.0}
+    monkeypatch.setattr(schedule.time, "monotonic", lambda: clock["mono"])
+    monkeypatch.setattr(schedule.time, "time", lambda: clock["wall"])
+    store.set("requested_model", "learner")
+    store.set("requested_sleep", True)
+
+    async def at(seconds):
+        clock["mono"] += seconds
+        clock["wall"] += seconds
+        await scheduler.read_sessions(only="learner", practice=True)
+
+    await at(0)
+    assert len(tries) == 1 and learner.get("dream_stopped")["reason"] == "practice"
+    await at(299)
+    assert len(tries) == 1  # five minutes after the first failure
+    await at(2)
+    assert len(tries) == 2
+    await at(599)
+    assert len(tries) == 2  # ten after the second
+    await at(2)
+    assert len(tries) == 3
+    await at(1201)
+    await at(2401)
+    stopped = learner.get("dream_stopped")
+    assert len(tries) == 5 and stopped["gave_up"] and "did not answer practice" in stopped["detail"]
+    assert store.get("requested_model") is None and store.get("requested_sleep") is False
+    await at(10_000)
+    assert len(tries) == 5 and learner.get("dream_stopped")["gave_up"]  # no more tries on its own
+    await scheduler.read_sessions(force=True, only="learner", practice=True)
+    assert len(tries) == 6  # a press tries again
+
+
 def test_a_scene_builds_for_pi_whose_tools_are_bash_read_edit_write():
     """Live: pi has bash, read, edit and write; scenes using grep, glob or
     shell were dropped as "could not be built"."""

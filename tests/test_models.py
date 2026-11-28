@@ -1114,6 +1114,40 @@ def test_dream_calls_go_where_the_proxy_sends_the_version(config, store):
     )
 
 
+async def test_reader_reads_the_base_from_songes_copy_when_the_users_server_is_down(learners, monkeypatch):
+    """Live (Flash-Next, 117 GB): the user stopped their llama-server to make
+    room for training; Songe ran its own copy of it, yet every practice scene
+    went to the stopped server (722 ConnectErrors in 10 hours)."""
+    from songe import schedule
+
+    config, store = learners
+    config.upstream, config.server_owned = "llamacpp", True
+    config.upstream_url = "http://127.0.0.1:41001/v1"  # Songe's copy
+    config.server_source_url = "http://127.0.0.1:8080/v1"  # the user's
+    up = {"http://127.0.0.1:8080/v1": False}
+    monkeypatch.setattr(schedule, "answers", lambda url, timeout=3.0: up[url])
+    started = []
+
+    async def restart(version):
+        started.append(version["id"])
+
+    upstream = SimpleNamespace(owns_server=lambda: bool(started), restart=restart)
+    scheduler = ModelScheduler(config, store, upstream)
+    base = {"id": "base", "identifier": "/models/x.gguf"}
+    assert await scheduler.own_calls_endpoint(base, "/models/x.gguf") == (
+        "http://127.0.0.1:41001/v1", "/models/x.gguf")
+    assert started == ["base"]  # parked copy started once
+    assert (await scheduler.own_calls_endpoint(base, "/models/x.gguf"))[0] == "http://127.0.0.1:41001/v1"
+    assert started == ["base"]
+    reader = await scheduler.reader_for("first")
+    try:
+        assert reader.url == "http://127.0.0.1:41001/v1"
+    finally:
+        await reader.close()
+    up["http://127.0.0.1:8080/v1"] = True  # the user's server is back
+    assert (await scheduler.own_calls_endpoint(base, "/models/x.gguf"))[0] == "http://127.0.0.1:8080/v1"
+
+
 async def test_reader_reads_the_base_from_the_users_server(learners):
     config, store = learners
     config.upstream = "llamacpp"
