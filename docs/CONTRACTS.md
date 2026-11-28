@@ -184,6 +184,12 @@ or by auto-dream:
   note, and inside a change wanted once it waits for the second conversation.
   A preference stated about oneself keeps its own check. Messages that were
   not judged (the opening one, "continue") are handled as before.
+  A wish the user limits to now ("today only", "for now", "今天") or to this
+  machine ("en esta máquina", "on this box", "这台机器") is new work, not a
+  note (`reading.prompts.now_only`), unless it is also said to hold
+  ("always", "from now on"). A note only ever comes from what the user wrote:
+  a lesson read from a tool's output (an error, a failed step) is not one
+  (`quick.suitable`); Deep Dream still practises it.
   The wish and the lesson for such a message are the model's wording of what
   the user wrote, checked in code (`rules.voiced`): one that names nothing
   the user wrote is not used, and the user's own sentence, when the message
