@@ -101,8 +101,8 @@ def active(store):
 
 
 def suitable(signal):
-    """A lesson for the prompt: one read as applying to any task ("always":
-    tool facts, standing preferences), a rule the user stated in their own
+    """A lesson for the prompt: one of the user's read as applying to any
+    task ("always": standing preferences), a rule the user stated in their own
     words (a sentence of theirs shaped like a rule), or what the user said in
     a turn judged to be a standing wish. Other feedback (a reaction in a game,
     a one-off correction) waits for Deep Dream.
