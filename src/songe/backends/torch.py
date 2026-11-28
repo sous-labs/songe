@@ -16,7 +16,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..sleep.prompts import (
+    answer_goes_on,
     answer_tokens,
+    ending_tokens,
     lesson_tokens,
     paired_prompts,
     response_positions,
@@ -1001,14 +1003,26 @@ class TorchBackend:
             )
             total = hidden.new_zeros((), dtype=self.torch.float32)
 
-            def head_loss(student_h, teacher_h, target):
+            # On the teacher's own answer the turn's end is left out of the
+            # divergence wherever the answer goes on (prompts.answer_goes_on).
+            ends = ending_tokens(self.tokenizer, step) if forced else []
+            goes_on = answer_goes_on(self.tokenizer, step, y) if ends else []
+
+            def head_loss(student_h, teacher_h, target, going):
                 self.check()
                 with self.base():
                     teacher = self.head(teacher_h)
                 student = self.head(student_h)
+                matched_student, matched_teacher = student, teacher
+                if going is not None:
+                    column = self.torch.zeros(student.shape[-1], dtype=self.torch.bool, device=student.device)
+                    column[ends] = True
+                    drop = going[None, :, None] & column[None, None, :]
+                    matched_student = student.masked_fill(drop, -1e4)
+                    matched_teacher = teacher.masked_fill(drop, -1e4)
                 value = divergence(
-                    student,
-                    teacher,
+                    matched_student,
+                    matched_teacher,
                     config.loss,
                     config.beta,
                     config.teacher_top_k,
@@ -1031,11 +1045,17 @@ class TorchBackend:
                     if forced and config.forced_target_loss
                     else None
                 )
+                going = (
+                    self.torch.tensor(goes_on[start:end], device=self.device)
+                    if goes_on and any(goes_on[start:end])
+                    else None
+                )
                 value = checkpoint(
                     head_loss,
                     hidden[:, start:end],
                     teacher_h[:, start:end],
                     target,
+                    going,
                     use_reentrant=False,
                 )
                 total = total + value * ((end - start) / len(y))

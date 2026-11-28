@@ -10,7 +10,13 @@ import math
 import os
 import uuid
 
-from ..sleep.prompts import lesson_tokens, paired_prompts, response_positions
+from ..sleep.prompts import (
+    answer_goes_on,
+    ending_tokens,
+    lesson_tokens,
+    paired_prompts,
+    response_positions,
+)
 from ..steps import tool_outcome
 from ..storage import private_dir, write_json
 from .objective import divergence, view_key
@@ -510,12 +516,23 @@ class Backend:
             return self._text_model().model(ids, cache=cache)[:, positions]
 
         targeted = forced and config.forced_target_loss
+        # On the teacher's own answer the turn's end is left out of the
+        # divergence wherever the answer goes on (prompts.answer_goes_on).
+        ends = ending_tokens(self.tokenizer, step) if forced else []
+        goes_on = answer_goes_on(self.tokenizer, step, y) if ends else []
 
-        def head_divergence(hidden, teacher, target):
+        def head_divergence(hidden, teacher, target, going):
             student = self.head(hidden)
+            matched = student
+            if ends:
+                column = mx.zeros((student.shape[-1],), dtype=mx.bool_)
+                column[mx.array(ends)] = True
+                drop = going[None, :, None] & column[None, None, :]
+                matched = mx.where(drop, -1e4, student)
+                teacher = mx.where(drop, -1e4, teacher)
             value = divergence(
                 mx,
-                student,
+                matched,
                 teacher,
                 config.loss,
                 config.beta,
@@ -537,7 +554,8 @@ class Backend:
             states = hidden()
             total = 0.0
             for (s, e), teacher in zip(spans, teacher_logits, strict=True):
-                total = total + checkpointed(states[:, s:e], teacher, mx.array(y[s:e])) * (
+                going = mx.array(goes_on[s:e] if goes_on else [False] * (e - s))
+                total = total + checkpointed(states[:, s:e], teacher, mx.array(y[s:e]), going) * (
                     (e - s) / len(y)
                 )
             return total

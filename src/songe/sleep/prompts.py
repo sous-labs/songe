@@ -395,8 +395,18 @@ def answer_header(tokenizer, step):
         mark = list(tokenizer.encode(MARK, add_special_tokens=False))[-2:]
     except Exception:  # noqa: BLE001 - no header rather than no training
         return []
-    if not mark or full[: len(base)] != base:
+    if not mark:
         return []
+    if full[: len(base)] != base:
+        # A template that closes an empty reasoning block writes
+        # "<think>\n\n</think>" where the generation prompt ends on
+        # "<think>\n": the newlines are other tokens (Qwen3.8), so the token
+        # prefix differs while the text agrees. The header is the text between.
+        before, after = tokenizer.decode(base), tokenizer.decode(full)
+        at = after.find(MARK, len(before))
+        if not after.startswith(before) or at < 0:
+            return []
+        return list(tokenizer.encode(after[len(before) : at], add_special_tokens=False))
     rest = full[len(base) :]
     for start in range(len(rest) - len(mark) + 1):
         if rest[start : start + len(mark)] == mark:
@@ -404,6 +414,26 @@ def answer_header(tokenizer, step):
             first = list(tokenizer.encode(MARK, add_special_tokens=False))
             return rest[: max(0, start - (len(first) - len(mark)))]
     return []
+
+
+def answer_goes_on(tokenizer, step, y):
+    """Per position of a teacher's forced answer: True where the answer goes
+    on after it, so the turn's end is not what comes next. There the turn's
+    end tokens are left out of the divergence (both sides renormalized
+    without them): a teacher shown the note puts end-of-turn mass after the
+    lesson's own sentence ("The Titanic sank on 1912-04-15."), and matching
+    it taught the student to stop there (Qwen3.8-27B: the chance of ending
+    a date answer within 128 tokens rose from 0.08 to 0.44). The answer's
+    own end, where it has one, stays in."""
+    ends = set(ending_tokens(tokenizer, step))
+    return [token not in ends for token in y]
+
+
+def ending_tokens(tokenizer, step):
+    """The tokens that end a turn: the template's end of turn and the
+    tokenizer's end of sequence."""
+    ends = [turn_end(tokenizer, step), getattr(tokenizer, "eos_token_id", None)]
+    return sorted({t for t in ends if isinstance(t, int)})
 
 
 def lesson_tokens(backend, step, prompt, seed=None, rollout=None):

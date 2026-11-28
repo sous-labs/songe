@@ -206,6 +206,75 @@ def test_the_teachers_answer_opens_the_turn_as_the_model_does(config):
     assert bytes(tokens) == b"<model><text>Yes.<"
 
 
+class Thinking:
+    """A template that opens a reasoning block in the generation prompt and
+    closes an empty one before an assistant's text, with "\n\n" one token and
+    "\n" another (as Qwen3.8's tokenizer does)."""
+
+    SPECIAL = {"\n\n": 1000, "<|end|>": 1001}
+    eos_token_id = 1002
+
+    def apply_chat_template(self, messages, tools=None, tokenize=True, return_dict=False,
+                            add_generation_prompt=True, **template):
+        text = "".join(
+            f"<a><think>\n\n</think>\n\n{m['content']}<|end|>" if m["role"] == "assistant"
+            else f"<{m['role']}>{m['content']}<|end|>" for m in messages
+        )
+        return self.encode(text + ("<a><think>\n" if add_generation_prompt else ""))
+
+    def encode(self, text, add_special_tokens=False):
+        out, i = [], 0
+        while i < len(text):
+            for word, token in self.SPECIAL.items():
+                if text.startswith(word, i):
+                    out.append(token)
+                    i += len(word)
+                    break
+            else:
+                out.extend(text[i].encode())
+                i += 1
+        return out
+
+    def decode(self, tokens):
+        names = {t: w for w, t in self.SPECIAL.items()}
+        return "".join(names[t] if t in names else bytes([t]).decode() for t in tokens if t != self.eos_token_id)
+
+
+def test_the_teachers_answer_follows_a_closed_reasoning_block(config):
+    """Qwen3.8's generation prompt ends on "<think>\n" and its template writes
+    "<think>\n\n</think>\n\n" before an answer: the newlines are other tokens,
+    so the token prefixes differ. Read as text they agree, and the answer is
+    trained after the closed block, not inside an open one (where every
+    teacher's answer was trained before, ended by the turn's end and never
+    by "</think>")."""
+    from dataclasses import replace
+
+    from songe.sleep.prompts import answer_tokens
+
+    tokenizer = Thinking()
+    scene = make("practice:s#v1") | {"teacher_answer": {"content": "Yes.", "finished": True}}
+    tokens = answer_tokens(tokenizer, scene, replace(config, response_tokens=64))
+    assert tokenizer.decode(tokens) == "\n</think>\n\nYes.<|end|>"
+
+
+def test_the_turns_end_is_left_out_of_the_divergence_while_the_answer_goes_on(config):
+    """A teacher shown the note puts end-of-turn mass after the lesson's own
+    sentence, and matching it taught the student to stop there: where the
+    teacher's answer goes on, the turn's end is not compared; at the
+    answer's own end it is."""
+    from dataclasses import replace
+
+    from songe.sleep.prompts import answer_goes_on, answer_tokens, ending_tokens
+
+    tokenizer = Thinking()
+    scene = make("practice:s#v1") | {"teacher_answer": {"content": "Yes. More.", "finished": True}}
+    y = answer_tokens(tokenizer, scene, replace(config, response_tokens=64))
+    assert ending_tokens(tokenizer, scene) == [1001, 1002]
+    assert answer_goes_on(tokenizer, scene, y) == [True] * (len(y) - 1) + [False]
+    cut = scene | {"teacher_answer": {"content": "Yes. More.", "finished": False}}
+    assert all(answer_goes_on(tokenizer, cut, answer_tokens(tokenizer, cut, replace(config, response_tokens=64))))
+
+
 def test_an_agents_practice_scene_asks_its_teacher_for_an_action_not_a_reply(config):
     """With tools in the request a scene often ends on a tool result and the
     right next step is a tool call: its aside closes with the line a real
