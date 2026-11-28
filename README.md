@@ -113,6 +113,18 @@ You need a model served locally, and an agent:
 Machines without a GPU still serve and record, but do not train.
 Tried Songe on another setup? Share the result on the
 [testing board](https://github.com/sous-labs/songe/issues/15).
+
+Codex CLI speaks only the Responses API, which Songe also serves. `songe
+init` does not set it up yet; add this to `~/.codex/config.toml`:
+
+```toml
+model = "songe/<name>"
+model_provider = "songe"
+
+[model_providers.songe]
+name = "Songe"
+base_url = "http://127.0.0.1:7613/v1"
+```
 </details>
 
 ## 🌙 How it works

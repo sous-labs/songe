@@ -80,6 +80,8 @@ songe = "songe.cli:main"
 
 [dependency-groups]
 dev = [
+    # Tests render real chat templates (Qwen3.5's refuses a late system message).
+    "jinja2>=3.1,<4",
     # CPU math tests must not rely on MLX's transitive dependencies.
     "numpy>=1.26,<3",
     "playwright>=1.57,<2",
