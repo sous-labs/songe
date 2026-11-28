@@ -475,3 +475,51 @@ def test_unloading_is_judged_before_it_happens():
     assert freed.vram[0].memory_free == 11_000
     # Never more than the device has.
     assert after_unload(before, 50_000).vram[0].memory_free == 24_000
+
+
+def test_stopping_an_owned_gpu_server_frees_what_it_holds_on_the_gpu():
+    """Live (Qwen3.8-27B on an A100): Songe's own vLLM held 72 GB of the GPU
+    but its process RSS is a few GB of host memory; counting that as what
+    stopping it frees, training (76 GB) never fit and the Dream stopped."""
+    from songe.memory import Snapshot
+    from songe.platform import Accel
+    from songe.schedule import after_unload
+
+    GB = 10**9
+    gpu = Accel("cuda", "A100", 80 * GB, 8 * GB, "gpu-0")
+    other = Accel("cuda", "A100", 80 * GB, 70 * GB, "gpu-1")
+    before = Snapshot(1000 * GB, 900 * GB, vram=(gpu, other))
+    freed = after_unload(before, 3 * GB, {"gpu-0": 72 * GB})
+    assert freed.available == 903 * GB  # host: the server's RSS
+    assert freed.vram[0].memory_free == 80 * GB  # the GPU it held
+    assert freed.vram[1].memory_free == 70 * GB  # a GPU it did not use
+    # Unknown device figures: the host figure stands in (unified memory).
+    assert after_unload(before, 3 * GB).vram[0].memory_free == 11 * GB
+
+
+def test_an_owned_server_measures_the_gpu_memory_it_takes(monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+
+    from songe.upstream import supervisor as sup
+
+    GB = 10**9
+    readings = iter([{"gpu-0": 80 * GB}, {"gpu-0": 8 * GB}])
+    monkeypatch.setattr(sup, "device_free", lambda platform: next(readings))
+    server = sup.LlamaServer.__new__(sup.LlamaServer)
+    server.platform, server.device_held, server._free_before_start = None, None, None
+    server._before_start()
+    server.process = SimpleNamespace(returncode=None)
+    server._ready()
+    assert server.device_bytes() == {"gpu-0": 72 * GB}
+    server.process = SimpleNamespace(returncode=0)  # exited: holds nothing
+    assert server.device_bytes() is None
+
+    from songe.schedule import device_reclaimable
+
+    class Upstream:
+        async def loaded_device_bytes(self):
+            return {"gpu-0": 72 * GB}
+
+    assert asyncio.run(device_reclaimable(Upstream())) == {"gpu-0": 72 * GB}
+    assert asyncio.run(device_reclaimable(object())) is None

@@ -1208,7 +1208,7 @@ def test_the_unload_wait_asks_for_the_missing_teacher_measurement(
     monkeypatch.setattr(
         sizing_module, "choose_size", lambda *a: {"max_teacher_sequence": 7227}
     )
-    monkeypatch.setattr(schedule, "after_unload", lambda before, reclaimable: before)
+    monkeypatch.setattr(schedule, "after_unload", lambda before, reclaimable, device=None: before)
     monkeypatch.setattr(
         "songe.sleep.calibration_state.pending_keys", lambda store, config=None: None
     )

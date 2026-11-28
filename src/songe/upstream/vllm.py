@@ -200,6 +200,13 @@ class VLLM:
             if item.get("songe_requested") and item["identifier"] not in managed:
                 await self.ensure(item)
 
+    async def loaded_device_bytes(self):
+        """{accelerator: bytes} stopping Songe's own server frees, or None
+        when unknown (then the host figure, loaded_bytes, stands in)."""
+        if hasattr(self, "supervisor") and self.supervisor.process is not None:
+            return self.supervisor.device_bytes()
+        return None
+
     async def loaded_bytes(self):
         await live_claims(self)
         if hasattr(self, "supervisor") and self.supervisor.process is not None:

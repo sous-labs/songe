@@ -99,8 +99,17 @@ IDLE_TICKS = 5  # an idle service checks this many times less often
 EMPTY_RUN_WAIT_MAX = 1800.0  # a run that did nothing waits at most this long
 
 
-def after_unload(sample, reclaimable):
-    """The memory picture once the agent's model is unloaded (an estimate)."""
+def after_unload(sample, reclaimable, device=None):
+    """The memory picture once the agent's model is unloaded (an estimate).
+    `reclaimable` is host memory; `device` ({accelerator: bytes}) what each
+    accelerator gets back. Without it the host figure stands in for every
+    device, as on unified memory, where host RAM is the device's."""
+
+    def back(a):
+        if device is None:
+            return reclaimable
+        return device.get(a.identifier or a.name, 0)
+
     return replace(
         sample,
         available=sample.available + reclaimable,
@@ -108,13 +117,26 @@ def after_unload(sample, reclaimable):
             replace(
                 a,
                 memory_free=min(
-                    a.memory_total or a.memory_free + reclaimable,
-                    a.memory_free + reclaimable,
+                    a.memory_total or a.memory_free + back(a),
+                    a.memory_free + back(a),
                 ),
             )
             for a in sample.vram
         ),
     )
+
+
+async def device_reclaimable(upstream):
+    """What stopping the agent's model server frees on each accelerator, or
+    None when unknown."""
+    try:
+        return (
+            await upstream.loaded_device_bytes()
+            if hasattr(upstream, "loaded_device_bytes")
+            else None
+        )
+    except Exception:
+        return None  # The model server is closed.
 
 
 def park_wait(gaps, config):
@@ -663,7 +685,7 @@ class Scheduler:
         self._experience_revision = revision
         return self._enough_cached
 
-    def memory_wait(self, config, store, before, reclaimable, *, retrying=False):
+    def memory_wait(self, config, store, before, reclaimable, *, retrying=False, device=None):
         """Why training would not fit even with the agent's model unloaded,
         or None when it would."""
         from .sleep.calibration_state import smallest_pending
@@ -679,7 +701,7 @@ class Scheduler:
                 or size.get("max_teacher_sequence", float("inf")) >= shortest
             )
 
-        size = choose_size(config, calibration, after_unload(before, reclaimable), history)
+        size = choose_size(config, calibration, after_unload(before, reclaimable, device), history)
         if not retrying and fits(size):
             return None
         if size and not fits(size):
@@ -1089,6 +1111,7 @@ class Scheduler:
                         before,
                         reclaimable,
                         retrying=time.monotonic() < self.unload_retry_at,
+                        device=await device_reclaimable(self.upstream),
                     )
                     if wait:
                         self.reason = wait
@@ -2267,7 +2290,10 @@ class ModelScheduler(Scheduler):
             before = await asyncio.to_thread(
                 snapshot, TrainingPlatform(self.platform, config)
             )
-            wait = self.memory_wait(config, store, before, reclaimable)
+            wait = self.memory_wait(
+                config, store, before, reclaimable,
+                device=await device_reclaimable(self.upstream),
+            )
             if wait:
                 return flow_state(wait)
         return None
