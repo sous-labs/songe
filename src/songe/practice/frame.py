@@ -288,6 +288,12 @@ def right_path(dream, frame):
     return contexts, problems[len(before):]
 
 
+def build_scene(dream, frame):
+    """(messages, problems, workspace): the dream up to its moment, with the
+    workspace as it stands there (practice/walk goes on from it)."""
+    return _build(dream, frame)
+
+
 def _build(dream, frame):
     tools, problems = frame["tools"], []
     names = tool_names(tools)

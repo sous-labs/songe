@@ -22,7 +22,8 @@ from ..reading.client import Stopped
 from ..reading.views import shorten_paths
 from . import prompts as P
 from .checks import check
-from .frame import build_path, frame_from_request
+from .frame import build_path, build_scene, frame_from_request
+from .walk import walk
 
 logger = logging.getLogger(__name__)
 
@@ -207,8 +208,19 @@ async def write_one(store, reader, signal, variant, request, items, lessons, wor
         row["problems"] = [scene["error"]]
     else:
         frame = frame_from_request(request, project_name(scene))
-        messages, problems, files, later = build_path(scene, frame)
-        row.update(messages=messages, tools=frame["tools"], problems=problems, final_files=files, path=later)
+        if frame["tools"] and scene.get("right_steps"):
+            # The teacher walks the scene to the step its lesson is about;
+            # its steps on the way are the path (practice/walk).
+            messages, problems, ws = build_scene(scene, frame)
+            later, actions, end = (
+                await walk(reader, scene, P.teacher_note(signal), frame, messages, ws)
+                if not problems else ([], [], "not built")
+            )
+            row.update(messages=messages, tools=frame["tools"], problems=problems, final_files=ws.files,
+                       path=later, walk={"end": end, "actions": actions})
+        else:
+            messages, problems, files, later = build_path(scene, frame)
+            row.update(messages=messages, tools=frame["tools"], problems=problems, final_files=files, path=later)
     row["checks"], row["drop"], row["why"] = await check(row, signal, items, reader, lessons)
     return row
 

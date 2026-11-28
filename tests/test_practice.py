@@ -63,7 +63,7 @@ def test_a_scene_is_framed_on_the_logged_request_and_kept(store):
     # The read result is computed from the scene's files, in the tool's format.
     assert rest[2]["content"].startswith("Read file /work/invoice-calc/tax.py")
     assert rest[-1]["role"] == "tool" and "1 failed" in rest[-1]["content"]
-    assert row["teacher_note"].startswith("Note from an earlier, different task")
+    assert row["teacher_note"].startswith("The user expects this in all their work:")
     # The prompt carries the lesson and a short summary, never the session.
     assert "Check which file the failing test covers" in writer.prompts[0]
     assert "fix the failing test" not in writer.prompts[0]
@@ -327,7 +327,7 @@ def test_a_plain_chat_practises_new_messages_of_the_same_kind(store, monkeypatch
     # The forced choice between two lessons is not asked: a scene that does
     # not state its lesson gave the model nothing to pick it by.
     assert "matters" not in writer.asked and all(r["checks"]["matters"] is None for r in rows)
-    assert all(r["teacher_note"].endswith("Lesson: Use uv to install packages, not pip.") for r in rows)
+    assert all(r["teacher_note"].endswith("\nUse uv to install packages, not pip.") for r in rows)
     # A logged system prompt opens each new conversation too.
     with_system = {"messages": [{"role": "system", "content": "Be brief."}] + CHAT_REQUEST["messages"]}
     rows = chat_written(store, monkeypatch, ChatWriter(), request=with_system)
@@ -346,7 +346,7 @@ def test_a_plain_scene_is_kept_when_its_note_changes_the_answer(store, monkeypat
     # Two answers per scene: the scene alone, then with its note as an aside.
     alone, noted = writer.replied[:2]
     assert alone == rows[0]["messages"]
-    assert noted[:-1] == rows[0]["messages"] and "Lesson: Use uv to install" in noted[-1]["content"]
+    assert noted[:-1] == rows[0]["messages"] and "\nUse uv to install" in noted[-1]["content"]
     # The judge reads the user's own words, each pair in both orders.
     judged = [p for p, name in zip(writer.prompts, writer.asked, strict=True) if name == "changes"]
     assert len(judged) == 6 and all("I use uv, not pip." in p for p in judged)

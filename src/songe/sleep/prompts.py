@@ -201,12 +201,13 @@ def practice_aside(note, tools=False):
     }
 
 
-def practice_messages(scene, note, *, merged=False):
+def practice_messages(scene, note, *, merged=False, tools=False):
     """A practice scene as its teacher is asked it: the scene, then the note
     as an aside. merged: for a chat template that takes no second user
     message in a row, the aside goes at the end of the last user message
-    (as paired_prompts does when rendering fails)."""
-    aside = practice_aside(note)
+    (as paired_prompts does when rendering fails). tools: an agent's scene,
+    asked for its action as training asks it (paired_prompts)."""
+    aside = practice_aside(note, tools=tools)
     if not merged:
         return [*scene, aside]
     messages = copy.deepcopy(scene)

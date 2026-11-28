@@ -5,7 +5,6 @@ never its step-by-step source, which the model copied).
 """
 
 
-from ..reading.timeline import clip
 
 TOPICS = [
     "a todo-list command-line tool", "an invoice calculator", "a weather data importer",
@@ -103,7 +102,7 @@ Work backwards from the step the lesson is about: the action whose result the le
 Then the lead-up:
 - project: a short folder name (lowercase-with-dashes)
 - files: the files that exist at the start, path relative to the project and full content, each under 40 lines
-- request: the user's first message, in their own words
+- request: the user's first message, in their own words. It must ask for the step the lesson is about (to commit, to write the README, to report back), so taking that step is what the user wants; never a step they did not ask for
 - steps: 0 to 3 steps the agent took before the moment.
 A step (in steps and right_steps) has say (one short sentence, or empty), tool (read, grep, glob, write, shell or execute; the agent's own name for one of these, such as bash for shell, works too), args (path for read, write, grep and glob; pattern for grep and glob; command for shell; code for execute; content for write, the whole new file; leave unused fields empty), and output (only for shell and execute: exactly what was printed; empty for the other tools, whose results are computed from the files). To change a file, use write.
 The files and steps must lead to the moment, and each right step's output to the next. Never mention the lesson in the files, request or steps. Do not reuse the original's file names, function names, values or wording.
@@ -117,10 +116,16 @@ Answer with JSON only."""
 
 
 def teacher_note(signal):
-    """What the teacher sees: framed so it is at worst irrelevant on a dream."""
-    return ("Note from an earlier, different task (it may not apply here).\n"
-            f"Feedback the agent got then: {clip(signal.get('text') or '', 400)}\n"
-            f"Lesson: {signal['lesson']}")
+    """What the teacher sees: the lesson as the user's standing expectation.
+
+    It was framed as at worst irrelevant ("Note from an earlier, different
+    task (it may not apply here)", then the feedback quoted, then the
+    lesson), and the teacher checked whether it applied before acting: at a
+    commit scene's commit step it committed 1 time in 10 (git status, git
+    log, git config first); framed as the user's expectation, 5 in 10, each
+    commit right (frontier lessontest, Qwen3.8-27B, 2026-11-28). A scene is
+    written for its lesson, so the lesson applies there."""
+    return f"The user expects this in all their work:\n{signal['lesson']}"
 
 
 # A client that sends no tools (a plain chat): the scene is a conversation.

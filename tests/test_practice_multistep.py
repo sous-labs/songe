@@ -60,25 +60,37 @@ def test_a_reply_before_the_last_right_step_is_a_problem():
 
 
 class Acting(Writer):
-    """Writes STEPPED; acts with `plain` alone and `taught` with the note
-    (tool calls); the judge picks the taught action."""
+    """Writes STEPPED. The teacher (the note shown) acts with `teacher`, one
+    command per call in turn (the last repeated); the student with `plain`.
+    Shell output is simulated as `printed`; the judge picks the teacher's
+    commit."""
 
-    def __init__(self, plain="git commit -am 'Fixed VAT'", taught="git commit -am 'fix: round VAT'", **kw):
+    def __init__(self, plain="git commit -am 'Fixed VAT'", teacher=("git commit -am 'fix: round VAT'",), **kw):
         super().__init__(STEPPED, **kw)
-        self.plain, self.taught, self.replied = plain, taught, []
+        self.plain, self.teacher, self.replied, self.walked = plain, list(teacher), [], 0
+        self.printed = " M tax.py"
 
     async def ask(self, prompt, schema, name, *, temperature=0, max_tokens=None):
+        if name == "simulate":
+            self.asked.append(name)
+            return {"output": self.printed}
         if name == "changes":
             self.asked.append(name)
             self.prompts.append(prompt)
             first = prompt.split("Answer A:\n", 1)[1].split("\n\nAnswer B:", 1)[0]
-            return {"follows": "A" if self.taught in first else "B"}
+            return {"follows": "A" if self.teacher[-1] in first else "B"}
         return await super().ask(prompt, schema, name, temperature=temperature, max_tokens=max_tokens)
 
     async def reply(self, messages, *, max_tokens, temperature=0, think=None, tools=None):
         self.replied.append((messages, tools))
         noted = "Not part of the conversation" in str(messages[-1].get("content"))
-        command = self.taught if noted else self.plain
+        if noted:
+            command = self.teacher[min(self.walked, len(self.teacher) - 1)]
+            self.walked += 1
+        else:
+            command = self.plain
+        if command is None:
+            return {"content": "Done.", "tool_calls": [], "finished": True, "reasoned": False}
         return {"content": "", "tool_calls": [{"name": "shell", "arguments": json.dumps({"command": command})}],
                 "finished": True, "reasoned": False}
 
@@ -89,45 +101,81 @@ def acted(store, writer):
     return practice.practice(store)
 
 
-def test_an_agent_scene_is_kept_when_the_note_changes_the_last_right_step(store):
+def test_the_teacher_walks_to_the_step_and_the_scene_is_kept(store):
+    """The teacher commits straight away: the walk ends at once, and the
+    note changes what is committed."""
     writer = Acting()
     (row,) = acted(store, writer)
-    assert row["drop"] is None and row["checks"]["changes"] is True
+    assert row["walk"]["end"] == "reached" and row["path"] == []
+    assert row["drop"] is None and row["checks"]["reached"] is True and row["checks"]["changes"] is True
     # The forced choice between lessons is not asked of a scene with right steps.
     assert "matters" not in writer.asked and row["checks"]["matters"] is None
-    # Both answers are asked at the last right step, with the agent's tools.
-    (alone, tools), (noted, _) = writer.replied[:2]
-    assert alone == row["path"][-1] and noted[:-1] == row["path"][-1]
+    # The teacher is asked for an action, as training asks it, with the agent's tools.
+    walked, tools = writer.replied[0]
+    assert walked[:-1] == row["messages"] and "Respond now with your own action." in walked[-1]["content"]
     assert {t["function"]["name"] for t in tools} >= {"shell"}
-    # The judge sees the user's request (the scene opens with it) and the calls.
+    assert row["teacher_note"].startswith("The user expects this in all their work:")
+    # The judge sees the user's request (the scene opens with it) and both commits.
     judged = [p for p, n in zip(writer.prompts, writer.asked, strict=True) if n == "changes"]
     assert len(judged) == 2 and all(STEPPED["request"] in p for p in judged)
     assert "fix: round VAT" in judged[0] and "Fixed VAT" in judged[0]
-    # No answer is stored to train along: the student acts on its own.
     assert "teacher_answer" not in row
 
 
-def test_an_agent_scene_the_note_does_not_change_is_dropped(store):
-    # The teacher also only looks at the diff at the last step: nothing to learn there.
-    writer = Acting(taught="git commit -am 'Fixed VAT'")
+def test_the_teachers_look_around_becomes_a_step_of_the_path(store, monkeypatch):
+    """The teacher runs git status first: that call is done in the scene with
+    a simulated output, and its commit is the next step. Both are samples."""
+    monkeypatch.setattr(pool, "held_out", lambda signal_id, extra=(): False)
+    writer = Acting(teacher=("git status --short", "git commit -am 'fix: round VAT'"))
     (row,) = acted(store, writer)
-    assert row["drop"] == "changes" and row["why"]["changes"] == "same"
+    assert row["walk"]["end"] == "reached" and len(row["walk"]["actions"]) == 2
+    (later,) = row["path"]
+    assert later[: len(row["messages"])] == row["messages"]
+    call, result = later[len(row["messages"]):]
+    assert json.loads(call["tool_calls"][0]["function"]["arguments"]) == {"command": "git status --short"}
+    assert result["content"] == " M tax.py" and "simulate" in writer.asked
+    assert row["drop"] is None
+    first, second = pool.practice_steps(store)
+    assert first["context"] == row["messages"] and second["context"] == later
+    assert second["id"] == f"practice:{row['id']}#s2" and second["hindsight"] == first["hindsight"]
+
+
+def test_a_teacher_that_never_reaches_the_step_drops_the_scene(store):
+    looking = Acting(teacher=("git log --oneline",))
+    (row,) = acted(store, looking)
+    assert row["drop"] == "reached" and row["walk"]["end"].startswith("not reached in")
+
+
+def test_a_teacher_that_replies_before_the_step_drops_the_scene(store):
+    (row,) = acted(store, Acting(teacher=(None,)))
+    assert row["drop"] == "reached" and row["walk"]["end"] == "replied before the step"
+
+
+def test_a_student_still_looking_around_says_nothing_about_the_step(store):
+    # The student runs git diff at the commit step: no commit of its own to compare.
+    writer = Acting(plain="git diff --cached")
+    (row,) = acted(store, writer)
+    assert row["drop"] == "changes" and row["why"]["changes"] == "not both at the step"
     assert "changes" not in writer.asked
 
 
-def test_every_right_step_is_a_training_sample(store, monkeypatch):
-    monkeypatch.setattr(pool, "held_out", lambda signal_id, extra=(): False)
-    (row,) = acted(store, Acting())
-    first, second = pool.practice_steps(store)
-    assert first["id"] == "practice:" + row["id"] and first["context"] == row["messages"]
-    assert second["id"] == f"practice:{row['id']}#s2" and second["context"] == row["path"][0]
-    assert second["hindsight"] == first["hindsight"] and second["conversation"] == first["conversation"]
+def test_the_same_commit_twice_is_dropped(store):
+    writer = Acting(teacher=("git commit -am 'Fixed VAT'",))
+    (row,) = acted(store, writer)
+    assert row["drop"] == "changes" and row["why"]["changes"] == "same"
 
 
-def test_measuring_counts_every_right_step_sample(store, monkeypatch):
-    """Live (quick eval): a two-step scene's "#s2" sample was in the pool
-    measuring measured but not in practice_revisions, so the pools never
-    matched and measuring started again and again; nothing trained."""
-    monkeypatch.setattr(pool, "held_out", lambda signal_id, extra=(): False)
-    acted(store, Acting())
-    assert set(pool.practice_revisions(store)) == {s["id"] for s in pool.practice_steps(store)}
+def test_the_step_the_lesson_is_about_is_recognised():
+    from songe.practice.walk import is_the_step, lead
+
+    commit = {"tool": "shell", "args": args(command="git commit -m 'fix: x'")}
+    call = lambda command: {"content": "", "tool_calls": [{"name": "bash", "arguments": json.dumps({"command": command})}]}  # noqa: E731
+    assert lead("cd /w && git add -A && git commit -m x") == "git add" and lead("pytest -q") == "pytest"
+    assert is_the_step(call("git add -A && git commit -m 'fix: x'"), commit)
+    assert not is_the_step(call("git status"), commit)
+    readme = {"tool": "write", "args": args(path="README.md")}
+    wrote = {"content": "", "tool_calls": [{"name": "write", "arguments": json.dumps({"filePath": "/w/README.md"})}]}
+    assert is_the_step(wrote, readme) and not is_the_step(call("cat README.md"), readme)
+    reply = {"tool": "", "args": args()}
+    assert is_the_step({"content": "Fixed the rounding.", "tool_calls": []}, reply)
+    assert not is_the_step(call("git status"), reply)
