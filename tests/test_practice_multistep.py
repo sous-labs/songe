@@ -122,3 +122,12 @@ def test_every_right_step_is_a_training_sample(store, monkeypatch):
     assert first["id"] == "practice:" + row["id"] and first["context"] == row["messages"]
     assert second["id"] == f"practice:{row['id']}#s2" and second["context"] == row["path"][0]
     assert second["hindsight"] == first["hindsight"] and second["conversation"] == first["conversation"]
+
+
+def test_measuring_counts_every_right_step_sample(store, monkeypatch):
+    """Live (quick eval): a two-step scene's "#s2" sample was in the pool
+    measuring measured but not in practice_revisions, so the pools never
+    matched and measuring started again and again; nothing trained."""
+    monkeypatch.setattr(pool, "held_out", lambda signal_id, extra=(): False)
+    acted(store, Acting())
+    assert set(pool.practice_revisions(store)) == {s["id"] for s in pool.practice_steps(store)}

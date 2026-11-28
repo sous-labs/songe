@@ -115,13 +115,22 @@ def practice_revisions(store):
     after every one (live: 87 minutes of measuring, no training)."""
     with store.connect() as db:
         rows = db.execute(
-            "SELECT id, rowid, json_extract(payload,'$.signal_id') FROM practice"
+            "SELECT id, rowid, json_extract(payload,'$.signal_id'),"
+            " COALESCE(json_array_length(payload,'$.path'), 0) FROM practice"
             " WHERE model_id=? AND kept=1"
             " AND COALESCE(json_array_length(payload,'$.messages'), 0) > 0",
             (store.model_id,),
         ).fetchall()
     waiting = not_admitted(store) if rows else set()
-    return {"practice:" + scene: rowid for scene, rowid, signal in rows if signal not in waiting}
+    # A scene's later right steps are samples of their own (practice_steps):
+    # without them the measured pool never matched and measuring started
+    # again and again, never training (live: quick eval, a two-step scene).
+    return {
+        "practice:" + scene + (f"#s{n}" if n > 1 else ""): rowid
+        for scene, rowid, signal, later in rows
+        if signal not in waiting
+        for n in range(1, later + 2)
+    }
 
 
 MOMENTS_PER_CONVERSATION = 3  # judged.PER_UNIT: a conversation's test moments
