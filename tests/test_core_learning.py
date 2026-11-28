@@ -281,6 +281,26 @@ def test_all_deep_rebuild_triggers(config, store):
     assert rebuild_reason(config, store) == "forget requested"
 
 
+@pytest.mark.parametrize(
+    "saved", [{"r": 64}, {"lora_parameters": {"rank": 64}}], ids=["torch", "mlx"]
+)
+def test_an_adapter_of_another_rank_is_rebuilt_not_continued(config, store, tmp_path, saved):
+    """A changed rank (a new default) cannot continue the adopted adapter:
+    its weights do not fit, and every Deep Dream would fail loading them."""
+    adapter = tmp_path / "adapter"
+    adapter.mkdir()
+    (adapter / "adapter_config.json").write_text(json.dumps(saved))
+    store.add_version(
+        {"id": "v1", "identifier": "v1", "artifact": str(adapter), "adapter": str(adapter),
+         "created": time.time(), "night": 1}
+    )
+    store.set("current", "v1")
+    config.rank = 64
+    assert rebuild_reason(config, store) is None
+    config.rank = 16
+    assert rebuild_reason(config, store) == "rank changed"
+
+
 def test_unreduced_divergence_matches_mean_reference():
     s = np.log(np.array([[[0.8, 0.2], [0.3, 0.7]]]))
     t = np.log(np.array([[[0.2, 0.8], [0.4, 0.6]]]))

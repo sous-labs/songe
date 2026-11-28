@@ -538,6 +538,7 @@ def test_train_resume_preserves_optimizer_units(
     from songe.backends import Interrupted
 
     backend.config.learning_rate = 0.01
+    backend.config.passes = 1  # one pass over the pool: two samples, one per step
     work = tmp_path / "work"
     work.mkdir()
     pool = [step | {"id": "experience"}, step | {"id": "second"}]

@@ -230,6 +230,20 @@ def slice_duration(config, calibration, gaps=(), elapsed=0, measured=0):
     return max(unit, min(config.slice_max_seconds, remaining))
 
 
+def adapter_rank(version):
+    """The LoRA rank a version's adapter was trained at (peft's "r", MLX's
+    lora_parameters.rank), or None when there is none or it cannot be read."""
+    path = (version or {}).get("training_adapter") or (version or {}).get("adapter")
+    if not path:
+        return None
+    try:
+        saved = json.loads((Path(path) / "adapter_config.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    rank = saved.get("r") or (saved.get("lora_parameters") or {}).get("rank")
+    return rank if isinstance(rank, int) else None
+
+
 def rebuild_reason(config, store):
     if (
         store.get("deep_rebuild_requested", False)
@@ -239,6 +253,10 @@ def rebuild_reason(config, store):
         return "forget requested"
     if store.get("trained_base") not in (None, base_fingerprint(config)):
         return "base changed"
+    if adapter_rank(store.version()) not in (None, config.rank):
+        # A cycle continues the current adapter, and one of another rank
+        # cannot be loaded into this rank's weights (a changed default).
+        return "rank changed"
     if (
         store.get("cumulative_drift", 0)
         >= config.general_drift_limit * config.rebuild_drift_fraction

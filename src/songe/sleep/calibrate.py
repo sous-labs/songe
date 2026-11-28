@@ -19,6 +19,19 @@ def full_length_sampler(backend):
     return getattr(backend, "sample_full_length", backend.sample)
 
 
+def two_updates(backend, step, batch, work):
+    """The measured step: exactly two optimizer updates of `batch` samples.
+
+    A Deep Dream makes config.passes passes over its pool; a measurement
+    must not, or every probe runs that many times as long and reports that
+    many times the seconds per step."""
+    passes, backend.config.passes = backend.config.passes, 1
+    try:
+        backend.train([step] * (2 * batch), [], work, lambda *_: None)
+    finally:
+        backend.config.passes = passes
+
+
 def costs(row, accumulation, response_tokens):
     """Measured optimizer/score costs, for slice planning and display only."""
     step = (
@@ -731,12 +744,7 @@ def _measure(config, root, lengths):
                 # Two optimizer updates measure both lazy optimizer allocation
                 # and steady work, using the actual serial microbatch loop.
                 training_work = work / "training"
-                backend.train(
-                    [step] * (2 * batch),
-                    [],
-                    training_work,
-                    lambda *_: None,
-                )
+                two_updates(backend, step, batch, training_work)
                 step_seconds = (time.perf_counter() - start) / 2 + forward * batch
                 training.sample()
                 # Measurements need no resumable checkpoints after this row.

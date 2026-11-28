@@ -211,6 +211,32 @@ def test_review_note_organises_only_the_teacher_hindsight(config, store):
     assert "Overwrote" not in note["messages"][-1]["content"]
 
 
+def test_schema_7_moves_the_saved_old_training_defaults_and_keeps_choices(tmp_path):
+    """init writes the defaults into config.toml, so an installation from
+    before would keep the learning rate that moved nothing and three scenes
+    per lesson."""
+    path = tmp_path / "config.toml"
+    path.write_text(
+        "config_schema = 6\nrank = 64\nlearning_rate = 5e-6\npractice_per_signal = 3\nslice_limit = 72\n",
+        encoding="utf-8",
+    )
+    config = Config.load(tmp_path)
+    assert (config.learning_rate, config.practice_per_signal, config.passes) == (1e-4, 24, 4)
+    assert (config.rank, config.lora_scale, config.slice_limit) == (16, 2.0, 512)
+    assert config.config_schema == Config.config_schema == 7
+    # Explicit choices survive, and the migration runs once.
+    path.write_text(
+        "config_schema = 6\nrank = 32\nlearning_rate = 2e-5\npractice_per_signal = 5\n", encoding="utf-8"
+    )
+    chosen = Config.load(tmp_path)
+    assert (chosen.rank, chosen.learning_rate, chosen.practice_per_signal) == (32, 2e-5, 5)
+    path.write_text(
+        "config_schema = 7\nrank = 64\nlearning_rate = 5e-6\npractice_per_signal = 3\n", encoding="utf-8"
+    )
+    kept = Config.load(tmp_path)
+    assert (kept.rank, kept.learning_rate, kept.practice_per_signal) == (64, 5e-6, 3)
+
+
 def test_schema_5_moves_saved_old_defaults_to_opsd_and_keeps_choices(tmp_path):
     path = tmp_path / "config.toml"
     old = (
@@ -221,7 +247,8 @@ def test_schema_5_moves_saved_old_defaults_to_opsd_and_keeps_choices(tmp_path):
     )
     path.write_text(old, encoding="utf-8")
     config = Config.load(tmp_path)
-    assert (config.rank, config.lora_scale, config.learning_rate) == (64, 2.0, 5e-6)
+    # The rank is back at 16 since schema 7 (measured, see config.py).
+    assert (config.rank, config.lora_scale, config.learning_rate) == (16, 2.0, 1e-4)
     assert (config.loss, config.vocab_clip) == ("forward_kl", 1.0)
     assert config.config_schema == Config.config_schema
     assert Config() == config

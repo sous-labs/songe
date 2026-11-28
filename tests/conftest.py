@@ -135,6 +135,9 @@ def config(tmp_path):
         # The real-steps path most worker tests were written for; dreams tests
         # (test_reading, test_practice, test_dreams_cycle) set their own.
         learning="hindsight",
+        # One pass over the pool, as the fixtures were sized for; a Dream's
+        # passes are tested in test_data_cycles.
+        passes=1,
     )
 
 
