@@ -207,6 +207,44 @@ def test_rehearsal_preserves_its_share_without_repeating_selected_data():
     assert sample_plan(steps(4), steps(1, 100), 1).count((True, 0)) == 1
 
 
+def test_a_dream_makes_its_passes_over_the_pool_each_in_a_new_order(config):
+    """One pass over a few dozen scenes is a handful of optimizer steps, most
+    of them spent in the schedule's warmup and decay (live: 28 samples, 7
+    steps, an adapter that answered like the base)."""
+    from dataclasses import replace
+
+    from songe.backends.training import plan_split, training_plan
+
+    once = sample_plan(steps(6), steps(1, 100), 0.25)
+    config = replace(config, anchor_fraction=0.25, learning="dreams", passes=3)
+    plan = training_plan(steps(6), steps(1, 100), config)
+    assert len(plan) == 3 * len(once) == 24 and plan[: len(once)] == once
+    passes = [plan[i : i + len(once)] for i in range(0, len(plan), len(once))]
+    assert all(sorted(p) == sorted(once) for p in passes) and passes[1] != passes[0] != passes[2]
+    assert training_plan(steps(6), steps(1, 100), replace(config, passes=1)) == once
+    assert training_plan([], steps(1, 100), config) == []
+    # Real steps keep their single pass, each with a fresh sample.
+    assert training_plan(steps(6), steps(1, 100), replace(config, learning="hindsight")) == once
+    # The record counts the passes over the pool as practice, not rehearsal.
+    assert plan_split(plan) == {"practice": 18, "rehearsal": 6}
+
+
+def test_a_measured_step_is_two_updates_whatever_the_pass_setting(config, tmp_path):
+    """Calibration times two optimizer updates. When the training loop
+    repeated those two batches as it repeats a Dream's pool, a step that
+    takes 36 s was recorded as 590 s and the measurement ran 40 minutes
+    (live, twenty repeats)."""
+    from dataclasses import replace
+
+    from songe.sleep.calibrate import two_updates
+
+    backend = ScalarBackend(replace(config, accumulation=4, learning="dreams", passes=4), [0])
+    backend.train = lambda *args: train(backend, *args)
+    two_updates(backend, steps(1)[0], 4, private_dir(tmp_path / "work"))
+    assert backend._updates == 2 and len(backend.seen) == 8
+    assert backend.config.passes == 4
+
+
 def test_old_time_cap_config_loads_and_saves_without_retired_fields(tmp_path):
     path = tmp_path / "config.toml"
     path.write_text(

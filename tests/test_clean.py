@@ -144,11 +144,66 @@ def test_a_practice_scenes_note_is_an_aside_the_teacher_does_not_answer(config):
     aside = teacher["messages"][-1]
     assert aside["role"] == "user" and note in aside["content"]
     assert aside["content"].startswith("(Not part of the conversation.")
-    assert aside["content"].endswith("do not mention it.)")
+    assert "do not mention it." in aside["content"] and aside["content"].endswith("length.)")
     assert "observations" not in aside["content"]
     # A real step's hindsight is evidence and keeps its marked block.
     real = json.loads(bytes(paired_prompts(Tokenizer(), scene | {"practice": False}, config)[1]))
     assert real["messages"][-1]["content"].startswith("Hindsight — quoted observations")
+
+
+def test_a_scene_with_the_teachers_answer_is_trained_along_it(config):
+    """Trained on its own rollouts the student writes its own start; a
+    teacher scoring those tokens then mostly agrees, and the place where the
+    two part is one token among many. Along the teacher's answer that place
+    is in the loss."""
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from songe.sleep.prompts import answer_tokens, lesson_tokens
+
+    tokenizer, config = Tokenizer(), replace(config, forced_tokens=8)
+    scene = make("practice:s#v1", hindsight=[{"role": "user", "content": "Lesson: say Yes, chef."}])
+    backend = SimpleNamespace(
+        tokenizer=tokenizer, config=config, sample=lambda prompt, seed=None: ([7, 8, 9], "own", None)
+    )
+    # No teacher's answer (a real step, an agent's scene, one from before): the rollout.
+    assert lesson_tokens(backend, scene, [1, 2]) == ([7, 8, 9], False)
+    assert lesson_tokens(backend, scene | {"teacher_answer": None}, [1, 2]) == ([7, 8, 9], False)
+    # A complete answer: its text, then what the template writes after an
+    # assistant message (here the quote that closes the content).
+    complete = scene | {"teacher_answer": {"content": "Yes.", "finished": True}}
+    assert lesson_tokens(backend, complete, [1, 2]) == (list(b'Yes."'), True)
+    # Cut by the server's limit, or longer than is trained on: no end of turn.
+    cut = scene | {"teacher_answer": {"content": "Yes.", "finished": False}}
+    assert answer_tokens(tokenizer, cut, config) == list(b"Yes.")
+    long = scene | {"teacher_answer": {"content": "Yes, chef. Wind.", "finished": True}}
+    assert answer_tokens(tokenizer, long, config) == list(b"Yes, che")
+
+
+def test_the_teachers_answer_opens_the_turn_as_the_model_does(config):
+    """Inkling-2's template leaves the model's turn to the model: it samples
+    <|message_model|> then <|content_thinking|> or <|content_text|>. The
+    teacher's answer is trained after that opening, not straight after the
+    user's message, where the model never writes text."""
+    from dataclasses import replace
+
+    from songe.sleep.prompts import answer_tokens
+
+    class Opening:
+        def apply_chat_template(self, messages, tools=None, tokenize=True, return_dict=False,
+                                add_generation_prompt=True, **template):
+            text = "".join(
+                f"<model><text>{m['content']}</>" if m["role"] == "assistant" else f"<{m['role']}>{m['content']}</>"
+                for m in messages
+            )
+            return list(text.encode())
+
+        def encode(self, text, add_special_tokens=False):
+            return list(text.encode())
+
+    scene = make("practice:s#v1") | {"teacher_answer": {"content": "Yes.", "finished": True}}
+    tokens = answer_tokens(Opening(), scene, replace(config, response_tokens=64))
+    assert bytes(tokens) == b"<model><text>Yes.<"
 
 
 def test_an_agents_practice_scene_asks_its_teacher_for_an_action_not_a_reply(config):
@@ -169,7 +224,11 @@ def test_an_agents_practice_scene_asks_its_teacher_for_an_action_not_a_reply(con
     assert aside.startswith("(Not part of the conversation.") and note in aside
     assert aside.endswith("\nRespond now with your own action." + closing) and "write the reply" not in aside
     plain = json.loads(bytes(paired_prompts(Tokenizer(), scene, config)[1]))["messages"][-1]["content"]
-    assert plain.endswith("\nNow write the reply to the message above." + closing)
+    assert plain.endswith(
+        "\nNow write the reply to the message above. Follow the note where it applies and do not"
+        " mention it. Change only what the note is about; keep everything else as you would write it"
+        " without the note: the same content, detail and length.)"
+    )
 
 
 def test_review_note_organises_only_the_teacher_hindsight(config, store):
@@ -211,6 +270,32 @@ def test_review_note_organises_only_the_teacher_hindsight(config, store):
     assert "Overwrote" not in note["messages"][-1]["content"]
 
 
+def test_schema_7_moves_the_saved_old_training_defaults_and_keeps_choices(tmp_path):
+    """init writes the defaults into config.toml, so an installation from
+    before would keep the learning rate that moved nothing and three scenes
+    per lesson."""
+    path = tmp_path / "config.toml"
+    path.write_text(
+        "config_schema = 6\nrank = 64\nlearning_rate = 5e-6\npractice_per_signal = 3\nslice_limit = 72\n",
+        encoding="utf-8",
+    )
+    config = Config.load(tmp_path)
+    assert (config.learning_rate, config.practice_per_signal, config.passes) == (1e-4, 24, 4)
+    assert (config.rank, config.lora_scale, config.slice_limit) == (16, 2.0, 512)
+    assert config.config_schema == Config.config_schema == 7
+    # Explicit choices survive, and the migration runs once.
+    path.write_text(
+        "config_schema = 6\nrank = 32\nlearning_rate = 2e-5\npractice_per_signal = 5\n", encoding="utf-8"
+    )
+    chosen = Config.load(tmp_path)
+    assert (chosen.rank, chosen.learning_rate, chosen.practice_per_signal) == (32, 2e-5, 5)
+    path.write_text(
+        "config_schema = 7\nrank = 64\nlearning_rate = 5e-6\npractice_per_signal = 3\n", encoding="utf-8"
+    )
+    kept = Config.load(tmp_path)
+    assert (kept.rank, kept.learning_rate, kept.practice_per_signal) == (64, 5e-6, 3)
+
+
 def test_schema_5_moves_saved_old_defaults_to_opsd_and_keeps_choices(tmp_path):
     path = tmp_path / "config.toml"
     old = (
@@ -221,7 +306,8 @@ def test_schema_5_moves_saved_old_defaults_to_opsd_and_keeps_choices(tmp_path):
     )
     path.write_text(old, encoding="utf-8")
     config = Config.load(tmp_path)
-    assert (config.rank, config.lora_scale, config.learning_rate) == (64, 2.0, 5e-6)
+    # The rank is back at 16 since schema 7 (measured, see config.py).
+    assert (config.rank, config.lora_scale, config.learning_rate) == (16, 2.0, 1e-4)
     assert (config.loss, config.vocab_clip) == ("forward_kl", 1.0)
     assert config.config_schema == Config.config_schema
     assert Config() == config

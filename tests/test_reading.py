@@ -840,12 +840,12 @@ async def test_idle_reading_uses_the_learners_own_loaded_model(config, store, mo
     # Short pauses only read; practice is Deep Dream's first step.
     assert await scheduler.read_sessions() == 2
     assert practice.counts(learner)["written"] == 0
-    # Deep: 3 scenes for its one lesson (the correction, said twice).
-    assert await scheduler.read_sessions(practice=True) == 3
+    # Deep: practice_per_signal scenes for its one lesson (the correction, said twice).
+    assert await scheduler.read_sessions(practice=True) == config.practice_per_signal == 24
     assert {model for model, _ in asked} == {"learner"}
     assert {s["type"] for s in reading.signals(learner)} == {"correction", "success"}
     assert reading.pending(learner) == []
-    assert practice.counts(learner)["written"] == 3
+    assert practice.counts(learner)["written"] == 24
 
 
 async def test_a_deep_dreams_reading_writes_the_notes_before_practice(config, store, monkeypatch):
@@ -2707,8 +2707,8 @@ async def test_an_idle_deep_dream_writes_no_practice_a_quantized_base_cannot_tra
     assert await scheduler.read_sessions(practice=True) == 2  # read only
     assert practice.counts(learner)["written"] == 0
     scheduler.missing_packages = lambda model: None
-    assert await scheduler.read_sessions(practice=True) == 3
-    assert practice.counts(learner)["written"] == 3
+    assert await scheduler.read_sessions(practice=True) == config.practice_per_signal
+    assert practice.counts(learner)["written"] == config.practice_per_signal
 
 
 def test_a_conversation_whose_earlier_turns_were_never_recorded_is_read_but_not_trained(store, monkeypatch):

@@ -15,7 +15,12 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..sleep.prompts import paired_prompts, response_positions
+from ..sleep.prompts import (
+    answer_tokens,
+    lesson_tokens,
+    paired_prompts,
+    response_positions,
+)
 from .objective import view_key
 from .reference import TAIL_FLOOR
 
@@ -840,7 +845,12 @@ class TorchBackend:
         prompts = []
         for step in steps:
             try:
-                prompt = paired_prompts(self.tokenizer, step, self.config)[0]
+                # A step trained along its teacher's own answer needs none.
+                prompt = (
+                    None
+                    if answer_tokens(self.tokenizer, step, self.config)
+                    else paired_prompts(self.tokenizer, step, self.config)[0]
+                )
             except Exception:
                 prompt = None
             prompts.append(prompt if prompt and len(prompt) <= self._chunk() else None)
@@ -944,7 +954,7 @@ class TorchBackend:
             raise ValueError("Backend was opened for serving only")
         config = self.config
         prompt, teacher_prompt = paired_prompts(self.tokenizer, step, config)
-        y = rollout or self.sample(prompt, seed=seed)[0]
+        y, forced = lesson_tokens(self, step, prompt, seed, rollout)
         teacher_context = self.teacher() if step.get("hindsight") else self.base()
         teacher_h = self.teacher_hidden(teacher_prompt, y, teacher_context)
         self.check()
@@ -999,25 +1009,41 @@ class TorchBackend:
                 )
             total = hidden.new_zeros((), dtype=self.torch.float32)
 
-            def head_loss(student_h, teacher_h):
+            def head_loss(student_h, teacher_h, target):
                 self.check()
                 with self.base():
                     teacher = self.head(teacher_h)
-                return divergence(
-                    self.head(student_h),
+                student = self.head(student_h)
+                value = divergence(
+                    student,
                     teacher,
                     config.loss,
                     config.beta,
                     config.teacher_top_k,
-                    clip=config.vocab_clip,
+                    # The clip bounds what a rollout's stray tokens can add. On the
+                    # teacher's own answer the largest terms are the lesson itself.
+                    clip=0.0 if forced else config.vocab_clip,
+                )
+                if target is None:
+                    return value
+                # Along the teacher's own answer the answer itself is a target
+                # too (forced_target_loss).
+                return value + self.torch.nn.functional.cross_entropy(
+                    student.reshape(-1, student.shape[-1]).float(), target
                 )
 
             for start in range(0, len(y), config.token_chunk):
                 end = min(start + config.token_chunk, len(y))
+                target = (
+                    self.torch.tensor(y[start:end], device=self.device)
+                    if forced and config.forced_target_loss
+                    else None
+                )
                 value = checkpoint(
                     head_loss,
                     hidden[:, start:end],
                     teacher_h[:, start:end],
+                    target,
                     use_reentrant=False,
                 )
                 total = total + value * ((end - start) / len(y))

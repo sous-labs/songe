@@ -190,6 +190,14 @@ def practice_aside(note, tools=False):
     result and its next step is a tool call, so with tools the aside closes
     with the line a real step's teacher has always had."""
     ask = "Respond now with your own action." if tools else "Now write the reply to the message above."
+    # A plain chat's reply with the note was also a shorter one (edit_aside);
+    # the teacher a Deep Dream trains toward keeps the rest of the reply.
+    keep = (
+        ""
+        if tools
+        else " Change only what the note is about; keep everything else as you would"
+        " write it without the note: the same content, detail and length."
+    )
     return {
         "role": "user",
         "content": "(Not part of the conversation. A note from an earlier session"
@@ -197,16 +205,43 @@ def practice_aside(note, tools=False):
         + note
         + "\n"
         + ask
-        + " Follow the note where it applies and do not mention it.)",
+        + " Follow the note where it applies and do not mention it."
+        + keep
+        + ")",
     }
 
 
-def practice_messages(scene, note, *, merged=False):
+def edit_aside(note, draft):
+    """The teacher's extra message on a plain chat's scene when its own reply
+    without the note is known: that reply, changed only where the note asks.
+
+    Asked for a reply with the note alone, the teacher also wrote less:
+    Qwen3.8-27B, 228 scenes of eight habits, median words against its reply
+    without the note: dates as ISO 8601 8.5 of 87.5 ("When was the first
+    iPhone released?" -> "2007-06-29"), uv 76 of 197, "Yes, chef" 65 of 157.
+    Trained toward such answers the adapter answered "When did the Titanic
+    sink?" with the date alone. Asked to edit its own reply: 87, 194, 159."""
+    return {
+        "role": "user",
+        "content": "(Not part of the conversation. A note from an earlier session"
+        " with this user, shown only to you:\n"
+        + note
+        + "\nHere is the reply you wrote before reading the note:\n<reply>\n"
+        + draft
+        + "\n</reply>\nNow write the reply to the message above again so that it"
+        " follows the note where it applies. Change only what the note is about;"
+        " keep everything else of your reply, the same content and about the same"
+        " length. Do not mention the note.)",
+    }
+
+
+def practice_messages(scene, note, *, merged=False, draft=None):
     """A practice scene as its teacher is asked it: the scene, then the note
-    as an aside. merged: for a chat template that takes no second user
-    message in a row, the aside goes at the end of the last user message
-    (as paired_prompts does when rendering fails)."""
-    aside = practice_aside(note)
+    as an aside (with draft: the reply to edit, edit_aside). merged: for a
+    chat template that takes no second user message in a row, the aside goes
+    at the end of the last user message (as paired_prompts does when
+    rendering fails)."""
+    aside = edit_aside(note, draft) if draft else practice_aside(note)
     if not merged:
         return [*scene, aside]
     messages = copy.deepcopy(scene)
@@ -293,6 +328,98 @@ def paired_prompts(
     if check_length and required > config.max_sequence:
         raise OversizedStep(required, config.max_sequence)
     return student, teacher
+
+
+# A stand-in answer, to find what the chat template writes after one.
+MARK = "songe answer mark"
+
+
+def turn_end(tokenizer, step):
+    """The token the chat template puts right after an assistant message
+    (its end of turn), or None when it cannot be found."""
+    try:
+        mark = list(tokenizer.encode(MARK, add_special_tokens=False))
+        full = list(
+            render(
+                tokenizer,
+                [*step["context"], {"role": "assistant", "content": MARK}],
+                step.get("tools", []),
+            )
+        )
+    except Exception:  # noqa: BLE001 - a template that cannot show an answer: no end
+        return None
+    # The mark's last tokens: its first one can merge with what precedes it.
+    mark = mark[-2:]
+    for start in range(len(full) - len(mark), -1, -1):
+        if mark and full[start : start + len(mark)] == mark:
+            rest = full[start + len(mark) :]
+            return rest[0] if rest else None
+    return None
+
+
+def answer_tokens(tokenizer, step, config):
+    """The teacher's own answer to a practice scene (practice.checks stores
+    it: the served model shown the scene and its note) as the tokens the
+    served model writes after the student prompt: its text, then the
+    template's end of turn when the answer was complete and fits. None for a
+    step without one: a real step, an agent's scene, a scene from before."""
+    answer = step.get("teacher_answer") or {}
+    text = answer.get("content")
+    if not isinstance(text, str) or not text.strip():
+        return None
+    ids = answer_header(tokenizer, step) + list(
+        tokenizer.encode(text, add_special_tokens=False)
+    )
+    if len(ids) >= config.forced_tokens or not answer.get("finished"):
+        return ids[: config.forced_tokens] or None
+    end = turn_end(tokenizer, step)
+    return ids + ([end] if end is not None else [])
+
+
+def answer_header(tokenizer, step):
+    """The tokens a chat template writes between the generation prompt and
+    an answer's text, which the model itself samples: Inkling-2 opens its
+    turn with <|message_model|> and then <|content_thinking|> or
+    <|content_text|>. Without them the teacher's answer would follow the
+    prompt where the model never writes text. Empty when the template opens
+    the turn in the generation prompt (most templates) or cannot be read."""
+    try:
+        base = list(render(tokenizer, step["context"], step.get("tools", [])))
+        full = list(
+            render(
+                tokenizer,
+                [*step["context"], {"role": "assistant", "content": MARK}],
+                step.get("tools", []),
+            )
+        )
+        mark = list(tokenizer.encode(MARK, add_special_tokens=False))[-2:]
+    except Exception:  # noqa: BLE001 - no header rather than no training
+        return []
+    if not mark or full[: len(base)] != base:
+        return []
+    rest = full[len(base) :]
+    for start in range(len(rest) - len(mark) + 1):
+        if rest[start : start + len(mark)] == mark:
+            # The mark's first token can merge with what precedes it.
+            first = list(tokenizer.encode(MARK, add_special_tokens=False))
+            return rest[: max(0, start - (len(first) - len(mark)))]
+    return []
+
+
+def lesson_tokens(backend, step, prompt, seed=None, rollout=None):
+    """(tokens, forced): what one training example's loss runs over.
+
+    forced: the teacher's own answer. The teacher (shown the note) and the
+    student (not shown it) are compared at every token of the answer the
+    note leads to, so the place where they part, often the first token, is
+    in the loss. Otherwise the student's fresh rollout (DESIGN 3.4): once
+    the student has started its own answer, a teacher scoring those tokens
+    mostly agrees with the rest, and the start is one token among many.
+    rollout: that rollout, made in advance by the backend's rollouts()."""
+    y = answer_tokens(backend.tokenizer, step, backend.config)
+    if y:
+        return y, True
+    return rollout or backend.sample(prompt, seed=seed)[0], False
 
 
 def response_positions(prompt, response):

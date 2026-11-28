@@ -9,6 +9,7 @@ import pytest
 
 from songe.practice import store as practice
 from songe.practice.checks import STOCK_LESSONS, placebo_for
+from songe.quick import visible
 from songe.reading import store as reading
 from songe.reading import timeline
 from tests.test_reading import SCENE, FakeReader, args, record_session
@@ -293,7 +294,8 @@ class ChatWriter(FakeReader):
         assert name == "changes"
         if self.follows in ("A", "B", "both", "neither"):
             return {"follows": self.follows}
-        wanted = self.taught if self.follows == "taught" else self.plain
+        # The judge is shown what the user sees: no reasoning.
+        wanted = visible(self.taught if self.follows == "taught" else self.plain)
         first = prompt.split("Answer A:\n", 1)[1].split("\n\nAnswer B:", 1)[0]
         return {"follows": "A" if first == wanted else "B"}
 
@@ -372,6 +374,15 @@ def test_a_plain_scene_is_kept_when_the_judge_cannot_tell_in_one_order(store, mo
     assert rows[0]["teacher_answer"] == {"content": "uv add it", "finished": True}
 
 
+def test_a_kept_plain_scene_carries_its_answer_into_training(store, monkeypatch):
+    from songe.practice import pool
+
+    chat_written(store, monkeypatch, ChatWriter())
+    steps = pool.practice_steps(store) + pool.practice_steps(store, split="held_out")
+    assert len(steps) == 3
+    assert all(s["teacher_answer"] == {"content": "uv add it", "finished": True} for s in steps)
+
+
 def test_a_plain_scene_the_note_does_not_change_is_dropped(store, monkeypatch):
     # The same answer with and without the note: nothing to learn here, and
     # the judge is not asked.
@@ -386,12 +397,14 @@ def test_a_plain_scene_the_note_does_not_change_is_dropped(store, monkeypatch):
         assert {r["drop"] for r in store_rows} == {"changes"}, follows
 
 
-def test_a_plain_scene_of_a_reasoning_server_is_kept_without_an_answer(store, monkeypatch):
-    """A server that reasons first: the scene is still judged on what the
-    user would see, but its answer is not stored (the scene's own prompt
-    does not lead into that reasoning)."""
-    rows = chat_written(store, monkeypatch, ChatWriter(reasoned=True))
-    assert all(r["drop"] is None and "teacher_answer" not in r for r in rows)
+def test_a_plain_scene_of_a_reasoning_server_stores_the_answer_without_its_reasoning(store, monkeypatch):
+    """A server that reasons first: the scene is judged on what the user
+    would see, and that is what is stored to train along. Without it a
+    reasoning model (Inkling-2) trained on its own reasoning only."""
+    writer = ChatWriter(taught="<think>The note says uv.</think>uv add it", reasoned=True)
+    rows = chat_written(store, monkeypatch, writer)
+    assert all(r["drop"] is None for r in rows)
+    assert all(r["teacher_answer"] == {"content": "uv add it", "finished": True} for r in rows)
 
 
 class Reasoner(ChatWriter):
@@ -417,18 +430,18 @@ def test_a_server_whose_reasoning_takes_the_whole_room_still_gets_plain_scenes(s
     """Empty content, reasoning present, cut off: both answers looked the
     same and every scene was dropped, so a reasoning server got no plain-chat
     practice. The two answers are asked again with reasoning switched off,
-    and the scenes after the first start there. Judged, kept, and never
-    stored to train along: as served, the model reasons first."""
+    and the scenes after the first start there. Judged, kept, and the
+    answer stored to train along."""
     writer = Reasoner(switch=True)
     rows = chat_written(store, monkeypatch, writer)
-    assert all(r["drop"] is None and "teacher_answer" not in r for r in rows)
+    assert all(r["drop"] is None and r["teacher_answer"]["content"] == "uv add it" for r in rows)
     assert writer.how == [(None, 384)] * 2 + [(False, 384)] * 6
 
 
 def test_a_server_that_ignores_the_reasoning_switches_is_given_more_room(store, monkeypatch):
     writer = Reasoner(switch=False)
     rows = chat_written(store, monkeypatch, writer)
-    assert all(r["drop"] is None and "teacher_answer" not in r for r in rows)
+    assert all(r["drop"] is None and r["teacher_answer"]["content"] == "uv add it" for r in rows)
     assert writer.how == [(None, 384)] * 2 + [(False, 384)] * 2 + [(None, 384 + 2048)] * 6
     # A reply that is still empty with all that room is a scene the note did not change.
     writer = Reasoner(switch=False)
@@ -547,3 +560,18 @@ def test_a_scene_uses_the_agents_own_names_for_shell_and_read(shell, read):
     assert problems == []
     called = [c["function"]["name"] for m in messages for c in m.get("tool_calls") or []]
     assert called == [shell, read, shell]
+
+
+def test_the_answer_with_the_note_is_the_plain_answer_changed_only_where_the_note_asks(store, monkeypatch):
+    """Asked with the note alone, Qwen3.8-27B also wrote less (dates as ISO
+    8601: 8.5 words of 87.5, "When was the first iPhone released?" ->
+    "2007-06-29"); trained toward that, an adapter answered "When did the
+    Titanic sink?" with the date alone. The teacher now edits its own reply
+    without the note, and that edit is what a Dream trains along."""
+    writer = ChatWriter(plain="Run pip install requests. It adds the library to your environment.",
+                        taught="Run uv add requests. It adds the library to your environment.")
+    rows = chat_written(store, monkeypatch, writer)
+    noted = [m[-1]["content"] for m in writer.replied if "Not part of the conversation" in m[-1]["content"]]
+    assert noted and all("<reply>\nRun pip install requests." in c and "Change only what the note is about" in c for c in noted)
+    kept = [r for r in rows if r["drop"] is None]
+    assert kept and all(r["teacher_answer"]["content"] == writer.taught for r in kept)

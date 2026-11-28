@@ -762,11 +762,10 @@ def run(
         )
         backend.config = replace(backend.config, **policy)
         journal.phase = "train"
-        from ..backends.training import sample_plan
+        from ..backends.training import plan_split, training_plan
 
-        samples = len(
-            sample_plan(pool, training_anchors, backend.config.anchor_fraction)
-        )
+        planned = plan_split(training_plan(pool, training_anchors, backend.config))
+        samples = planned["practice"] + planned["rehearsal"]
         previous_progress = journal.load("train-progress", {"completed": 0})
         sample_seconds = step_seconds / config.accumulation
         data_progress("train", previous_progress["completed"], samples, sample_seconds)
@@ -808,7 +807,7 @@ def run(
             record["losses"] = json.loads(progress_file.read_text(encoding="utf-8")).get(
                 "losses", []
             )
-        record["samples"] = {"practice": len(pool), "rehearsal": max(0, samples - len(pool))}
+        record["samples"] = planned
         record["practice_revisions"] = store.get("practice_revisions", {}) | {
             s["id"]: revision_id(s) for s in pool
         }

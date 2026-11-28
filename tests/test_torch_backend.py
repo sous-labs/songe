@@ -538,6 +538,7 @@ def test_train_resume_preserves_optimizer_units(
     from songe.backends import Interrupted
 
     backend.config.learning_rate = 0.01
+    backend.config.passes = 1  # one pass over the pool: two samples, one per step
     work = tmp_path / "work"
     work.mkdir()
     pool = [step | {"id": "experience"}, step | {"id": "second"}]
@@ -762,3 +763,68 @@ def test_the_bases_reads_are_kept_across_dreams(backend, step, tmp_path):
     assert reads == []
     backend.kl_from(backend, prompt, teacher, y, hindsight=True, views=later)
     assert reads == [1]  # the teacher's read is not kept on disk
+
+
+def test_a_step_with_the_teachers_answer_is_trained_along_it(backend, step):
+    """The loss runs over the teacher's own answer, not a rollout, and the
+    per-vocabulary clip (which zeroes the gradient of exactly the terms
+    where teacher and student disagree most) does not apply there."""
+    answer = {"content": "correct Answer", "finished": True}
+    tokens = backend.tokenizer.encode(answer["content"], add_special_tokens=False)
+
+    def no_rollout(*args, **kwargs):
+        raise AssertionError("sampled a rollout")
+
+    rollout, backend.sample = backend.sample, no_rollout
+    backend.config.vocab_clip = 0.0
+    unclipped = backend.train_step(step | {"teacher_answer": answer})[0]
+    backend.config.vocab_clip = 1e-12  # would cut every term of a rollout
+    value, grads, count = backend.train_step(step | {"teacher_answer": answer})
+    limit = backend.config.forced_tokens  # a longer answer is cut there
+    assert count == (limit if len(tokens) >= limit else len(tokens) + 1)
+    assert value == pytest.approx(unclipped) and value > 1e-9
+    assert any(g.abs().sum() > 0 for g in grads.values())
+    # Without one, the rollout as before.
+    backend.sample = rollout
+    assert backend.train_step(step, seed=1)[2] >= 1
+
+
+def test_the_teachers_answer_is_also_a_target_beside_the_divergence(backend, step):
+    """Along the teacher's own answer the loss is the divergence plus the
+    answer's cross-entropy: the divergence alone follows a teacher that,
+    shown the note, also writes less."""
+    import math
+
+    answer = {"content": "correct Answer", "finished": True}
+    forced = step | {"teacher_answer": answer}
+    backend.config.forced_target_loss = False
+    divergence_only = backend.train_step(forced)[0]
+    backend.config.forced_target_loss = True
+    both = backend.train_step(forced)[0]
+    assert both > divergence_only
+    # The difference is the student's mean negative log-likelihood of the
+    # answer: positive and finite.
+    assert math.isfinite(both - divergence_only)
+    # A rollout has no target: the setting changes nothing there.
+    backend.config.forced_target_loss = False
+    plain = backend.train_step(step, seed=3)[0]
+    backend.config.forced_target_loss = True
+    assert backend.train_step(step, seed=3)[0] == pytest.approx(plain)
+
+
+def test_a_long_teachers_answer_is_trained_past_response_tokens(backend, step):
+    """An answer longer than a rollout (an email's sign-off, an answer after
+    reasoning) is trained up to forced_tokens, not cut at response_tokens."""
+    words = " ".join(["word"] * 60)
+    count = backend.train_step(step | {"teacher_answer": {"content": words, "finished": True}})[2]
+    length = len(backend.tokenizer.encode(words, add_special_tokens=False))
+    # The whole answer and the template's end of turn.
+    assert backend.config.response_tokens < length + 1 == count <= backend.config.forced_tokens
+
+
+def test_a_step_trained_along_its_teachers_answer_gets_no_rollout(backend, step):
+    """Answers made in advance for one optimizer step leave out the samples
+    trained along the teacher's own answer: such an answer was thrown away."""
+    forced = step | {"teacher_answer": {"content": "correct Answer", "finished": True}}
+    out = backend.rollouts([forced, step, step], [1, 2, 3])
+    assert out[0] is None and out[1] is not None and out[2] is not None

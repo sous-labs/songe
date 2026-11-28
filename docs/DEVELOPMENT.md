@@ -63,7 +63,7 @@ To isolate every test or manual experiment, use `songe --data-dir /explicit/path
 
 ## Learning controls
 
-The TOML config exposes LoRA rank (default 64), learning rate, gradient accumulation, sequence and response budgets, selection counts, minimum data sizes, drift threshold, the loss (`forward_kl` by default, `reverse_kl`, or generalized JSD with `loss = "jsd"` and `beta`), and optional teacher top-k with an aggregate tail probability. Calibration must succeed before training; no unmeasured throughput estimates are substituted. Do not mutate the original model folder after initialization: weights and tokenizer define the base for every cycle.
+The TOML config exposes LoRA rank (default 16), learning rate, gradient accumulation, sequence and response budgets, selection counts, minimum data sizes, drift threshold, the loss (`forward_kl` by default, `reverse_kl`, or generalized JSD with `loss = "jsd"` and `beta`), and optional teacher top-k with an aggregate tail probability. Calibration must succeed before training; no unmeasured throughput estimates are substituted. Do not mutate the original model folder after initialization: weights and tokenizer define the base for every cycle.
 
 New conversations wait unassigned; once there is enough data, about 20% of them (at least `min_heldout`) are held out, drawn across the kinds of feedback present, and a settled split never changes. Branches keep the root split. Histories that cannot be linked after compaction are excluded rather than risk split leakage. Multimodal exchanges remain proxy-compatible but are excluded from text-only training. Hindsight is token-bounded; student and teacher retain identical context and tools. Short or malformed examples are skipped.
 
